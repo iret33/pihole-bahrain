@@ -1,3 +1,29 @@
+# Pi-hole Web — Parental Controls fork (`pihole-bahrain`)
+
+A private fork of [Pi-hole's web interface](https://github.com/pi-hole/web) that
+adds a **parent-friendly control page at `/`** while leaving the original
+dashboard untouched at `/admin`.
+
+## One-line install
+
+```bash
+curl -sSL https://raw.githubusercontent.com/iret33/pihole-bahrain/master/install.sh | sudo bash
+```
+
+## What it adds
+
+- **`/`** — a clean page to assign a kid's device, toggle services
+  (YouTube, TikTok, Roblox, …) on/off, pause a single device, and block the
+  entire internet with one tap.
+- **`/admin`** — the original Pi-hole dashboard, unchanged.
+- **Same password** — the page signs in with the Pi-hole **admin password**
+  (identical to the dashboard login); no separate PIN.
+
+The installer enables `webserver.serve_all`, drops a static `index.html` at the
+web root, and restarts FTL. It backs up `pihole.toml` before editing it.
+
+---
+
 <div align="center">
   <a href="https://pi-hole.net/">
     <img src="https://pi-hole.github.io/graphics/Vortex/vortex_with_text.svg" width="144" height="256" alt="Pi-hole website">

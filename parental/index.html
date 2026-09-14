@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Parental Controls</title>
+<link rel="stylesheet" href="/parental/style.css">
+</head>
+<body>
+
+<div id="login" class="login">
+  <div class="loginbox">
+    <h1>👪 Parental Controls</h1>
+    <p class="sub">Enter the Pi-hole admin password to continue.</p>
+    <input type="password" id="pw" placeholder="Admin password" autocomplete="current-password" autofocus>
+    <button id="loginBtn">Sign in</button>
+    <div class="err" id="loginErr"></div>
+  </div>
+</div>
+
+<div id="app" class="wrap hidden">
+  <header>
+    <h1>👪 Parental Controls</h1>
+    <span class="pill" id="status">…</span>
+  </header>
+  <p class="sub">Blocking runs on your home Pi-hole. Changes apply in a few seconds.</p>
+
+  <div class="card">
+    <h2>👧 Kid devices</h2>
+    <div id="kids"></div>
+    <div class="row">
+      <select id="devpick" onchange="pick(this.value)" style="flex:1;min-width:170px"></select>
+    </div>
+    <div class="row">
+      <input id="devip" placeholder="Device IP, e.g. 192.168.1.42" autocomplete="off">
+      <input id="devname" placeholder="Name (optional)" style="max-width:180px" autocomplete="off">
+      <button class="pri" id="addBtn">Add</button>
+    </div>
+    <p class="hint">Open this page on the kid's device to see it listed, then add its IP.</p>
+  </div>
+
+  <div class="card">
+    <h2>⚡ One tap</h2>
+    <div class="presets">
+      <button class="preset" data-p="homework"><b>📚 Homework</b><small>Block games, video &amp; social. Keep chat + ChatGPT.</small></button>
+      <button class="preset" data-p="bedtime"><b>🌙 Bedtime</b><small>Block the whole internet for everyone.</small></button>
+      <button class="preset" data-p="free"><b>🎉 Free time</b><small>Unblock everything.</small></button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>🚫 Block these services <span class="pill" id="svcCount"></span></h2>
+    <div id="svcs"></div>
+    <p class="hint">Applies to the kid devices listed above.</p>
+  </div>
+
+  <div class="card">
+    <div class="big" id="bigwrap">
+      <div>
+        <div class="t" id="killtitle">⏸️ Block the entire internet</div>
+        <div class="d">Stops all browsing for every device using this Pi-hole.</div>
+      </div>
+      <button class="bigbtn" id="kill">Block all</button>
+    </div>
+  </div>
+
+  <p class="sub" id="foot"></p>
+</div>
+
+<div id="toast"></div>
+<script src="/parental/app.js"></script>
+</body>
+</html>
