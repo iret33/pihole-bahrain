@@ -16,7 +16,7 @@ module.exports = defineConfig([
     },
     prettier: true,
     space: 2,
-    ignores: ["**/vendor/**"],
+    ignores: ["**/vendor/**", "parental/**"],
     rules: {
       "@stylistic/spaced-comment": "off",
       camelcase: [
