@@ -224,8 +224,8 @@
       var nm = esc(d.comment || d.client);
       return '<div class="kid"><div><div class="name">' + nm + (d.locked ? ' <span class="tag paused">paused</span>' : '') +
         '</div><div class="meta">' + esc(d.client) + '</div></div><div style="display:flex;gap:8px">' +
-        '<button onclick="window.PC.lock(\'' + esc(d.client) + '\',' + (!d.locked) + ')">' + (d.locked ? '\u25B6\uFE0F Resume' : '\u23F8\uFE0F Pause') + '</button>' +
-        '<button class="danger" onclick="window.PC.rm(\'' + esc(d.client) + '\')">Remove</button></div></div>';
+        '<button data-act="lock" data-client="' + esc(d.client) + '" data-want="' + (!d.locked) + '">' + (d.locked ? '\u25B6\uFE0F Resume' : '\u23F8\uFE0F Pause') + '</button>' +
+        '<button class="danger" data-act="rm" data-client="' + esc(d.client) + '">Remove</button></div></div>';
     }).join('') : '<div style="color:var(--dim);padding:4px 0">No devices yet &mdash; nothing is filtered.</div>';
 
     var by = {}; S.services.forEach(function (s) { by[s.comment] = s; });
@@ -238,7 +238,7 @@
         var s = by[n], m = S.meta[n] || ['\u2022', n];
         html += '<div class="svc"><span>' + m[0] + ' ' + esc(m[1]) + '</span>' +
           '<button class="sw ' + (s.enabled ? 'on' : '') + '" title="' + (s.enabled ? 'Blocked' : 'Allowed') + '" ' +
-          'onclick="window.PC.toggle(\'' + esc(s.comment) + '\',' + (!s.enabled) + ')"></button></div>';
+          'data-act="toggle" data-comment="' + esc(s.comment) + '" data-want="' + (!s.enabled) + '"></button></div>';
       });
       html += '</div>';
     });
@@ -306,6 +306,16 @@
   $('addBtn').addEventListener('click', function () { window.PC.add(); });
   $('kill').addEventListener('click', function () { window.PC.kill(); });
   $('devip').addEventListener('keydown', function (e) { if (e.key === 'Enter') window.PC.add(); });
+
+  // CSP-safe event delegation (script-src 'self' blocks inline onclick)
+  document.addEventListener('click', function (e) {
+    var el = e.target && e.target.closest ? e.target.closest('[data-act]') : null;
+    if (!el) return;
+    var act = el.getAttribute('data-act');
+    if (act === 'toggle') window.PC.toggle(el.getAttribute('data-comment'), el.getAttribute('data-want') === 'true');
+    else if (act === 'lock') window.PC.lock(el.getAttribute('data-client'), el.getAttribute('data-want') === 'true');
+    else if (act === 'rm') window.PC.rm(el.getAttribute('data-client'));
+  });
 
   $('loginBtn').addEventListener('click', function () { doLogin(); });
   $('pw').addEventListener('keydown', function (e) { if (e.key === 'Enter') doLogin(); });
