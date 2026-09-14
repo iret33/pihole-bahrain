@@ -6,6 +6,9 @@ const compatPlugin = require("eslint-plugin-compat");
 
 module.exports = defineConfig([
   {
+    ignores: ["**/vendor/**", "parental/**"],
+  },
+  {
     extends: [compatPlugin.configs["flat/recommended"]],
     languageOptions: {
       sourceType: "script",
@@ -16,7 +19,6 @@ module.exports = defineConfig([
     },
     prettier: true,
     space: 2,
-    ignores: ["**/vendor/**", "parental/**"],
     rules: {
       "@stylistic/spaced-comment": "off",
       camelcase: [
