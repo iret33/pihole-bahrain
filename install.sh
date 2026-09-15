@@ -1,20 +1,32 @@
 #!/usr/bin/env bash
-# One-line installer for the Pi-hole Parental Controls fork (pihole-bahrain).
+# Pi-hole Parental Controls installer (pihole-bahrain).
+#
+# The repo is PRIVATE, so there is no public raw-URL one-liner. Run from a
+# checkout instead:
+#
+#   git clone https://github.com/iret33/pihole-bahrain.git
+#   cd pihole-bahrain
+#   sudo bash install.sh
 #
 # - Installs Pi-hole first if it is not already present (unattended defaults).
 # - Serves a password-protected parent page at "/" while leaving the original
 #   dashboard untouched at /admin. The page authenticates with the SAME password
 #   as the Pi-hole admin (via /api/auth), so there is no separate PIN.
-#
-# Usage:
-#   curl -sSL https://raw.githubusercontent.com/iret33/pihole-bahrain/master/install.sh | sudo bash
+# - Installs the 16 parental-control block lists (file-based, from this checkout).
 set -euo pipefail
 
-REPO_RAW="https://raw.githubusercontent.com/iret33/pihole-bahrain/master"
 TOML="/etc/pihole/pihole.toml"
+
+# Resolve this checkout's directory (works under `sudo`).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "This installer needs root. Re-run with: sudo bash install.sh" >&2
+  exit 1
+fi
+
+if [ ! -d "$SCRIPT_DIR/parental" ] || [ ! -d "$SCRIPT_DIR/lists" ]; then
+  echo "ERROR: run this from the repo checkout (parental/ and lists/ must sit next to install.sh)." >&2
   exit 1
 fi
 
@@ -37,11 +49,11 @@ WEBROOT="$(grep -E '^\s*webroot\s*=' "$TOML" 2>/dev/null | head -1 | sed -E 's/.
 [ -n "$WEBROOT" ] || WEBROOT="/var/www/html"
 echo "webroot: $WEBROOT"
 
-# 2. Fetch the parent page (index at the root, assets under /parental/)
+# 2. Install the parent page from this checkout (index at "/", assets under /parental/).
 mkdir -p "$WEBROOT/parental"
-curl -fsSL "$REPO_RAW/parental/index.html" -o "$WEBROOT/index.html"
-curl -fsSL "$REPO_RAW/parental/app.js"     -o "$WEBROOT/parental/app.js"
-curl -fsSL "$REPO_RAW/parental/style.css"  -o "$WEBROOT/parental/style.css"
+cp "$SCRIPT_DIR/parental/index.html" "$WEBROOT/index.html"
+cp "$SCRIPT_DIR/parental/app.js"     "$WEBROOT/parental/app.js"
+cp "$SCRIPT_DIR/parental/style.css"  "$WEBROOT/parental/style.css"
 chmod 644 "$WEBROOT/index.html" "$WEBROOT/parental/app.js" "$WEBROOT/parental/style.css"
 echo "installed page files"
 
@@ -63,12 +75,10 @@ if command -v systemctl >/dev/null 2>&1; then systemctl restart pihole-FTL 2>/de
 if command -v service >/dev/null 2>&1; then service pihole-FTL restart 2>/dev/null || true; fi
 echo "restarted pihole-FTL"
 
-# 5. Register the parental-control block lists (URL-based; updated from this repo).
+# 5. Install the block lists (file-based; update via `git pull` + re-run).
 #    Wait briefly for FTL's API to come up after the restart.
 for _ in $(seq 1 15); do curl -sk -o /dev/null https://127.0.0.1/api/info/version && break; sleep 1; done
-curl -fsSL "$REPO_RAW/lists/register.sh" -o /tmp/pihole-register-lists.sh
-bash /tmp/pihole-register-lists.sh
-rm -f /tmp/pihole-register-lists.sh
+bash "$SCRIPT_DIR/lists/register.sh" "$SCRIPT_DIR/lists"
 
 echo
 echo "Done. Open https://<pihole-ip>/ and sign in with the admin password."

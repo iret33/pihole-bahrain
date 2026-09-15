@@ -4,10 +4,22 @@ A private fork of [Pi-hole's web interface](https://github.com/pi-hole/web) that
 adds a **parent-friendly control page at `/`** while leaving the original
 dashboard untouched at `/admin`.
 
-## One-line install
+## Install
+
+The repo is **private**, so there is no public raw-URL one-liner. Install from a
+checkout instead (Pi-hole is auto-installed if missing):
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/iret33/pihole-bahrain/master/install.sh | sudo bash
+git clone https://github.com/iret33/pihole-bahrain.git
+cd pihole-bahrain
+sudo bash install.sh
+```
+
+To pull updated block lists later:
+
+```bash
+git pull
+sudo bash install.sh   # or: sudo bash lists/register.sh lists
 ```
 
 ## What it adds

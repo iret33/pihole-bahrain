@@ -22,20 +22,26 @@
 | `xbox.txt` | Xbox |
 | `youtube.txt` | YouTube |
 
-## How updates flow to installs
+## How it works
 
-These lists are registered on each Pi-hole as **URL-based adlists** pointing at
-this repo's raw URLs (`https://raw.githubusercontent.com/iret33/pihole-bahrain/master/lists/<name>.txt`).
+The repo is **private**, so installs use **file-based** lists (not public raw
+URLs — nothing to leak, and no tokens stored anywhere).
 
-Pi-hole re-fetches URL adlists on every gravity run (weekly by default). So to
-push an update to every install:
+`register.sh` copies these `*.txt` files into `/etc/pihole/lists/` and registers
+each as a `file://` blocklist in the **Kids** group, then runs gravity.
 
-1. Edit the relevant `*.txt` here (commit + push to `master`).
-2. Each install picks it up on its next gravity run — or force it immediately on
-   a given Pi-hole with `pihole -g`.
+## Updating the lists
 
-> **Note:** the repo must be **public** for the raw URLs to resolve. A private
-> repo returns 404 and the lists will not download.
+1. Edit the relevant `*.txt` here and commit + push to `master`.
+2. On each Pi-hole, pull and re-register:
+
+   ```bash
+   git pull
+   sudo bash lists/register.sh lists
+   ```
+
+`register.sh` is idempotent — re-running it refreshes the files, skips already-
+registered lists, and rebuilds gravity.
 
 ## Fresh install
 
@@ -43,10 +49,9 @@ push an update to every install:
 runs `lists/register.sh`, which:
 
 1. creates a **Kids** group (the service lists are scoped to it),
-2. registers all 16 lists as URL-based block lists in that group,
+2. copies the 16 lists into `/etc/pihole/lists/` and registers them as `file://`
+   block lists in that group,
 3. triggers a gravity run.
-
-`register.sh` is idempotent — re-run it anytime to (re)register the lists.
 
 ## Format
 
