@@ -1,0 +1,8 @@
+||aem.playstation.com.ssl.d1.sc.omtrdc.net^
+||api-p014.ribob01.net^
+||apicdn-p014.ribob01.net^
+||artcdnsecure.ribob01.net^
+||playstation.com^
+||playstation.net^
+||scea.com^
+||sonyentertainmentnetwork.com^

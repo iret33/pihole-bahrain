@@ -1,0 +1,11 @@
+||accountkit.com^
+||facebook.com^
+||facebook.net^
+||facebookcorewwwi.onion^
+||fb.com^
+||fb.me^
+||fb.watch^
+||fbcdn.com^
+||fbcdn.net^
+||fbsbx.com^
+||messenger.com^
