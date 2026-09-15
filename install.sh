@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # One-line installer for the Pi-hole Parental Controls fork (pihole-bahrain).
 #
-# Serves a password-protected parent page at "/" while leaving the original
-# dashboard untouched at /admin. The page authenticates with the SAME password
-# as the Pi-hole admin (via /api/auth), so there is no separate PIN.
+# - Installs Pi-hole first if it is not already present (unattended defaults).
+# - Serves a password-protected parent page at "/" while leaving the original
+#   dashboard untouched at /admin. The page authenticates with the SAME password
+#   as the Pi-hole admin (via /api/auth), so there is no separate PIN.
 #
 # Usage:
 #   curl -sSL https://raw.githubusercontent.com/iret33/pihole-bahrain/master/install.sh | sudo bash
@@ -14,6 +15,20 @@ TOML="/etc/pihole/pihole.toml"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "This installer needs root. Re-run with: sudo bash install.sh" >&2
+  exit 1
+fi
+
+# 0. Install Pi-hole first if it is not already present.
+if [ -f "$TOML" ]; then
+  echo "Pi-hole already installed — skipping install."
+else
+  echo "Pi-hole not detected — installing Pi-hole (unattended) ..."
+  curl -sSL https://install.pi-hole.net | bash -s -- --unattended
+fi
+
+# Verify Pi-hole config now exists.
+if [ ! -f "$TOML" ]; then
+  echo "ERROR: Pi-hole install did not produce $TOML. Aborting." >&2
   exit 1
 fi
 
@@ -50,4 +65,6 @@ echo "restarted pihole-FTL"
 
 echo
 echo "Done. Open https://<pihole-ip>/ and sign in with the admin password."
+echo "  (If Pi-hole was just installed, the admin password was generated and"
+echo "   printed above; set a known one with: pihole setpassword)"
 echo "The original dashboard is still at /admin."
