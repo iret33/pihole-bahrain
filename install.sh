@@ -63,6 +63,13 @@ if command -v systemctl >/dev/null 2>&1; then systemctl restart pihole-FTL 2>/de
 if command -v service >/dev/null 2>&1; then service pihole-FTL restart 2>/dev/null || true; fi
 echo "restarted pihole-FTL"
 
+# 5. Register the parental-control block lists (URL-based; updated from this repo).
+#    Wait briefly for FTL's API to come up after the restart.
+for _ in $(seq 1 15); do curl -sk -o /dev/null https://127.0.0.1/api/info/version && break; sleep 1; done
+curl -fsSL "$REPO_RAW/lists/register.sh" -o /tmp/pihole-register-lists.sh
+bash /tmp/pihole-register-lists.sh
+rm -f /tmp/pihole-register-lists.sh
+
 echo
 echo "Done. Open https://<pihole-ip>/ and sign in with the admin password."
 echo "  (If Pi-hole was just installed, the admin password was generated and"
