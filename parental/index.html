@@ -10,7 +10,7 @@
 
 <div id="login" class="login">
   <div class="loginbox">
-    <h1>👪 Parental Controls</h1>
+    <h1><span class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span>Parental Controls</h1>
     <p class="sub">Enter the Pi-hole admin password to continue.</p>
     <input type="password" id="pw" placeholder="Admin password" autocomplete="current-password" autofocus>
     <button id="loginBtn">Sign in</button>
@@ -20,13 +20,13 @@
 
 <div id="app" class="wrap hidden">
   <header>
-    <h1>👪 Parental Controls</h1>
+    <h1><span class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span>Parental Controls</h1>
     <span class="pill" id="status">…</span>
   </header>
   <p class="sub">Blocking runs on your home Pi-hole. Changes apply in a few seconds.</p>
 
   <div class="card">
-    <h2>👧 Kid devices</h2>
+    <h2>Kid devices</h2>
     <div id="kids"></div>
     <div class="row">
       <select id="devpick" onchange="pick(this.value)" style="flex:1;min-width:170px"></select>
@@ -40,16 +40,16 @@
   </div>
 
   <div class="card">
-    <h2>⚡ One tap</h2>
+    <h2>One tap</h2>
     <div class="presets">
-      <button class="preset" data-p="homework"><b>📚 Homework</b><small>Block games, video &amp; social. Keep chat + ChatGPT.</small></button>
-      <button class="preset" data-p="bedtime"><b>🌙 Bedtime</b><small>Block the whole internet for everyone.</small></button>
-      <button class="preset" data-p="free"><b>🎉 Free time</b><small>Unblock everything.</small></button>
+      <button class="preset" data-p="homework"><b>Homework</b><small>Block games, video &amp; social. Keep chat + ChatGPT.</small></button>
+      <button class="preset" data-p="bedtime"><b>Bedtime</b><small>Block the whole internet for everyone.</small></button>
+      <button class="preset" data-p="free"><b>Free time</b><small>Unblock everything.</small></button>
     </div>
   </div>
 
   <div class="card">
-    <h2>🚫 Block these services <span class="pill" id="svcCount"></span></h2>
+    <h2>Block these services <span class="pill" id="svcCount"></span></h2>
     <div id="svcs"></div>
     <p class="hint">Applies to the kid devices listed above.</p>
   </div>
@@ -57,7 +57,7 @@
   <div class="card">
     <div class="big" id="bigwrap">
       <div>
-        <div class="t" id="killtitle">⏸️ Block the entire internet</div>
+        <div class="t" id="killtitle">Block the entire internet</div>
         <div class="d">Stops all browsing for every device using this Pi-hole.</div>
       </div>
       <button class="bigbtn" id="kill">Block all</button>
