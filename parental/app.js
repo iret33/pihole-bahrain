@@ -313,23 +313,24 @@ var ICONS={
   function fmtDur(sec) {
     sec = Math.max(0, Math.floor(sec));
     var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
-    if (h) return h + 'h ' + m + 'm';
-    if (m) return m + 'm ' + s + 's';
-    return s + 's';
+    var p = function (n) { return String(n).padStart(2, '0'); };
+    return h > 0 ? (h + ':' + p(m) + ':' + p(s)) : (p(m) + ':' + p(s));
   }
   function timerExpires() {
     try { var t = JSON.parse(localStorage.getItem(TIMER_KEY) || 'null'); return (t && t.expires) ? t.expires : null; }
     catch (e) { return null; }
   }
   function renderTimer(leftMs) {
-    var cancel = $('timerCancel'), status = $('timerStatus');
+    var cancel = $('timerCancel'), status = $('timerStatus'), count = $('timerCount');
     if (!cancel || !status) return;
     if (leftMs === null || leftMs === undefined) {
       cancel.style.display = 'none';
+      if (count) count.style.display = 'none';
       status.textContent = 'Unblocks everything, then re-blocks when the timer ends.';
     } else {
       cancel.style.display = '';
-      status.textContent = 'Free time active — ' + fmtDur(leftMs / 1000) + ' left, then everything re-blocks.';
+      if (count) { count.style.display = ''; count.textContent = fmtDur(leftMs / 1000); }
+      status.textContent = 'Free time active — re-blocks when the timer ends.';
     }
   }
   function scheduleTimer() {
