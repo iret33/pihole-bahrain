@@ -240,6 +240,8 @@ var ICONS={
     if (name === 'bedtime') return setKill(true).then(function () { return restart(); });
     return Promise.reject(new Error('unknown preset'));
   }
+  function freeTime() { return apply(Object.keys(SERVICE_META).map(function (c) { return [c, false]; }), false); }
+  function blockAll() { return apply(Object.keys(SERVICE_META).map(function (c) { return [c, true]; }), false); }
 
   // ---- render ----
   function render() {
@@ -306,6 +308,48 @@ var ICONS={
       .then(function () { BUSY = false; document.querySelectorAll('.busy').forEach(function (b) { b.classList.remove('busy'); }); return loadState(); });
   }
 
+  var TIMER_KEY = 'pihole_bahrain_timer';
+  var timerTick = null;
+  function fmtDur(sec) {
+    sec = Math.max(0, Math.floor(sec));
+    var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    if (h) return h + 'h ' + m + 'm';
+    if (m) return m + 'm ' + s + 's';
+    return s + 's';
+  }
+  function timerExpires() {
+    try { var t = JSON.parse(localStorage.getItem(TIMER_KEY) || 'null'); return (t && t.expires) ? t.expires : null; }
+    catch (e) { return null; }
+  }
+  function renderTimer(leftMs) {
+    var cancel = $('timerCancel'), status = $('timerStatus');
+    if (!cancel || !status) return;
+    if (leftMs === null || leftMs === undefined) {
+      cancel.style.display = 'none';
+      status.textContent = 'Unblocks everything, then re-blocks when the timer ends.';
+    } else {
+      cancel.style.display = '';
+      status.textContent = 'Free time active — ' + fmtDur(leftMs / 1000) + ' left, then everything re-blocks.';
+    }
+  }
+  function scheduleTimer() {
+    clearInterval(timerTick);
+    var exp = timerExpires();
+    if (!exp) { renderTimer(null); return; }
+    function upd() {
+      var left = exp - Date.now();
+      if (left <= 0) {
+        clearInterval(timerTick);
+        localStorage.removeItem(TIMER_KEY);
+        blockAll().then(function () { return loadState(); }).catch(function () {});
+        return;
+      }
+      renderTimer(left);
+    }
+    upd();
+    timerTick = setInterval(upd, 1000);
+  }
+
   // ---- wiring ----
   window.PC = {
     toggle: function (n, w) { withBusy(function () { return setList(n, w); }, (w ? 'Blocked ' : 'Allowed ') + n); },
@@ -321,6 +365,27 @@ var ICONS={
       var want = !S.kill.enabled;
       if (want && !confirm('Block the internet for EVERYONE using this Pi-hole?')) return;
       withBusy(function () { return setKill(want).then(function () { return restart(); }); }, want ? 'Internet blocked' : 'Internet unblocked');
+    },
+    timer: function (h) {
+      withBusy(function () {
+        return freeTime().then(function () {
+          localStorage.setItem(TIMER_KEY, JSON.stringify({ expires: Date.now() + h * 3600000 }));
+          scheduleTimer();
+        });
+      }, 'Free time for ' + h + ' hour' + (h === 1 ? '' : 's'));
+    },
+    timerCustom: function () {
+      var h = parseFloat($('timerHours').value);
+      if (!(h > 0)) { toast('Enter the number of hours'); return; }
+      window.PC.timer(h);
+    },
+    timerCancel: function () {
+      withBusy(function () {
+        return blockAll().then(function () {
+          localStorage.removeItem(TIMER_KEY);
+          scheduleTimer();
+        });
+      }, 'Timer cancelled — blocked again');
     }
   };
 
@@ -339,6 +404,9 @@ var ICONS={
     if (act === 'toggle') window.PC.toggle(el.getAttribute('data-comment'), el.getAttribute('data-want') === 'true');
     else if (act === 'lock') window.PC.lock(el.getAttribute('data-client'), el.getAttribute('data-want') === 'true');
     else if (act === 'rm') window.PC.rm(el.getAttribute('data-client'));
+    else if (act === 'timer-set') window.PC.timer(parseFloat(el.getAttribute('data-hours')));
+    else if (act === 'timer-custom') window.PC.timerCustom();
+    else if (act === 'timer-cancel') window.PC.timerCancel();
   });
 
   $('loginBtn').addEventListener('click', function () { doLogin(); });
@@ -348,7 +416,7 @@ var ICONS={
     $('loginErr').textContent = '';
     $('loginBtn').disabled = true;
     tryLogin(pw).then(function (ok) {
-      if (ok) { $('pw').value = ''; showApp(); return loadState(); }
+      if (ok) { $('pw').value = ''; showApp(); scheduleTimer(); return loadState(); }
       $('loginErr').textContent = 'Wrong password.';
     }).catch(function (e) { $('loginErr').textContent = 'Error: ' + e.message; })
       .then(function () { $('loginBtn').disabled = false; });
@@ -356,7 +424,7 @@ var ICONS={
 
   // boot
   if (SID) {
-    api('GET', '/api/info/version').then(function () { showApp(); return loadState(); })
+    api('GET', '/api/info/version').then(function () { showApp(); scheduleTimer(); return loadState(); })
       .catch(function () { showLogin(); });
   } else {
     showLogin();
