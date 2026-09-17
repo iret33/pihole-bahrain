@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#0F766E">
+<meta name="robots" content="noindex">
+<meta name="generator" content="pihole-bahrain">
+<title>Family Internet</title>
+<link rel="stylesheet" href="/pb/style.css">
+<link rel="manifest" href="/pb/manifest.json">
+<script src="/pb/app.js" defer></script>
+</head>
+<body>
+
+<svg width="0" height="0" class="sprite" aria-hidden="true">
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11.5 12 5l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5h-5v5H5a1 1 0 0 1-1-1z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M19.5 14.6A7.5 7.5 0 0 1 9.4 4.5a7.5 7.5 0 1 0 10.1 10.1z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+  <symbol id="i-book" viewBox="0 0 24 24"><path d="M5 5.5A1.5 1.5 0 0 1 6.5 4H19v14H6.5A1.5 1.5 0 0 0 5 19.5zm0 14A1.5 1.5 0 0 0 6.5 21H19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m10.2 8.8 5 3.2-5 3.2z" fill="currentColor"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M6 18 18 6" stroke="currentColor" stroke-width="1.8"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-device" viewBox="0 0 24 24"><rect x="7" y="3" width="10" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M11 18h2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 6v12M15 6v12" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+</svg>
+
+<main id="login" class="login" hidden>
+  <form id="loginForm" class="login-card" novalidate>
+    <span class="brand-mark"><svg><use href="#i-home"/></svg></span>
+    <h1 data-i18n="appName">Family Internet</h1>
+    <p class="muted" data-i18n="loginHint">Sign in with the parent password chosen during setup.</p>
+    <label class="field">
+      <span data-i18n="password">Password</span>
+      <input type="password" id="pw" autocomplete="current-password" required>
+    </label>
+    <label class="field" id="totpField" hidden>
+      <span data-i18n="totp">6-digit code from your authenticator app</span>
+      <input type="text" id="totp" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code">
+    </label>
+    <p class="form-error" id="loginErr" role="alert"></p>
+    <button type="submit" class="btn btn-primary btn-wide" id="loginBtn" data-i18n="signIn">Sign in</button>
+    <button type="button" class="link lang-toggle" data-act="lang">العربية</button>
+  </form>
+</main>
+
+<div id="app" class="app" hidden>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark"><svg><use href="#i-home"/></svg></span><span data-i18n="appName">Family Internet</span></div>
+    <div class="topbar-actions">
+      <button type="button" class="link lang-toggle" data-act="lang">العربية</button>
+      <button type="button" class="link" data-act="logout" data-i18n="signOut">Sign out</button>
+    </div>
+  </header>
+
+  <section class="hero" id="hero" aria-live="polite">
+    <p class="hero-kicker" id="heroKicker"></p>
+    <h1 class="hero-title" id="heroTitle"></h1>
+    <p class="hero-clock" id="heroClock" hidden></p>
+    <p class="hero-sub" id="heroSub"></p>
+    <div class="hero-actions">
+      <button type="button" class="btn btn-hero" id="heroBtn" data-act="hero"></button>
+    </div>
+  </section>
+
+  <p class="banner" id="banner" role="status" hidden></p>
+
+  <section class="block" aria-labelledby="modesTitle">
+    <h2 id="modesTitle" data-i18n="modes">Quick modes</h2>
+    <div class="modes">
+      <button type="button" class="mode" data-act="homework">
+        <svg><use href="#i-book"/></svg>
+        <span class="mode-name" data-i18n="homework">Homework</span>
+        <span class="mode-desc" data-i18n="homeworkDesc">Games, video and social media blocked</span>
+      </button>
+      <button type="button" class="mode" data-act="timer" data-mode="free">
+        <svg><use href="#i-play"/></svg>
+        <span class="mode-name" data-i18n="freeTime">Free time</span>
+        <span class="mode-desc" data-i18n="freeTimeDesc">Everything allowed for a while</span>
+      </button>
+      <button type="button" class="mode" data-act="timer" data-mode="block">
+        <svg><use href="#i-stop"/></svg>
+        <span class="mode-name" data-i18n="breakTime">Offline break</span>
+        <span class="mode-desc" data-i18n="breakTimeDesc">Internet off for a while</span>
+      </button>
+    </div>
+  </section>
+
+  <section class="block" aria-labelledby="svcTitle">
+    <div class="block-head">
+      <h2 id="svcTitle" data-i18n="apps">Apps and sites</h2>
+      <div class="block-head-actions">
+        <button type="button" class="link" data-act="allowAll" data-i18n="allowAll">Allow all</button>
+        <button type="button" class="link" data-act="blockAll" data-i18n="blockAll">Block all</button>
+      </div>
+    </div>
+    <p class="muted small" id="svcNote" data-i18n="svcNote">Tap to block or allow. Apps that are already open can take a few minutes to stop.</p>
+    <div id="services"></div>
+  </section>
+
+  <section class="block" aria-labelledby="devTitle">
+    <div class="block-head">
+      <h2 id="devTitle" data-i18n="devices">Children's devices</h2>
+      <button type="button" class="btn btn-small" data-act="openAdd"><svg><use href="#i-plus"/></svg><span data-i18n="addDevice">Add device</span></button>
+    </div>
+    <ul class="devices" id="devices"></ul>
+  </section>
+
+  <section class="block" aria-labelledby="bedTitle">
+    <div class="block-head">
+      <h2 id="bedTitle" data-i18n="bedtime">Bedtime</h2>
+      <label class="switch">
+        <input type="checkbox" id="bedOn">
+        <span class="switch-ui" aria-hidden="true"></span>
+        <span class="sr-only" data-i18n="bedtimeOn">Turn on bedtime</span>
+      </label>
+    </div>
+    <p class="muted small" data-i18n="bedtimeDesc">Internet turns off for children's devices on these nights, and back on in the morning.</p>
+    <div id="bedFields" class="bed-fields">
+    <div class="bed-grid">
+      <label class="field"><span data-i18n="from">Off at</span><input type="time" id="bedStart" required></label>
+      <label class="field"><span data-i18n="until">On at</span><input type="time" id="bedEnd" required></label>
+    </div>
+    <fieldset class="days" id="bedDays">
+      <legend class="small muted" data-i18n="nights">Nights</legend>
+    </fieldset>
+    </div>
+    <button type="button" class="btn btn-primary" data-act="saveBed" data-i18n="saveBedtime">Save bedtime</button>
+  </section>
+
+  <details class="help" id="help">
+    <summary data-i18n="helpTitle">Setup help</summary>
+    <p id="helpBody"></p>
+  </details>
+
+  <footer class="foot">
+    <a href="/admin/" data-i18n="advanced">Advanced settings</a>
+    <span id="version"></span>
+  </footer>
+</div>
+
+<dialog id="timerDialog" class="sheet" aria-labelledby="timerTitle">
+  <form method="dialog" class="sheet-body" id="timerForm">
+    <div class="sheet-head">
+      <h2 id="timerTitle"></h2>
+      <button type="submit" value="cancel" class="icon-btn" formnovalidate><svg><use href="#i-close"/></svg><span class="sr-only" data-i18n="close">Close</span></button>
+    </div>
+    <p class="muted" id="timerDesc"></p>
+    <div class="chips" id="timerChips">
+      <button type="button" class="chip" data-minutes="30"></button>
+      <button type="button" class="chip" data-minutes="60"></button>
+      <button type="button" class="chip" data-minutes="120"></button>
+      <button type="button" class="chip" data-minutes="180"></button>
+    </div>
+    <label class="field"><span data-i18n="customMinutes">Or enter minutes</span>
+      <input type="number" id="timerMinutes" min="5" max="720" step="5" inputmode="numeric">
+    </label>
+    <button type="button" class="btn btn-primary btn-wide" data-act="startTimer" data-i18n="start">Start</button>
+  </form>
+</dialog>
+
+<dialog id="addDialog" class="sheet" aria-labelledby="addTitle">
+  <form method="dialog" class="sheet-body" id="addForm">
+    <div class="sheet-head">
+      <h2 id="addTitle" data-i18n="addDevice">Add device</h2>
+      <button type="submit" value="cancel" class="icon-btn" formnovalidate><svg><use href="#i-close"/></svg><span class="sr-only" data-i18n="close">Close</span></button>
+    </div>
+    <p class="muted small" data-i18n="addHint">Pick your child's phone, tablet or console. Devices appear here after they have used the internet at home.</p>
+    <ul class="picker" id="picker"></ul>
+    <details class="manual">
+      <summary data-i18n="manual">Enter address by hand</summary>
+      <label class="field"><span data-i18n="addrLabel">MAC or IP address</span>
+        <input type="text" id="manualAddr" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="A4:83:E7:12:34:56">
+      </label>
+    </details>
+    <label class="field"><span data-i18n="nameLabel">Name</span>
+      <input type="text" id="devName" maxlength="40" autocomplete="off">
+    </label>
+    <p class="form-error" id="addErr" role="alert"></p>
+    <button type="button" class="btn btn-primary btn-wide" data-act="addDevice" data-i18n="add">Add</button>
+    <p class="muted small" data-i18n="macTip">Tip: on the child's device, turn off “Private Wi‑Fi address” for your home network so it keeps the same address.</p>
+  </form>
+</dialog>
+
+<dialog id="confirmDialog" class="sheet sheet-small">
+  <form method="dialog" class="sheet-body">
+    <p id="confirmText"></p>
+    <div class="row-end">
+      <button type="submit" value="no" class="btn" data-i18n="cancel">Cancel</button>
+      <button type="submit" value="yes" class="btn btn-danger" id="confirmYes"></button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

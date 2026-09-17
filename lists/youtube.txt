@@ -1,11 +1,17 @@
+! Title: pihole-bahrain / youtube
+! Format: Adblock-style, one ||domain^ per line
 ||googlevideo.com^
+||wide-youtube.l.google.com^
+||youtu.be^
 ||youtube-nocookie.com^
 ||youtube-ui.l.google.com^
 ||youtube.be^
 ||youtube.ca^
 ||youtube.cl^
-||youtube.co^
 ||youtube.co.kr^
+||youtube.co^
+||youtube.com.ar^
+||youtube.com.br^
 ||youtube.com^
 ||youtube.de^
 ||youtube.dk^
@@ -28,8 +34,7 @@
 ||youtube.se^
 ||youtube.sg^
 ||youtube.tv^
-||youtube.ar^
 ||youtubei.googleapis.com^
-||youtu.be^
+||youtubekids.com^
 ||yt3.ggpht.com^
 ||ytimg.com^

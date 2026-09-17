@@ -1,18 +1,4 @@
-*.DS_Store
-.idea
-/nbproject/private/
-/nbproject/
-/node_modules/
-TODO
-*.zip
-test.html
-*.log
-
-
-# Intellij IDEA Project Files
-*.iml
-*.ipr
-*.iws
-
-# vim
-*.swp
+__pycache__/
+*.pyc
+screenshots/
+.DS_Store

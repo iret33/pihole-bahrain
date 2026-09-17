@@ -1,5 +1,6 @@
+! Title: pihole-bahrain / xbox
+! Format: Adblock-style, one ||domain^ per line
 ||gamepass.com^
-||msftncsi.com^
 ||xbox-global.ifs.windows.com^
 ||xbox-guide-public.rec.mp.microsoft.com^
 ||xbox.com^
@@ -7,6 +8,6 @@
 ||xboxab.com^
 ||xboxab.net^
 ||xboxlive.co^
-||xboxlive.com^
 ||xboxlive.com.c.footprint.net^
+||xboxlive.com^
 ||xboxservices.com^

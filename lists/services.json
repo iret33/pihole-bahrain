@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "categories": [
+    { "id": "social",    "en": "Social",    "ar": "التواصل الاجتماعي" },
+    { "id": "video",     "en": "Video",     "ar": "الفيديو" },
+    { "id": "games",     "en": "Games",     "ar": "الألعاب" },
+    { "id": "messaging", "en": "Messaging", "ar": "المراسلة" },
+    { "id": "ai",        "en": "AI",        "ar": "الذكاء الاصطناعي" }
+  ],
+  "services": [
+    { "id": "instagram",       "name": "Instagram",   "ar": "إنستغرام",    "category": "social",    "homework": true,  "color": "#C13584" },
+    { "id": "snapchat",        "name": "Snapchat",    "ar": "سناب شات",    "category": "social",    "homework": true,  "color": "#C9B400" },
+    { "id": "tiktok",          "name": "TikTok",      "ar": "تيك توك",     "category": "social",    "homework": true,  "color": "#161823" },
+    { "id": "facebook",        "name": "Facebook",    "ar": "فيسبوك",      "category": "social",    "homework": true,  "color": "#1877F2" },
+    { "id": "x-twitter",       "name": "X",           "ar": "إكس",         "category": "social",    "homework": true,  "color": "#2B2B2B" },
+    { "id": "youtube",         "name": "YouTube",     "ar": "يوتيوب",      "category": "video",     "homework": true,  "color": "#E62117" },
+    { "id": "netflix",         "name": "Netflix",     "ar": "نتفليكس",     "category": "video",     "homework": true,  "color": "#B20710" },
+    { "id": "roblox",          "name": "Roblox",      "ar": "روبلوكس",     "category": "games",     "homework": true,  "color": "#393B3D" },
+    { "id": "fortnite",        "name": "Fortnite",    "ar": "فورتنايت",    "category": "games",     "homework": true,  "color": "#5B3FD0" },
+    { "id": "pubg",            "name": "PUBG",        "ar": "ببجي",        "category": "games",     "homework": true,  "color": "#C98A0B" },
+    { "id": "minecraft",       "name": "Minecraft",   "ar": "ماينكرافت",   "category": "games",     "homework": true,  "color": "#3C8527" },
+    { "id": "steam",           "name": "Steam",       "ar": "ستيم",        "category": "games",     "homework": true,  "color": "#1B2838" },
+    { "id": "playstation",     "name": "PlayStation", "ar": "بلايستيشن",   "category": "games",     "homework": true,  "color": "#003791" },
+    { "id": "xbox",            "name": "Xbox",        "ar": "إكس بوكس",    "category": "games",     "homework": true,  "color": "#107C10" },
+    { "id": "whatsapp",        "name": "WhatsApp",    "ar": "واتساب",      "category": "messaging", "homework": false, "color": "#128C4B" },
+    { "id": "telegram",        "name": "Telegram",    "ar": "تيليجرام",    "category": "messaging", "homework": false, "color": "#1C8ACB" },
+    { "id": "discord",         "name": "Discord",     "ar": "ديسكورد",     "category": "messaging", "homework": true,  "color": "#5865F2" },
+    { "id": "microsoft-teams", "name": "Teams",       "ar": "تيمز",        "category": "messaging", "homework": false, "color": "#5B5FC7" },
+    { "id": "chatgpt",         "name": "ChatGPT",     "ar": "شات جي بي تي", "category": "ai",        "homework": false, "color": "#0E8C6E" }
+  ]
+}

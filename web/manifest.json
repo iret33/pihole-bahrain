@@ -1,0 +1,9 @@
+{
+  "name": "Family Internet",
+  "short_name": "Family",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F1F4F2",
+  "theme_color": "#0F766E",
+  "icons": [{ "src": "/pb/icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}

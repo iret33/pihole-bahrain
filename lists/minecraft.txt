@@ -1,0 +1,7 @@
+! Title: pihole-bahrain / minecraft
+! Format: Adblock-style, one ||domain^ per line
+||minecraft-services.net^
+||minecraft.net^
+||minecraftservices.com^
+||mojang.com^
+||playfabapi.com^

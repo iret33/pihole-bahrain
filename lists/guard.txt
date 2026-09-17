@@ -1,0 +1,28 @@
+! Title: pihole-bahrain / guard
+! Format: Adblock-style, one ||domain^ per line
+||cloudflare-dns.com^
+||dns-family.adguard.com^
+||dns.adguard-dns.com^
+||dns.adguard.com^
+||dns.controld.com^
+||dns.google.com^
+||dns.google^
+||dns.mullvad.net^
+||dns.nextdns.io^
+||dns.quad9.net^
+||dns10.quad9.net^
+||dns11.quad9.net^
+||dns9.quad9.net^
+||doh.cleanbrowsing.org^
+||doh.dns.sb^
+||doh.familyshield.opendns.com^
+||doh.libredns.gr^
+||doh.mullvad.net^
+||doh.opendns.com^
+||doh.xfinity.com^
+||freedns.controld.com^
+||mask-api.icloud.com^
+||mask-h2.icloud.com^
+||mask.icloud.com^
+||one.one.one.one^
+||use-application-dns.net^

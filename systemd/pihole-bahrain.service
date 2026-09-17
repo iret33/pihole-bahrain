@@ -1,0 +1,19 @@
+[Unit]
+Description=Family Internet scheduler (pihole-bahrain timers and bedtime)
+Documentation=https://github.com/iret33/pihole-bahrain
+After=pihole-FTL.service network-online.target
+Wants=pihole-FTL.service network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/pihole-bahrain/bin/pihole-bahrain run
+Restart=always
+RestartSec=10
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target

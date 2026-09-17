@@ -1,3 +1,5 @@
+! Title: pihole-bahrain / microsoft-teams
+! Format: Adblock-style, one ||domain^ per line
 ||lync.cn^
 ||lync.com^
 ||ms-acdc-teams.office.com^

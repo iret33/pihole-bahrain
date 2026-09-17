@@ -1,7 +1,8 @@
-||fast.com^
+! Title: pihole-bahrain / netflix
+! Format: Adblock-style, one ||domain^ per line
 ||netflix.ca^
-||netflix.com^
 ||netflix.com.edgesuite.net^
+||netflix.com^
 ||netflix.net^
 ||netflixdnstest1.com^
 ||netflixdnstest10.com^
@@ -13,8 +14,6 @@
 ||netflixdnstest7.com^
 ||netflixdnstest8.com^
 ||netflixdnstest9.com^
-||netflixinvestor.com^
-||netflixtechblog.com^
 ||nflxext.com^
 ||nflximg.com^
 ||nflximg.net^

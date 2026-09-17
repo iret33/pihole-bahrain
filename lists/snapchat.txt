@@ -1,6 +1,9 @@
+! Title: pihole-bahrain / snapchat
+! Format: Adblock-style, one ||domain^ per line
 ||impala-media-production.s3.amazonaws.com^
 ||sc-cdn.net^
 ||snap-dev.net^
+||snap.com^
 ||snapads.com^
 ||snapchat.com^
-||snapkit.c^
+||snapkit.com^

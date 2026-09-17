@@ -1,3 +1,5 @@
+! Title: pihole-bahrain / steam
+! Format: Adblock-style, one ||domain^ per line
 ||s.team^
 ||steam.com^
 ||steambroadcast.akamaized.net^

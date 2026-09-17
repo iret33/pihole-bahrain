@@ -1,3 +1,5 @@
+! Title: pihole-bahrain / discord
+! Format: Adblock-style, one ||domain^ per line
 ||airhorn.solutions^
 ||airhornbot.com^
 ||bigbeans.solutions^

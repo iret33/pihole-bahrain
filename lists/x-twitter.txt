@@ -1,3 +1,5 @@
+! Title: pihole-bahrain / x-twitter
+! Format: Adblock-style, one ||domain^ per line
 ||ads-twitter.com^
 ||cms-twdigitalassets.com^
 ||periscope.tv^

@@ -1,3 +1,5 @@
+! Title: pihole-bahrain / roblox
+! Format: Adblock-style, one ||domain^ per line
 ||blox.com^
 ||rbx.cn^
 ||rbx.com^

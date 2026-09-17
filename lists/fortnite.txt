@@ -1,0 +1,6 @@
+! Title: pihole-bahrain / fortnite
+! Format: Adblock-style, one ||domain^ per line
+||epicgames.com^
+||epicgames.dev^
+||fortnite.com^
+||unrealtournament.com^

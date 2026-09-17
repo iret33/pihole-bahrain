@@ -1,0 +1,7 @@
+! Title: pihole-bahrain / pubg
+! Format: Adblock-style, one ||domain^ per line
+||gpubgm.com^
+||igamecj.com^
+||proximabeta.com^
+||pubg.com^
+||pubgmobile.com^

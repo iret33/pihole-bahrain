@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh Family Internet block lists (pihole -g)
+After=pihole-FTL.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=@PIHOLE@ -g
+Nice=10
+IOSchedulingClass=idle

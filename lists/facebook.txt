@@ -1,11 +1,9 @@
+! Title: pihole-bahrain / facebook
+! Format: Adblock-style, one ||domain^ per line
 ||accountkit.com^
 ||facebook.com^
 ||facebook.net^
-||facebookcorewwwi.onion^
 ||fb.com^
 ||fb.me^
 ||fb.watch^
-||fbcdn.com^
-||fbcdn.net^
-||fbsbx.com^
 ||messenger.com^

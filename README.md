@@ -1,277 +1,167 @@
-# Pi-hole Web — Parental Controls fork (`pihole-bahrain`)
+# Family Internet (pihole-bahrain)
 
-A private fork of [Pi-hole's web interface](https://github.com/pi-hole/web) that
-adds a **parent-friendly control page at `/`** while leaving the original
-dashboard untouched at `/admin`.
+A simple parental-controls page on top of [Pi-hole](https://pi-hole.net) v6,
+in Arabic and English. Parents can:
+
+- block or allow apps (YouTube, TikTok, Roblox, …) with one tap;
+- switch on **Homework** mode, a timed **Free time**, or a timed **Offline break**;
+- pause a single child's device;
+- set a **Bedtime** schedule that turns the internet off at night.
+
+Timers and bedtime run on the box itself, so they keep working after the
+parent closes the page.
 
 ## Install
 
-The repo is **private**, so there is no public raw-URL one-liner. Install from a
-checkout instead (Pi-hole is auto-installed if missing):
+On a fresh Debian-based device (Armbian, Debian 12/13, Ubuntu 22.04+,
+Raspberry Pi OS) connected by Ethernet:
 
 ```bash
-git clone https://github.com/iret33/pihole-bahrain.git
-cd pihole-bahrain
-sudo bash install.sh
+curl -fsSL https://raw.githubusercontent.com/iret33/pihole-bahrain/master/install.sh | sudo bash
 ```
 
-To pull updated block lists later:
+The installer:
+
+1. installs Pi-hole v6 if it is missing (fully unattended);
+2. asks for a parent password (or generates one if there is no terminal);
+3. installs the parent page at `http://<box-ip>/` (the Pi-hole admin stays at `/admin/`);
+4. creates the Pi-hole groups, rules and block lists;
+5. starts the scheduler service and a nightly list refresh;
+6. prints the address, and the router step below.
+
+Running the same command again updates everything and keeps the password,
+devices and rules.
+
+### Options
+
+Pass these as environment variables after `sudo`, for example
+`curl … | sudo PB_PASSWORD='s3cret-pass' bash`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PB_PASSWORD` | ask / generate | Parent password (also the Pi-hole admin password) |
+| `PB_HOSTNAME` | `family.lan` | Local name for the page; `none` to skip |
+| `PB_UPSTREAMS` | `1.1.1.3,1.0.0.3` | Upstream DNS for a new Pi-hole (Cloudflare for Families: also blocks malware and adult sites) |
+| `PB_TIMEZONE` | `Asia/Bahrain` if the system is on UTC | Time zone used by bedtime |
+| `PB_LISTS_BASE` | this repo's `lists/` on GitHub | Where Pi-hole downloads the service lists |
+| `PB_REPO`, `PB_REF` | this repo, `master` | Source to install from (use a tag for pinned releases) |
+| `PB_NONINTERACTIVE` | – | `1` = never prompt |
+
+### Last step: point the home network at the box
+
+Pi-hole only filters devices that use it for DNS. In the router settings:
+
+1. set the **DNS server** (LAN/DHCP settings) to the box's address, and only that address;
+2. **reserve** that address for the box (DHCP reservation / static lease);
+3. turn Wi-Fi off and on on the children's devices, then add them on the page.
+
+If the router also hands out IPv6 DNS servers, turn that off (or set it to the
+box too), otherwise devices can skip the filter over IPv6.
+
+## Preparing an Orange Pi Zero 3
+
+1. Flash **Armbian minimal, Debian Trixie** for Orange Pi Zero 3 from
+   <https://www.armbian.com/orange-pi-zero-3/> onto a high-endurance microSD card
+   (8 GB or more).
+2. Connect Ethernet and power. Log in over SSH (`root` / `1234`) and finish
+   Armbian's first-login questions.
+3. Run the install command above.
+
+Notes: avoid the 1.5 GB RAM model (current kernels crash on it); use the
+Ethernet port rather than Wi-Fi; the installer keeps Pi-hole's query history to
+30 days to reduce SD-card wear.
+
+## How it works
+
+```
+Parent's phone ──► http://box/  (index.html + /pb/app.js)
+                        │  Pi-hole REST API (/api), signed in with the parent password
+                        ▼
+                  Pi-hole FTL  ◄──── pihole-bahrain.service (timers, bedtime)
+                        │
+Child's device ──DNS──► │  blocked if the device is in an enabled pb-* group
+```
+
+- Every service has its own Pi-hole group `pb-svc-<id>` that owns one block
+  list. Lists are **always enabled** (Pi-hole leaves disabled lists out when it
+  rebuilds), and a service is blocked by **enabling its group**. Changes apply
+  immediately — no DNS restart.
+- Child devices are clients that belong to `pb-kids`, `pb-guard` (blocks
+  outside DNS-over-HTTPS resolvers), `pb-offline` and every `pb-svc-*` group.
+  Pausing a device adds it to `pb-paused`.
+- `pb-offline` and `pb-paused` share one "block everything" rule, so
+  "internet off" only affects children's devices, never the parents'.
+- Timer and bedtime settings are stored as JSON in the description of the
+  disabled group `pb-state`. The page writes them; `pihole-bahrain run`
+  (a systemd service) enforces them every 15 seconds.
+- Devices are added by MAC address when Pi-hole knows it (stable across IP
+  changes), otherwise by IP address.
+
+Everything the add-on creates in Pi-hole starts with `pb-` or has a comment
+starting with `pb:`, and your own groups, lists and rules are never touched.
+
+## Block lists
+
+`lists/` holds one list per service (Adblock style, `||domain^` per line) plus
+`guard.txt`. `lists/services.json` is the catalog shown on the page.
+
+Pi-hole downloads the lists straight from this repository, so a change pushed
+to `master` reaches every box on its next nightly refresh (or immediately with
+`sudo pihole -g`). Adding a **new** service also needs the new code on the box:
+`sudo pihole-bahrain update`.
+
+To add a service: create `lists/<id>.txt`, add an entry to `services.json`
+(id, English and Arabic names, category, colour, whether Homework mode blocks
+it), and run the tests. The tests refuse lists that would block shared
+infrastructure such as `google.com`, `apple.com` or `akamaihd.net`.
+
+## Commands on the box
 
 ```bash
-git pull
-sudo bash install.sh   # or: sudo bash lists/register.sh lists
+sudo pihole-bahrain doctor     # check the installation
+sudo pihole-bahrain status     # current rules, devices, timer, bedtime (JSON)
+sudo pihole-bahrain update     # update to the latest version
+sudo pihole-bahrain setup      # re-create groups/lists if something was deleted
+sudo pihole setpassword        # change the parent password
+journalctl -u pihole-bahrain   # scheduler log
+sudo /opt/pihole-bahrain/uninstall.sh   # remove the add-on (Pi-hole stays)
 ```
 
-## What it adds
-
-- **`/`** — a clean page to assign a kid's device, toggle services
-  (YouTube, TikTok, Roblox, …) on/off, pause a single device, and block the
-  entire internet with one tap.
-- **`/admin`** — the original Pi-hole dashboard, unchanged.
-- **Same password** — the page signs in with the Pi-hole **admin password**
-  (identical to the dashboard login); no separate PIN.
-
-The installer enables `webserver.serve_all`, drops a static `index.html` at the
-web root, and restarts FTL. It backs up `pihole.toml` before editing it.
-
----
-
-<div align="center">
-  <a href="https://pi-hole.net/">
-    <img src="https://pi-hole.github.io/graphics/Vortex/vortex_with_text.svg" width="144" height="256" alt="Pi-hole website">
-  </a>
-  <br>
-  <strong>Network-wide ad blocking via your own Linux hardware</strong>
-  <br>
-  <br>
-  <div align="center">
-    <a href="https://pi-hole.net/">Pi-hole website</a> |
-    <a href="https://docs.pi-hole.net/">Documentation</a> |
-    <a href="https://discourse.pi-hole.net/">Discourse Forum</a> |
-    <a href="https://pi-hole.net/donate">Donate</a>
-  </div>
-  <br>
-  <br>
-</div>
-
-# Pi-hole Web Interface
-
-<img src="https://pi-hole.github.io/graphics/Screenshots/v6/v6_dashboard.png" alt="Pi-hole Web interface">
-
-Pi-hole[®](https://pi-hole.net/trademark-rules-and-brand-guidelines/)'s Web interface (based off of [AdminLTE](https://github.com/ColorlibHQ/AdminLTE)) provides a central location to manage your Pi-hole and review the statistics generated by FTLDNS[™](https://pi-hole.net/trademark-rules-and-brand-guidelines/).
-
-- **Easy-to-interpret**: simple graphs and beautiful colors make Pi-hole's stats easy to understand
-- **Responsive**: looks great on desktop, tablets, and mobile devices
-- **Useful**: control and configure your Pi-hole with our settings
-- **Insightful**: use the query log, including long-term stats to gain insight into your networks activity
-
-<br>
-<img src="https://pi-hole.github.io/graphics/Badges/browserstack-badge.png" width="150">
-
----
-<br>
-
-# Installation
-
-The Web interface is enabled by default when you install Pi-hole.
-
-## Post-installation: access the Web interface and gain insight into your network's activity
-
-There are several ways to access the dashboard:
-
-1. `https://<IP_ADDRESS_OF_YOUR_PI_HOLE>/admin/`
-2. `https://pi.hole/admin/` (when using Pi-hole as your DNS server)
-3. `https://pi.hole/` (when using Pi-hole as your DNS server)
-
-> [!TIP]
-> You can access the web interface using `http://` or `https://` protocols.
-
-Once logged in, you can view your network stats to see things like:
-
-- the domains being queried on your network
-- the time the queries were initiated
-- the amount of domains that were blocked
-- the upstream server queries were sent to
-- the type of queries (`A`, `AAAA`, `CNAME`, `SRV`, `TXT`, etc.)
-
----
-
-## Pi-hole is free, but powered by your support
-
-There are many reoccurring costs involved with maintaining free, open source, and privacy-respecting software; expenses which [our volunteer developers](https://github.com/orgs/pi-hole/people) pitch in to cover out-of-pocket. This is just one example of how strongly we feel about our software, as well as the importance of keeping it maintained.
-
-Make no mistake: **your support is absolutely vital to help keep us innovating!**
-
-### Donations
-
-Sending a donation using our links below is **extremely helpful** in offsetting a portion of our monthly expenses:
-
-- <img src="https://pi-hole.github.io/graphics/Badges/paypal-badge-black.svg" width="20" height="20" align="absmiddle" alt="PayPal icon"> [Donate via PayPal](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=3J2L3Z4DHW9UY)
-- <img src="https://pi-hole.github.io/graphics/Badges/bitcoin-badge-black.svg" width="20" height="20" align="absmiddle" alt="Bitcoin icon"> [Bitcoin, Bitcoin Cash, Ethereum, Litecoin](https://commerce.coinbase.com/checkout/dd304d04-f324-4a77-931b-0db61c77a41b)
-
-### Alternative support
-
-If you'd rather not [donate](https://pi-hole.net/donate/) (_which is okay!_), there are other ways you can help support us:
-
-- [Patreon](https://patreon.com/pihole) _Become a patron for rewards_
-- [Digital Ocean](https://www.digitalocean.com/?refcode=344d234950e1) _affiliate link_
-- [Stickermule](https://www.stickermule.com/unlock?ref_id=6055890701&utm_medium=link&utm_source=invite) _earn a \$10 credit after your first purchase_
-- [Amazon](https://www.amazon.com/exec/obidos/redirect-home/pihole09-20) _affiliate link_
-- [DNS Made Easy](https://cp.dnsmadeeasy.com/u/133706) _affiliate link_
-- Spreading the word about our software, and how you have benefited from it
-
-### Contributing via GitHub
-
-We welcome _everyone_ to contribute to issue reports, suggest new features, and create pull requests.
-
-If you have something to add - anything from a typo through to a whole new feature - we're happy to check it out! Just make sure to fill out our template when submitting your request; the questions that it asks will help the volunteers quickly understand what you're aiming to achieve.
-
-### Presentations about Pi-hole
-
-Word-of-mouth continues to help our project grow immensely, and so we are helping make this easier for people.
-
-If you are going to be presenting Pi-hole at a conference, meetup or even a school project, [get in touch with us](https://pi-hole.net/2017/05/17/giving-a-presentation-on-pi-hole-contact-us-first-for-some-goodies-and-support/) so we can hook you up with free swag to hand out to your audience!
-
----
-
-## Getting in touch with us
-
-While we are primarily reachable on our <a href="https://discourse.pi-hole.net/">Discourse User Forum</a>, we can also be found on a variety of social media outlets. **Please be sure to check the FAQ's** before starting a new discussion, as we do not have the spare time to reply to every request for assistance.
-
-* **[Frequently Asked Questions](https://discourse.pi-hole.net/c/faqs)**
-* **[Pi-hole Wiki](https://github.com/pi-hole/pi-hole/wiki)**
-* **[Feature Requests](https://discourse.pi-hole.net/c/feature-requests?order=votes)**
-* [Discourse User Forum](https://discourse.pi-hole.net/)
-* [Reddit](https://www.reddit.com/r/pihole/)
-* [Twitter](https://twitter.com/The_Pi_Hole)
-* [Facebook](https://www.facebook.com/ThePiHole/)
-* [Gitter](https://gitter.im/pi-hole/pi-hole) (Real-time chat)
-* [YouTube](https://www.youtube.com/channel/UCT5kq9w0wSjogzJb81C9U0w)
-
-# Features
-
-## Mobile friendly interface
-
-<p align="center">
-  <img src="https://pi-hole.github.io/graphics/Screenshots/mobile-friendly.png" height="300" alt="Mobile friendly">
-</p>
-
-## Password protection
-
-<p align="center">
-  <img src="https://pi-hole.github.io/graphics/Screenshots/password_protection_v5.png" alt="Password protection">
-</p>
-
-## Detailed graphs and doughnut charts
-
-<p align="center">
-  <img src="https://pi-hole.github.io/graphics/Screenshots/v6/v6_doughnut_graphics.png" alt="Pie charts">
-</p>
-
-## Top lists of domains and clients
-
-<p align="center">
-  <img src="https://pi-hole.github.io/graphics/Screenshots/topdomains-clients.png" alt="Top domains/top clients">
-</p>
-
-## The Query Log
-
-<p align="center">
-  <img src="https://pi-hole.github.io/graphics/Screenshots/v6/v6_query_log.png" alt="Query log">
-</p>
-
-The *Query Log* shows recent and long-term data over user defined time ranges
-
-You can filter your log using the advanced filter:
-
-<img src="https://pi-hole.github.io/graphics/Screenshots/v6/v6_advanced_filter.png" alt="Query log advanced filter">
-
-
-## Blocking and allowing domains
-
-Lists, domains (block or allow) and regex entries can be managed through groups.
-
-- [Group management overview](https://docs.pi-hole.net/group_management/groups/)
-- [How to use Pi-hole Groups with examples](https://docs.pi-hole.net/group_management/example/)
-
-<br>
-
-<p align="center">
-  <img src="https://pi-hole.github.io/graphics/Screenshots/v6/v6_domain_management.png" alt="Domain Management">
-</p>
-
-## Settings - Manage and configure Pi-hole features
-
-
-<img src="https://pi-hole.github.io/graphics/Screenshots/v6/v6_settings_system.gif" alt="System Settings - Basic and Expert" align="right" width="45%">
-
-**System Settings:**
-  - System Information
-  - DNS reply metrics
-  - DNS cache metrics $\color{red}{\normalsize\textsf{[Expert]}}$
-  - DHCP server metrics $\color{red}{\normalsize\textsf{[Expert]}}$
-  - Actions (Buttons) $\color{red}{\normalsize\textsf{[Expert]}}$
-
-**DNS Settings:**
-  - Upstream DNS Servers (including custom DNS servers)
-  - Interface settings $\color{red}{\normalsize\textsf{[Expert]}}$
-  - Advanced DNS settings $\color{red}{\normalsize\textsf{[Expert]}}$
-  - DNS domain settings $\color{red}{\normalsize\textsf{[Expert]}}$
-  - Rate-limiting $\color{red}{\normalsize\textsf{[Expert]}}$
-  - Conditional forwarding $\color{red}{\normalsize\textsf{[Expert]}}$
-
-**DHCP Settings:**
-  - General DHCP Settings
-  - Advanced DHCP Settings $\color{red}{\normalsize\textsf{[Expert]}}$
-  - Currently active DHCP leases table
-  - Static DHCP configuration $\color{red}{\normalsize\textsf{[Expert]}}$
-  - Advanced description (Help text) $\color{red}{\normalsize\textsf{[Expert]}}$
-
-**Web Interface - API Settings:**
-  - Theme settings
-  - Advanced Settings $\color{red}{\normalsize\textsf{[Expert]}}$
-  - Exclusions (Domains and Clients to be excluded from dashboard tables) $\color{red}{\normalsize\textsf{[Expert]}}$
-  - Currently active sessions table $\color{red}{\normalsize\textsf{[Expert]}}$
-
-**Privacy Settings:**
-  - Query Logging
-  - Query Anonymization ("Privacy Level") $\color{red}{\normalsize\textsf{[Expert]}}$
-  - Privacy-related database settings $\color{red}{\normalsize\textsf{[Expert]}}$
-
-**Teleporter:**
-  - Export your Pi-hole's configuration
-  - Import previously exported configuration
-
-**Local DNS Settings:**
-  - Local DNS records
-  - Local CNAME records
-
-**All Settings** (only visible in Expert mode):
-  - Advanced settings page, containing all available options
-
-<p align="center">
-  <img src="https://pi-hole.github.io/graphics/Screenshots/v6/v6_all_settings.gif" alt="All Settings">
-</p>
-
-## Tools
-
-- Diagnostic messages;
-- View logs in real time: `pihole.log`, `FTL.log` and `webserver.log`;
-- Update your lists;
-- Search a domain in your lists.
-
-<p align="center">
-  <img src="https://pi-hole.github.io/graphics/Screenshots/v6/v6_tail_pihole_log.gif" alt="Live Pi-hole log">
-  <br><br>
-  <img src="https://pi-hole.github.io/graphics/Screenshots/v6/v6_search.gif" alt="Search a domain in your lists">
-</p>
-
-## API
-
-The REST API can be accessed at `/api` and it returns data in JSON format.
-
-A local API documentation can be found at `/api/docs`:
-
-<p align="center">
-  <img src="https://pi-hole.github.io/graphics/Screenshots/v6/v6_API.gif" alt="API documentation">
-</p>
+Files: code in `/opt/pihole-bahrain`, settings in `/etc/pihole-bahrain/config`,
+page in `/var/www/html/index.html` and `/var/www/html/pb/`, install log in
+`/var/log/pihole-bahrain-install.log`.
+
+## What it cannot do
+
+DNS filtering is a strong everyday filter, not a lock:
+
+- A device on **mobile data**, or using a **VPN** app, does not use the box.
+- Apps that connect to fixed IP addresses (Telegram does this in part) may keep
+  working after being blocked.
+- Apps that are already open can take a few minutes to stop, until the device's
+  own DNS cache expires.
+- A child who knows the main Wi-Fi password and can change network settings can
+  get around it. Pair it with Screen Time (iPhone) or Family Link (Android).
+
+## Development
+
+```bash
+python3 -m unittest discover -s tests -p "test_*.py"   # core, schedule, lists
+sudo bash tests/test_install.sh                          # installer, stubbed system
+python3 tests/ui_smoke.py --shots /tmp/shots            # browser test (needs playwright)
+python3 tests/mock_pihole.py --web web --setup           # page on http://127.0.0.1:8080, password "test"
+```
+
+`tests/mock_pihole.py` imitates the parts of the Pi-hole v6 API this project
+uses, so the page can be developed without a device.
+
+## Licences and names
+
+- Pi-hole is licensed under the EUPL-1.2 and "Pi-hole" is a registered
+  trademark; check the
+  [Pi-hole trademark rules](https://pi-hole.net/trademark-rules-and-brand-guidelines/)
+  before using the name in a product.
+- The bundled font, IBM Plex Sans Arabic, is under the SIL Open Font License
+  (`web/fonts/OFL.txt`).
+- This repository has no licence file yet, which means all rights are reserved.
+  Add one before accepting outside contributions.

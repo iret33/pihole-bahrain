@@ -1,0 +1,848 @@
+#!/usr/bin/env python3
+"""pihole-bahrain — parental controls on top of Pi-hole v6.
+
+Commands
+  setup        Create/refresh the Pi-hole groups, lists and rules this add-on uses.
+  configure    Apply the Pi-hole settings the add-on needs (web root, local name).
+  run          Background scheduler (timers + bedtime). Run by systemd.
+  status       Print the current state.
+  doctor       Check the installation and print anything that needs fixing.
+  update       Update the add-on to the latest version from GitHub.
+  remove       Delete everything this add-on created inside Pi-hole.
+
+How it works
+  Every service (YouTube, TikTok, ...) has its own Pi-hole group "pb-svc-<id>"
+  that owns one blocklist. The lists stay enabled at all times so gravity always
+  contains their domains; a service is blocked by ENABLING its group and allowed
+  by disabling it. Kid devices are members of every pb-* group. Toggling a group
+  takes effect immediately (FTL reloads on every API write) — no DNS restart.
+
+  Shared state (timer, bedtime schedule) is stored as JSON in the description of
+  the disabled group "pb-state", so the web page and this daemon share it through
+  the Pi-hole API without any extra port or database.
+
+Only the Python 3 standard library is used.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import logging
+import os
+import signal
+import ssl
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+VERSION = "2.0.0"
+
+APP_DIR = os.environ.get("PB_APP_DIR", "/opt/pihole-bahrain")
+LISTS_DIR = os.path.join(APP_DIR, "lists")
+CONFIG_FILE = os.environ.get("PB_CONFIG_FILE", "/etc/pihole-bahrain/config")
+DEFAULT_LISTS_BASE = "https://raw.githubusercontent.com/iret33/pihole-bahrain/master/lists"
+CLI_PW_FILE = os.environ.get("PB_CLI_PW_FILE", "/etc/pihole/cli_pw")
+
+G_KIDS = "pb-kids"          # marker: membership == "this is a kid device"
+G_GUARD = "pb-guard"        # always-on anti-bypass list (DoH resolvers)
+G_OFFLINE = "pb-offline"    # enabled == internet off for all kid devices
+G_PAUSED = "pb-paused"      # always enabled; membership == this device is paused
+G_STATE = "pb-state"        # disabled; description holds shared JSON state
+SVC_PREFIX = "pb-svc-"
+LIST_COMMENT_PREFIX = "pb:"
+BLOCK_ALL_REGEX = "^.*$"
+BLOCK_ALL_COMMENT = "pihole-bahrain: blocks everything for offline/paused kid devices"
+
+DEFAULT_GROUP = 0
+TICK_SECONDS = 15
+
+DEFAULT_STATE = {
+    "v": 1,
+    "timer": None,
+    "schedule": {"enabled": False, "start": "21:00", "end": "06:00",
+                 "days": [0, 1, 2, 3, 4, 5, 6]},
+    "scheduleActive": False,
+}
+
+log = logging.getLogger("pihole-bahrain")
+
+
+# --------------------------------------------------------------------------- #
+# Catalog
+# --------------------------------------------------------------------------- #
+def load_catalog(lists_dir: str = LISTS_DIR) -> dict:
+    with open(os.path.join(lists_dir, "services.json"), encoding="utf-8") as fh:
+        cat = json.load(fh)
+    ids = [s["id"] for s in cat["services"]]
+    if len(ids) != len(set(ids)):
+        raise SystemExit("services.json: duplicate service id")
+    for sid in ids + ["guard"]:
+        path = os.path.join(lists_dir, sid + ".txt")
+        if not os.path.isfile(path):
+            raise SystemExit("missing list file: " + path)
+    return cat
+
+
+def svc_group(sid: str) -> str:
+    return SVC_PREFIX + sid
+
+
+def read_config(path: str = CONFIG_FILE) -> dict:
+    """KEY=VALUE file written by install.sh (shell-compatible, no expansion)."""
+    conf = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                conf[key.strip()] = value.strip().strip("'\"")
+    except FileNotFoundError:
+        pass
+    return conf
+
+
+def lists_base(conf: dict | None = None) -> str:
+    """Where Pi-hole downloads the service lists from.
+
+    An http(s) URL (default: this repository on GitHub, so `pihole -g` picks up
+    list changes automatically) or a local directory (served as file://).
+    """
+    conf = read_config() if conf is None else conf
+    base = os.environ.get("PB_LISTS_BASE") or conf.get("PB_LISTS_BASE") or DEFAULT_LISTS_BASE
+    return base.rstrip("/")
+
+
+def list_address(sid: str, base: str) -> str:
+    if base.startswith(("http://", "https://", "file://")):
+        return "%s/%s.txt" % (base, sid)
+    return "file://" + os.path.join(os.path.abspath(base), sid + ".txt")
+
+
+def kid_groups(group_ids: dict, catalog: dict) -> list:
+    """Every group a kid device must belong to (except pb-paused)."""
+    names = [G_KIDS, G_GUARD, G_OFFLINE] + [svc_group(s["id"]) for s in catalog["services"]]
+    return [DEFAULT_GROUP] + [group_ids[n] for n in names if n in group_ids]
+
+
+# --------------------------------------------------------------------------- #
+# Pi-hole API client
+# --------------------------------------------------------------------------- #
+class ApiError(Exception):
+    def __init__(self, status: int, message: str):
+        super().__init__("HTTP %s: %s" % (status, message))
+        self.status = status
+
+
+def ftl_config(key: str) -> str:
+    out = subprocess.run(["pihole-FTL", "--config", "-q", key],
+                         check=True, capture_output=True, text=True, timeout=30)
+    return out.stdout.strip()
+
+
+def ftl_set_config(key: str, value: str) -> None:
+    subprocess.run(["pihole-FTL", "--config", key, value],
+                   check=True, capture_output=True, text=True, timeout=30)
+
+
+def parse_cli_array(text: str) -> list:
+    """Parse `pihole-FTL --config -q <array>` output: [ a b, c d ] (unquoted)."""
+    text = text.strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    items = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            part = json.loads('"%s"' % part)     # values are JSON-escaped
+        except ValueError:
+            pass
+        items.append(part)
+    return items
+
+
+def merged_hosts(current: list, ip: str, hostname: str) -> list:
+    keep = [h for h in current if hostname not in h.split()[1:]]
+    return keep + ["%s %s" % (ip, hostname)]
+
+
+def discover_base_url() -> str:
+    """Build a local API URL from webserver.port, e.g. '80o,443os,[::]:80o'."""
+    env = os.environ.get("PB_API_URL")
+    if env:
+        return env.rstrip("/")
+    try:
+        ports = ftl_config("webserver.port")
+    except (OSError, subprocess.SubprocessError):
+        ports = "80"
+    http_port = https_port = None
+    for tok in ports.split(","):
+        tok = tok.strip()
+        if not tok or tok.startswith("["):
+            continue
+        tok = tok.rsplit(":", 1)[-1]          # strip "127.0.0.1:" style binds
+        digits = "".join(c for c in tok if c.isdigit())
+        flags = tok[len(digits):]
+        if not digits or "r" in flags:        # 'r' = redirect-only port
+            continue
+        if "s" in flags:
+            https_port = https_port or digits
+        else:
+            http_port = http_port or digits
+    if http_port:
+        return "http://127.0.0.1:%s" % http_port
+    if https_port:
+        return "https://127.0.0.1:%s" % https_port
+    return "http://127.0.0.1:80"
+
+
+class Api:
+    def __init__(self, base: str | None = None, password: str | None = None):
+        self.base = (base or discover_base_url()).rstrip("/")
+        self._password = password
+        self.sid = None
+        self._ctx = ssl.create_default_context()
+        # Local self-signed certificate: we only ever talk to 127.0.0.1.
+        self._ctx.check_hostname = False
+        self._ctx.verify_mode = ssl.CERT_NONE
+
+    # -- transport --
+    def _raw(self, method: str, path: str, body=None):
+        data = None if body is None else json.dumps(body).encode()
+        req = urllib.request.Request(self.base + path, data=data, method=method)
+        req.add_header("Accept", "application/json")
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
+        if self.sid:
+            req.add_header("sid", self.sid)
+        try:
+            with urllib.request.urlopen(req, timeout=20, context=self._ctx) as resp:
+                raw = resp.read()
+                return resp.status, (json.loads(raw) if raw else {})
+        except urllib.error.HTTPError as err:
+            raw = err.read()
+            try:
+                payload = json.loads(raw) if raw else {}
+            except ValueError:
+                payload = {"error": {"message": raw[:200].decode(errors="replace")}}
+            return err.code, payload
+
+    def request(self, method: str, path: str, body=None, _retry=True):
+        status, payload = self._raw(method, path, body)
+        if status == 401 and _retry:
+            self.login()
+            return self.request(method, path, body, _retry=False)
+        if status >= 400:
+            err = payload.get("error") if isinstance(payload, dict) else None
+            msg = err.get("message", str(err)) if isinstance(err, dict) else str(payload)
+            if isinstance(err, dict) and err.get("hint"):
+                msg += " (" + str(err["hint"]) + ")"
+            raise ApiError(status, msg)
+        return payload
+
+    def wait_ready(self, timeout: float = 120) -> None:
+        """Block until FTL answers on its API (it restarts during installs)."""
+        deadline = time.time() + timeout
+        while True:
+            try:
+                status, _ = self._raw("GET", "/api/auth")
+                if status in (200, 401):
+                    return
+            except (OSError, ValueError):
+                pass
+            if time.time() > deadline:
+                raise ApiError(0, "Pi-hole API did not come up at " + self.base)
+            time.sleep(2)
+
+    def password_set(self) -> bool:
+        status, payload = self._raw("GET", "/api/auth")
+        return not (status == 200 and payload.get("session", {}).get("valid"))
+
+    def login(self):
+        self.sid = None
+        status, payload = self._raw("GET", "/api/auth")
+        if status == 200 and payload.get("session", {}).get("valid"):
+            return  # no password configured
+        pw = self._password
+        if pw is None:
+            with open(CLI_PW_FILE, encoding="utf-8") as fh:   # regenerated on FTL restart
+                pw = fh.read().strip()
+        status, payload = self._raw("POST", "/api/auth", {"password": pw})
+        sess = payload.get("session", {}) if isinstance(payload, dict) else {}
+        if status != 200 or not sess.get("valid"):
+            raise ApiError(status, "login to the Pi-hole API failed")
+        self.sid = sess.get("sid")
+
+    def logout(self):
+        if self.sid:
+            try:
+                self._raw("DELETE", "/api/auth")
+            finally:
+                self.sid = None
+
+    # -- helpers --
+    @staticmethod
+    def q(value: str) -> str:
+        return urllib.parse.quote(value, safe="")
+
+    def groups(self) -> list:
+        return self.request("GET", "/api/groups").get("groups", [])
+
+    def group_map(self) -> dict:
+        return {g["name"]: g for g in self.groups()}
+
+    def lists(self) -> list:
+        return self.request("GET", "/api/lists").get("lists", [])
+
+    def clients(self) -> list:
+        return self.request("GET", "/api/clients").get("clients", [])
+
+    def domains(self) -> list:
+        return self.request("GET", "/api/domains").get("domains", [])
+
+    def add_group(self, name, comment, enabled):
+        self.request("POST", "/api/groups", {"name": name, "comment": comment, "enabled": enabled})
+
+    def put_group(self, name, comment, enabled, new_name=None):
+        self.request("PUT", "/api/groups/" + self.q(name),
+                     {"name": new_name or name, "comment": comment, "enabled": enabled})
+
+    def delete_group(self, name):
+        self.request("DELETE", "/api/groups/" + self.q(name))
+
+    def put_client(self, client, comment, groups):
+        self.request("PUT", "/api/clients/" + self.q(client),
+                     {"comment": comment, "groups": groups})
+
+
+# --------------------------------------------------------------------------- #
+# State (JSON stored in the pb-state group description)
+# --------------------------------------------------------------------------- #
+def parse_state(raw) -> dict:
+    state = json.loads(json.dumps(DEFAULT_STATE))
+    try:
+        data = json.loads(raw) if raw else {}
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    timer = data.get("timer")
+    if isinstance(timer, dict) and timer.get("mode") in ("free", "block") \
+            and isinstance(timer.get("until"), (int, float)):
+        snap = timer.get("snapshot") if isinstance(timer.get("snapshot"), dict) else {}
+        state["timer"] = {
+            "mode": timer["mode"],
+            "until": float(timer["until"]),
+            "snapshot": {
+                "services": {k: bool(v) for k, v in (snap.get("services") or {}).items()},
+                "offline": bool(snap.get("offline", False)),
+            },
+        }
+    sched = data.get("schedule")
+    if isinstance(sched, dict):
+        s = state["schedule"]
+        s["enabled"] = bool(sched.get("enabled", False))
+        for key in ("start", "end"):
+            if valid_hhmm(sched.get(key)):
+                s[key] = sched[key]
+        days = sched.get("days")
+        if isinstance(days, list):
+            s["days"] = sorted({int(d) for d in days if isinstance(d, int) and 0 <= d <= 6})
+    state["scheduleActive"] = bool(data.get("scheduleActive", False))
+    return state
+
+
+def valid_hhmm(value) -> bool:
+    if not isinstance(value, str) or len(value) != 5 or value[2] != ":":
+        return False
+    try:
+        h, m = int(value[:2]), int(value[3:])
+    except ValueError:
+        return False
+    return 0 <= h <= 23 and 0 <= m <= 59
+
+
+def in_schedule(sched: dict, now: dt.datetime) -> bool:
+    """True if `now` is inside the bedtime window.
+
+    days use JavaScript numbering (0 = Sunday). A window that crosses midnight
+    belongs to the day it STARTS on, e.g. Thu 21:00 -> Fri 06:00 is "Thursday".
+    """
+    if not sched.get("enabled") or not sched.get("days"):
+        return False
+    start = int(sched["start"][:2]) * 60 + int(sched["start"][3:])
+    end = int(sched["end"][:2]) * 60 + int(sched["end"][3:])
+    if start == end:
+        return False
+    minute = now.hour * 60 + now.minute
+    js_today = (now.weekday() + 1) % 7            # Python Mon=0 -> JS Sun=0
+    js_yesterday = (js_today + 6) % 7
+    days = set(sched["days"])
+    if start < end:
+        return js_today in days and start <= minute < end
+    if minute >= start:
+        return js_today in days
+    return minute < end and js_yesterday in days
+
+
+# --------------------------------------------------------------------------- #
+# Controller
+# --------------------------------------------------------------------------- #
+class Controller:
+    def __init__(self, api: Api, catalog: dict, base: str | None = None):
+        self.api = api
+        self.catalog = catalog
+        self.base = base or lists_base()
+        self._pending_kids = []
+
+    # ----- setup -----
+    def setup(self, run_gravity=True) -> None:
+        self.migrate_legacy()
+        groups = self.api.group_map()
+
+        def ensure(name, comment, enabled):
+            if name not in groups:
+                self.api.add_group(name, comment, enabled)
+                log.debug("created group %s", name)
+
+        ensure(G_KIDS, "pihole-bahrain: kid devices", True)
+        ensure(G_GUARD, "pihole-bahrain: stops DNS bypass on kid devices", True)
+        ensure(G_OFFLINE, "pihole-bahrain: internet off for kid devices", False)
+        ensure(G_PAUSED, "pihole-bahrain: paused kid devices", True)
+        ensure(G_STATE, json.dumps(DEFAULT_STATE, separators=(",", ":")), False)
+        wanted = {s["id"] for s in self.catalog["services"]}
+        for s in self.catalog["services"]:
+            ensure(svc_group(s["id"]), "pihole-bahrain: " + s["name"], False)
+
+        # pb-paused must stay enabled, pb-state must stay disabled.
+        groups = self.api.group_map()
+        if not groups[G_PAUSED]["enabled"]:
+            self.api.put_group(G_PAUSED, groups[G_PAUSED].get("comment") or "", True)
+        if groups[G_STATE]["enabled"]:
+            self.api.put_group(G_STATE, groups[G_STATE].get("comment") or "", False)
+        gid = {n: g["id"] for n, g in groups.items()}
+
+        # Block-all regex used by pb-offline and pb-paused.
+        regex = next((d for d in self.api.domains()
+                      if d.get("kind") == "regex" and d.get("type") == "deny"
+                      and d.get("domain") == BLOCK_ALL_REGEX), None)
+        body = {"comment": BLOCK_ALL_COMMENT, "groups": [gid[G_OFFLINE], gid[G_PAUSED]],
+                "enabled": True}
+        if regex is None:
+            self.api.request("POST", "/api/domains/deny/regex", dict(body, domain=BLOCK_ALL_REGEX))
+        elif sorted(regex.get("groups", [])) != sorted(body["groups"]) or not regex.get("enabled"):
+            self.api.request("PUT", "/api/domains/deny/regex/" + Api.q(BLOCK_ALL_REGEX),
+                             dict(body, type="deny", kind="regex"))
+
+        # Blocklists: one per service + the guard list. Always enabled.
+        existing = {l.get("comment"): l for l in self.api.lists()
+                    if (l.get("comment") or "").startswith(LIST_COMMENT_PREFIX)}
+        targets = [(s["id"], gid[svc_group(s["id"])]) for s in self.catalog["services"]]
+        targets.append(("guard", gid[G_GUARD]))
+        for sid, group_id in targets:
+            comment = LIST_COMMENT_PREFIX + sid
+            address = list_address(sid, self.base)
+            cur = existing.pop(comment, None)
+            if cur and cur["address"] != address:
+                self.api.request("DELETE", "/api/lists/%s?type=block" % Api.q(cur["address"]))
+                cur = None
+            if cur is None:
+                self.api.request("POST", "/api/lists?type=block",
+                                 {"address": address, "comment": comment,
+                                  "groups": [group_id], "enabled": True})
+                log.debug("registered list %s", sid)
+            elif cur.get("groups") != [group_id] or not cur.get("enabled"):
+                self.api.request("PUT", "/api/lists/%s?type=block" % Api.q(address),
+                                 {"comment": comment, "type": "block",
+                                  "groups": [group_id], "enabled": True})
+
+        # Services removed from the catalog: drop their list and group.
+        for comment, cur in existing.items():
+            self.api.request("DELETE", "/api/lists/%s?type=block" % Api.q(cur["address"]))
+            log.info("removed stale list %s", comment)
+        for name in list(gid):
+            if name.startswith(SVC_PREFIX) and name[len(SVC_PREFIX):] not in wanted:
+                self.api.delete_group(name)
+                log.info("removed stale group %s", name)
+                del gid[name]
+
+        # Make sure every kid device is in every (possibly new) group.
+        required = kid_groups(gid, self.catalog)
+        for c in self.api.clients():
+            groups_now = c.get("groups", [])
+            if gid[G_KIDS] in groups_now:
+                merged = sorted(set(groups_now) | set(required))
+                if merged != sorted(groups_now):
+                    self.api.put_client(c["client"], c.get("comment") or "", merged)
+
+        if run_gravity:
+            self.gravity()
+
+    @staticmethod
+    def gravity() -> None:
+        log.info("updating gravity (this can take a minute)…")
+        subprocess.run(["pihole", "-g"], check=True, stdout=subprocess.DEVNULL, timeout=1800)
+
+    def migrate_legacy(self) -> None:
+        """Remove objects created by the old (pre-2.0) installer."""
+        groups = self.api.group_map()
+        old = groups.get("Kids")
+        if not old or old.get("comment") != "Parental-control service blocklists":
+            return
+        log.info("migrating from the 1.x installer")
+        kids_old = old["id"]
+        paused_old = groups.get("Paused", {}).get("id")
+        legacy_devices = [c for c in self.api.clients() if kids_old in c.get("groups", [])]
+        for l in self.api.lists():
+            if (l.get("address") or "").startswith("file:///etc/pihole/lists/"):
+                self.api.request("DELETE", "/api/lists/%s?type=block" % Api.q(l["address"]))
+        for d in self.api.domains():
+            if d.get("kind") == "regex" and d.get("type") == "deny" and d.get("domain") in (".*", ".+"):
+                self.api.request("DELETE", "/api/domains/deny/regex/" + Api.q(d["domain"]))
+        for c in legacy_devices:
+            keep = [g for g in c.get("groups", []) if g not in (kids_old, paused_old)] or [DEFAULT_GROUP]
+            self.api.put_client(c["client"], c.get("comment") or "", keep)
+        self.api.delete_group("Kids")
+        if paused_old is not None and groups["Paused"].get("comment") == "Per-device pause":
+            self.api.delete_group("Paused")
+        # Re-added as kid devices once the new groups exist (readd_legacy_devices).
+        self._pending_kids = [c["client"] for c in legacy_devices]
+
+    def readd_legacy_devices(self) -> None:
+        pending = self._pending_kids
+        if not pending:
+            return
+        gid = {n: g["id"] for n, g in self.api.group_map().items()}
+        required = kid_groups(gid, self.catalog)
+        for c in self.api.clients():
+            if c["client"] in pending:
+                merged = sorted(set(c.get("groups", [])) | set(required))
+                self.api.put_client(c["client"], c.get("comment") or "", merged)
+        self._pending_kids = []
+
+    def remove(self) -> None:
+        groups = self.api.group_map()
+        ours = {g["id"] for n, g in groups.items() if n.startswith("pb-")}
+        for c in self.api.clients():
+            if set(c.get("groups", [])) & ours:
+                if groups.get(G_KIDS) and groups[G_KIDS]["id"] in c.get("groups", []):
+                    self.api.request("DELETE", "/api/clients/" + Api.q(c["client"]))
+                else:
+                    keep = [g for g in c["groups"] if g not in ours] or [DEFAULT_GROUP]
+                    self.api.put_client(c["client"], c.get("comment") or "", keep)
+        for l in self.api.lists():
+            if (l.get("comment") or "").startswith(LIST_COMMENT_PREFIX):
+                self.api.request("DELETE", "/api/lists/%s?type=block" % Api.q(l["address"]))
+        for d in self.api.domains():
+            if d.get("kind") == "regex" and d.get("domain") == BLOCK_ALL_REGEX:
+                self.api.request("DELETE", "/api/domains/deny/regex/" + Api.q(BLOCK_ALL_REGEX))
+        for name in groups:
+            if name.startswith("pb-"):
+                self.api.delete_group(name)
+
+    # ----- live state -----
+    def read_state(self):
+        groups = self.api.group_map()
+        state = parse_state(groups.get(G_STATE, {}).get("comment"))
+        blocked = {s["id"]: bool(groups.get(svc_group(s["id"]), {}).get("enabled"))
+                   for s in self.catalog["services"]}
+        offline = bool(groups.get(G_OFFLINE, {}).get("enabled"))
+        return state, blocked, offline, groups
+
+    def write_state(self, state: dict) -> None:
+        self.api.put_group(G_STATE, json.dumps(state, separators=(",", ":")), False)
+
+    def apply(self, blocked: dict, offline: bool, groups: dict) -> None:
+        for s in self.catalog["services"]:
+            name = svc_group(s["id"])
+            want = bool(blocked.get(s["id"], False))
+            g = groups.get(name)
+            if g is not None and bool(g["enabled"]) != want:
+                self.api.put_group(name, g.get("comment") or "", want)
+        g = groups[G_OFFLINE]
+        if bool(g["enabled"]) != offline:
+            self.api.put_group(G_OFFLINE, g.get("comment") or "", offline)
+
+    def tick(self, now: dt.datetime | None = None) -> list:
+        """One scheduler pass. Returns a list of human-readable actions taken."""
+        now = now or dt.datetime.now()
+        epoch = now.timestamp()
+        state, blocked, offline, groups = self.read_state()
+        actions = []
+        changed = False
+        window = in_schedule(state["schedule"], now)
+        timer = state["timer"]
+        timer_seen = json.dumps(timer, sort_keys=True)
+
+        if window != state["scheduleActive"]:
+            if window:                                  # bedtime starts
+                if timer and timer["mode"] == "free":
+                    self.apply(timer["snapshot"]["services"], True, groups)
+                    state["timer"] = timer = None
+                    actions.append("bedtime started: free-time timer ended early")
+                elif timer:
+                    timer["snapshot"]["offline"] = True
+                    actions.append("bedtime started during block timer")
+                else:
+                    self.apply(blocked, True, groups)
+                    actions.append("bedtime started: internet off")
+            else:                                       # bedtime ends
+                if timer:
+                    timer["snapshot"]["offline"] = False
+                    actions.append("bedtime ended during timer")
+                else:
+                    self.apply(blocked, False, groups)
+                    actions.append("bedtime ended: internet on")
+            state["scheduleActive"] = window
+            changed = True
+
+        if timer and timer["until"] <= epoch:
+            snap = timer["snapshot"]
+            self.apply(snap["services"], bool(snap["offline"]) or window, groups)
+            state["timer"] = None
+            changed = True
+            actions.append("%s timer finished: previous rules restored" % timer["mode"])
+
+        if changed:
+            # Re-read right before writing so a schedule edited in the page a
+            # moment ago is not overwritten; we only own timer + scheduleActive.
+            fresh = parse_state(self.api.group_map().get(G_STATE, {}).get("comment"))
+            if json.dumps(fresh["timer"], sort_keys=True) == timer_seen:
+                # Nobody touched the timer meanwhile, so our decision stands.
+                # Otherwise the page started/cancelled one and that wins.
+                fresh["timer"] = state["timer"]
+            fresh["scheduleActive"] = state["scheduleActive"]
+            self.write_state(fresh)
+        for a in actions:
+            log.info(a)
+        return actions
+
+
+# --------------------------------------------------------------------------- #
+# Commands
+# --------------------------------------------------------------------------- #
+def cmd_setup(args) -> int:
+    api = Api()
+    api.wait_ready()
+    api.login()
+    try:
+        ctl = Controller(api, load_catalog())
+        ctl.setup(run_gravity=False)
+        ctl.readd_legacy_devices()
+        if not args.no_gravity:
+            ctl.gravity()
+    finally:
+        api.logout()
+    print("pihole-bahrain: Pi-hole objects are up to date")
+    return 0
+
+
+def cmd_run(args) -> int:
+    stop = {"flag": False}
+
+    def _stop(*_):
+        stop["flag"] = True
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+
+    catalog = load_catalog()
+    api = None
+    backoff = 5
+    log.info("scheduler %s started", VERSION)
+    while not stop["flag"]:
+        try:
+            if api is None:
+                api = Api()
+                api.login()
+            Controller(api, catalog).tick()
+            backoff = 5
+            wait = TICK_SECONDS
+        except (ApiError, OSError, ValueError, KeyError) as err:
+            # FTL restarting, cli_pw rotated, network hiccup… retry with backoff.
+            log.warning("scheduler: %s (retrying in %ss)", err, backoff)
+            api = None
+            wait = backoff
+            backoff = min(backoff * 2, 120)
+        for _ in range(int(wait)):
+            if stop["flag"]:
+                break
+            time.sleep(1)
+    if api:
+        api.logout()
+    log.info("scheduler stopped")
+    return 0
+
+
+def cmd_status(args) -> int:
+    api = Api()
+    api.login()
+    try:
+        catalog = load_catalog()
+        ctl = Controller(api, catalog)
+        state, blocked, offline, groups = ctl.read_state()
+        kid_id = groups.get(G_KIDS, {}).get("id")
+        paused_id = groups.get(G_PAUSED, {}).get("id")
+        kids = [c for c in api.clients() if kid_id in c.get("groups", [])]
+        out = {
+            "version": VERSION,
+            "internet_off": offline,
+            "blocked": sorted(k for k, v in blocked.items() if v),
+            "devices": [{"client": c["client"], "name": c.get("comment") or "",
+                         "paused": paused_id in c.get("groups", [])} for c in kids],
+            "timer": state["timer"],
+            "schedule": state["schedule"],
+            "bedtime_now": state["scheduleActive"],
+        }
+    finally:
+        api.logout()
+    print(json.dumps(out, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_doctor(args) -> int:
+    problems = []
+
+    def check(ok, msg):
+        print(("  ok    " if ok else "  FIX   ") + msg)
+        if not ok:
+            problems.append(msg)
+
+    try:
+        check(subprocess.run(["systemctl", "is-active", "--quiet", "pihole-FTL"]).returncode == 0,
+              "pihole-FTL service is running")
+        check(subprocess.run(["systemctl", "is-active", "--quiet", "pihole-bahrain"]).returncode == 0,
+              "pihole-bahrain scheduler is running")
+    except OSError:
+        pass
+    try:
+        check(ftl_config("webserver.serve_all") == "true", "webserver.serve_all is true")
+        check(ftl_config("webserver.api.cli_pw") == "true", "webserver.api.cli_pw is true")
+        webroot = ftl_config("webserver.paths.webroot")
+        check(os.path.isfile(os.path.join(webroot, "pb", "app.js")), "web page installed in " + webroot)
+    except (OSError, subprocess.SubprocessError) as err:
+        check(False, "pihole-FTL CLI available (%s)" % err)
+    try:
+        api = Api()
+        api.login()
+        catalog = load_catalog()
+        groups = api.group_map()
+        missing = [n for n in [G_KIDS, G_GUARD, G_OFFLINE, G_PAUSED, G_STATE]
+                   + [svc_group(s["id"]) for s in catalog["services"]] if n not in groups]
+        check(not missing, "all groups present" + (" (missing: %s)" % ", ".join(missing) if missing else ""))
+        lists = [l for l in api.lists() if (l.get("comment") or "").startswith(LIST_COMMENT_PREFIX)]
+        empty = [l["comment"] for l in lists if not l.get("number")]
+        check(len(lists) == len(catalog["services"]) + 1, "%d service lists registered" % len(lists))
+        check(not empty, "all lists compiled into gravity" +
+              (" (empty: %s — run 'pihole -g')" % ", ".join(empty) if empty else ""))
+        kids = [c for c in api.clients() if groups.get(G_KIDS, {}).get("id") in c.get("groups", [])]
+        print("  info  %d child device(s) added" % len(kids))
+        base = lists_base()
+        if base.startswith("http"):
+            try:
+                with urllib.request.urlopen(base + "/guard.txt", timeout=15) as resp:
+                    check(resp.status == 200, "list server reachable (%s)" % base)
+            except (OSError, urllib.error.URLError) as err:
+                check(False, "list server reachable (%s: %s)" % (base, err))
+        api.logout()
+    except (ApiError, OSError, ValueError) as err:
+        check(False, "Pi-hole API reachable (%s)" % err)
+    print("\nAll good." if not problems else "\n%d problem(s) found." % len(problems))
+    return 1 if problems else 0
+
+
+def cmd_configure(args) -> int:
+    conf = read_config()
+    ftl_set_config("webserver.serve_all", "true")
+    ftl_set_config("webserver.api.cli_pw", "true")
+    hostname = args.hostname if args.hostname is not None else conf.get("PB_HOSTNAME", "")
+    old = conf.get("PB_HOSTNAME", "")
+    hosts = parse_cli_array(ftl_config("dns.hosts"))
+    new = hosts
+    if args.remove_hostname:
+        new = [h for h in hosts if (hostname or old) not in h.split()[1:]]
+    elif hostname and args.ip:
+        new = merged_hosts(hosts, args.ip, hostname)
+    if new != hosts:
+        ftl_set_config("dns.hosts", json.dumps(new))
+    if args.disable_web:
+        ftl_set_config("webserver.serve_all", "false")
+    print("pihole-bahrain: Pi-hole settings applied")
+    return 0
+
+
+def cmd_update(args) -> int:
+    conf = read_config()
+    src = os.path.join(APP_DIR, "src")
+    repo = conf.get("PB_REPO", "https://github.com/iret33/pihole-bahrain.git")
+    ref = args.ref or conf.get("PB_REF", "master")
+    if not os.path.isdir(os.path.join(src, ".git")):
+        subprocess.run(["rm", "-rf", src], check=True)
+        subprocess.run(["git", "clone", "--quiet", "--depth", "1", "--branch", ref, repo, src], check=True)
+    else:
+        subprocess.run(["git", "-C", src, "fetch", "--quiet", "--depth", "1", "origin", ref], check=True)
+        subprocess.run(["git", "-C", src, "checkout", "--quiet", "--force", "FETCH_HEAD"], check=True)
+    env = dict(os.environ, PB_REF=ref, PB_NONINTERACTIVE="1")
+    return subprocess.run(["bash", os.path.join(src, "install.sh")], env=env).returncode
+
+
+def cmd_password_state(args) -> int:
+    api = Api()
+    api.wait_ready()
+    return 0 if api.password_set() else 3
+
+
+def cmd_remove(args) -> int:
+    api = Api()
+    api.login()
+    try:
+        Controller(api, load_catalog()).remove()
+    finally:
+        api.logout()
+    print("pihole-bahrain: removed its groups, lists, rules and kid devices from Pi-hole")
+    return 0
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(prog="pihole-bahrain", description=__doc__.split("\n")[0])
+    parser.add_argument("--version", action="version", version=VERSION)
+    parser.add_argument("-v", "--verbose", action="store_true")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("setup", help="create/refresh Pi-hole objects")
+    p.add_argument("--no-gravity", action="store_true", help="skip 'pihole -g'")
+    p.set_defaults(fn=cmd_setup)
+    p = sub.add_parser("configure", help="apply required Pi-hole settings")
+    p.add_argument("--hostname", default=None, help="local name for the parent page, e.g. family.lan")
+    p.add_argument("--ip", default=None, help="this device's LAN address")
+    p.add_argument("--remove-hostname", action="store_true")
+    p.add_argument("--disable-web", action="store_true", help="turn webserver.serve_all off (uninstall)")
+    p.set_defaults(fn=cmd_configure)
+    p = sub.add_parser("update", help="update to the latest version")
+    p.add_argument("--ref", default=None, help="git branch or tag (default from config)")
+    p.set_defaults(fn=cmd_update)
+    sub.add_parser("password-state", help=argparse.SUPPRESS).set_defaults(fn=cmd_password_state)
+    sub.add_parser("run", help="run the scheduler (systemd)").set_defaults(fn=cmd_run)
+    sub.add_parser("status", help="print current state").set_defaults(fn=cmd_status)
+    sub.add_parser("doctor", help="check the installation").set_defaults(fn=cmd_doctor)
+    sub.add_parser("remove", help="delete this add-on's Pi-hole objects").set_defaults(fn=cmd_remove)
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+                        format="%(levelname)s %(message)s", stream=sys.stderr)
+    if os.geteuid() != 0 and "PB_API_URL" not in os.environ:
+        print("pihole-bahrain: run as root (sudo)", file=sys.stderr)
+        return 1
+    try:
+        return args.fn(args)
+    except ApiError as err:
+        print("pihole-bahrain: Pi-hole API error: %s" % err, file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

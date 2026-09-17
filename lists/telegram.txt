@@ -1,5 +1,11 @@
+! Title: pihole-bahrain / telegram
+! Format: Adblock-style, one ||domain^ per line
+||cdn-telegram.org^
 ||t.me^
+||tdesktop.com^
+||telegra.ph^
 ||telegram.dog^
 ||telegram.me^
 ||telegram.org^
 ||telegram.space^
+||telesco.pe^
