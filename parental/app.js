@@ -242,6 +242,17 @@ var ICONS={
   }
   function freeTime() { return apply(Object.keys(SERVICE_META).map(function (c) { return [c, false]; }), false); }
   function blockAll() { return apply(Object.keys(SERVICE_META).map(function (c) { return [c, true]; }), false); }
+  function captureSnapshot() {
+    var snap = { services: {}, kill: S.kill ? S.kill.enabled : false };
+    (S.services || []).forEach(function (s) { snap.services[s.comment] = s.enabled; });
+    return snap;
+  }
+  function restoreSnapshot(snap) {
+    snap = snap || {};
+    var svcs = snap.services || {};
+    var changes = Object.keys(SERVICE_META).map(function (c) { return [c, svcs[c] !== false]; });
+    return apply(changes, snap.kill === true);
+  }
 
   // ---- render ----
   function render() {
@@ -316,8 +327,8 @@ var ICONS={
     var p = function (n) { return String(n).padStart(2, '0'); };
     return h > 0 ? (h + ':' + p(m) + ':' + p(s)) : (p(m) + ':' + p(s));
   }
-  function timerExpires() {
-    try { var t = JSON.parse(localStorage.getItem(TIMER_KEY) || 'null'); return (t && t.expires) ? t.expires : null; }
+  function timerData() {
+    try { return JSON.parse(localStorage.getItem(TIMER_KEY) || 'null'); }
     catch (e) { return null; }
   }
   function renderTimer(leftMs) {
@@ -335,14 +346,15 @@ var ICONS={
   }
   function scheduleTimer() {
     clearInterval(timerTick);
-    var exp = timerExpires();
-    if (!exp) { renderTimer(null); return; }
+    var data = timerData();
+    if (!data || !data.expires) { renderTimer(null); return; }
+    var exp = data.expires, snap = data.snapshot;
     function upd() {
       var left = exp - Date.now();
       if (left <= 0) {
         clearInterval(timerTick);
         localStorage.removeItem(TIMER_KEY);
-        blockAll().then(function () { return loadState(); }).catch(function () {});
+        restoreSnapshot(snap).then(function () { return loadState(); }).catch(function () {});
         return;
       }
       renderTimer(left);
@@ -382,7 +394,8 @@ var ICONS={
     },
     timerCancel: function () {
       withBusy(function () {
-        return blockAll().then(function () {
+        var snap = (timerData() || {}).snapshot;
+        return restoreSnapshot(snap).then(function () {
           localStorage.removeItem(TIMER_KEY);
           scheduleTimer();
         });
