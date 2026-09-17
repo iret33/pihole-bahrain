@@ -51,15 +51,29 @@
   <div class="card">
     <h2>Free time timer</h2>
     <div class="row">
-      <button class="act" data-act="timer-set" data-hours="1">1 hour</button>
-      <button class="act" data-act="timer-set" data-hours="2">2 hours</button>
-      <button class="act" data-act="timer-set" data-hours="3">3 hours</button>
+      <button class="act" data-act="timer-set" data-mode="free" data-hours="1">1 hour</button>
+      <button class="act" data-act="timer-set" data-mode="free" data-hours="2">2 hours</button>
+      <button class="act" data-act="timer-set" data-mode="free" data-hours="3">3 hours</button>
       <input id="timerHours" type="number" min="0.5" step="0.5" placeholder="Custom hours" style="max-width:150px">
-      <button class="pri" data-act="timer-custom">Start</button>
+      <button class="pri" data-act="timer-custom" data-mode="free">Start</button>
       <button class="danger" id="timerCancel" data-act="timer-cancel" style="display:none">Cancel timer</button>
     </div>
     <div class="countdown" id="timerCount" style="display:none"></div>
     <div class="hint" id="timerStatus">Unblocks everything, then restores the previous blocking when the timer ends.</div>
+  </div>
+
+  <div class="card">
+    <h2>Block everything timer</h2>
+    <div class="row">
+      <button class="act" data-act="timer-set" data-mode="block" data-hours="1">1 hour</button>
+      <button class="act" data-act="timer-set" data-mode="block" data-hours="2">2 hours</button>
+      <button class="act" data-act="timer-set" data-mode="block" data-hours="3">3 hours</button>
+      <input id="blockHours" type="number" min="0.5" step="0.5" placeholder="Custom hours" style="max-width:150px">
+      <button class="pri" data-act="timer-custom" data-mode="block">Start</button>
+      <button class="danger" id="blockCancel" data-act="timer-cancel" style="display:none">Cancel timer</button>
+    </div>
+    <div class="countdown" id="blockCount" style="display:none"></div>
+    <div class="hint" id="blockStatus">Blocks everything, then opens it all back up when the timer ends.</div>
   </div>
 
   <div class="card">

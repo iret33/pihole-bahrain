@@ -242,6 +242,7 @@ var ICONS={
   }
   function freeTime() { return apply(Object.keys(SERVICE_META).map(function (c) { return [c, false]; }), false); }
   function blockAll() { return apply(Object.keys(SERVICE_META).map(function (c) { return [c, true]; }), false); }
+  function blockEverything() { return apply(Object.keys(SERVICE_META).map(function (c) { return [c, true]; }), true); }
   function captureSnapshot() {
     var snap = { services: {}, kill: S.kill ? S.kill.enabled : false };
     (S.services || []).forEach(function (s) { snap.services[s.comment] = s.enabled; });
@@ -253,70 +254,9 @@ var ICONS={
     var changes = Object.keys(SERVICE_META).map(function (c) { return [c, svcs[c] !== false]; });
     return apply(changes, snap.kill === true);
   }
-
-  // ---- render ----
-  function render() {
-    var k = $('kids');
-    k.innerHTML = S.kids.length ? S.kids.map(function (d) {
-      var nm = esc(d.comment || d.client);
-      return '<div class="kid"><div><div class="name">' + nm + (d.locked ? ' <span class="tag paused">paused</span>' : '') +
-        '</div><div class="meta">' + esc(d.client) + '</div></div><div style="display:flex;gap:8px">' +
-        '<button data-act="lock" data-client="' + esc(d.client) + '" data-want="' + (!d.locked) + '">' + (d.locked ? 'Resume' : 'Pause') + '</button>' +
-        '<button class="danger" data-act="rm" data-client="' + esc(d.client) + '">Remove</button></div></div>';
-    }).join('') : '<div style="color:var(--dim);padding:4px 0">No devices yet &mdash; nothing is filtered.</div>';
-
-    var by = {}; S.services.forEach(function (s) { by[s.comment] = s; });
-    var html = '';
-    S.cats.forEach(function (cat) {
-      var names = cat[1].filter(function (n) { return by[n]; });
-      if (!names.length) return;
-      html += '<div class="sec">' + esc(cat[0]) + '</div><div class="grid">';
-      names.forEach(function (n) {
-        var s = by[n];
-        html += '<div class="svc">' + svgIcon(n) + '<span class="nm">' + esc(S.meta[n] || n) + '</span>' +
-          '<button class="sw ' + (s.enabled ? 'on' : '') + '" title="' + (s.enabled ? 'Blocked' : 'Allowed') + '" ' +
-          'data-act="toggle" data-comment="' + esc(s.comment) + '" data-want="' + (!s.enabled) + '"></button></div>';
-      });
-      html += '</div>';
-    });
-    $('svcs').innerHTML = html;
-    var blocked = S.services.filter(function (s) { return s.enabled; }).length;
-    $('svcCount').textContent = blocked + ' of ' + S.services.length + ' blocked';
-
-    var on = S.kill.enabled;
-    $('bigwrap').className = 'big' + (on ? ' on' : '');
-    $('killtitle').textContent = on ? 'Internet is blocked' : 'Block the entire internet';
-    $('kill').className = 'bigbtn' + (on ? ' armed' : '');
-    $('kill').textContent = on ? 'Unblock all' : 'Block all';
-
-    var paused = S.kids.filter(function (d) { return d.locked; }).length;
-    $('status').textContent = on ? 'Internet BLOCKED' : (paused ? paused + ' device paused' : 'Internet allowed');
-    $('foot').textContent = 'Pi-hole ' + (S.version || '') + ' \u00B7 ' + S.kids.length + ' kid device(s) \u00B7 ' + blocked + '/' + S.services.length + ' services blocked';
-
-    loadDevices();
-  }
-  function loadDevices() {
-    return api('GET', '/api/network/devices?max_devices=500').then(function (d) {
-      var sel = $('devpick'), known = {};
-      S.kids.forEach(function (k) { known[k.client] = 1; });
-      var o = [];
-      (d.devices || []).forEach(function (dev) {
-        (dev.ips || []).forEach(function (i) {
-          if (!i.ip) return;
-          o.push('<option value="' + esc(i.ip) + '">' + esc((i.name || dev.macVendor || i.ip) + ' \u00B7 ' + i.ip) + (known[i.ip] ? ' (kid)' : '') + '</option>');
-        });
-      });
-      sel.innerHTML = o.length ? '<option value="">\u2014 pick a device seen on your network \u2014</option>' + o.join('')
-        : '<option value="">No devices seen yet \u2014 type the IP below</option>';
-    }).catch(function () {});
-  }
-  function pick(ip) { if (ip) $('devip').value = ip; }
-
-  function withBusy(fn, okmsg) {
-    if (BUSY) return; BUSY = true;
-    document.querySelectorAll('.sw,.preset,.bigbtn,button').forEach(function (b) { b.classList.add('busy'); });
-    fn().then(function () { toast(okmsg); }).catch(function (e) { toast('Failed: ' + e.message); })
-      .then(function () { BUSY = false; document.querySelectorAll('.busy').forEach(function (b) { b.classList.remove('busy'); }); return loadState(); });
+  function timerEnd(mode, snap) {
+    if (mode === 'block') return freeTime();
+    return restoreSnapshot(snap);
   }
 
   var TIMER_KEY = 'pihole_bahrain_timer';
@@ -331,33 +271,41 @@ var ICONS={
     try { return JSON.parse(localStorage.getItem(TIMER_KEY) || 'null'); }
     catch (e) { return null; }
   }
-  function renderTimer(leftMs) {
-    var cancel = $('timerCancel'), status = $('timerStatus'), count = $('timerCount');
+  function setCard(prefix, isActive, leftMs, inactiveText, activeText) {
+    var cancel = $(prefix + 'Cancel'), status = $(prefix + 'Status'), count = $(prefix + 'Count');
     if (!cancel || !status) return;
-    if (leftMs === null || leftMs === undefined) {
-      cancel.style.display = 'none';
-      if (count) count.style.display = 'none';
-      status.textContent = 'Unblocks everything, then re-blocks when the timer ends.';
-    } else {
-      cancel.style.display = '';
-      if (count) { count.style.display = ''; count.textContent = fmtDur(leftMs / 1000); }
-      status.textContent = 'Free time active — re-blocks when the timer ends.';
+    cancel.style.display = isActive ? '' : 'none';
+    if (count) {
+      count.style.display = isActive ? '' : 'none';
+      if (isActive && leftMs !== null && leftMs !== undefined) count.textContent = fmtDur(leftMs / 1000);
     }
+    status.textContent = isActive ? activeText : inactiveText;
+  }
+  function renderTimers() {
+    var data = timerData();
+    var active = data && data.expires ? (data.mode || 'free') : null;
+    var left = active ? data.expires - Date.now() : null;
+    setCard('timer', active === 'free', left,
+      'Unblocks everything, then restores the previous blocking when the timer ends.',
+      'Free time active — restores when the timer ends.');
+    setCard('block', active === 'block', left,
+      'Blocks everything, then opens it all back up when the timer ends.',
+      'Blocking active — opens everything when the timer ends.');
   }
   function scheduleTimer() {
     clearInterval(timerTick);
     var data = timerData();
-    if (!data || !data.expires) { renderTimer(null); return; }
-    var exp = data.expires, snap = data.snapshot;
+    if (!data || !data.expires) { renderTimers(); return; }
+    var exp = data.expires, snap = data.snapshot, mode = data.mode || 'free';
     function upd() {
       var left = exp - Date.now();
       if (left <= 0) {
         clearInterval(timerTick);
         localStorage.removeItem(TIMER_KEY);
-        restoreSnapshot(snap).then(function () { return loadState(); }).catch(function () {});
+        timerEnd(mode, snap).then(function () { return loadState(); }).catch(function () {});
         return;
       }
-      renderTimer(left);
+      renderTimers();
     }
     upd();
     timerTick = setInterval(upd, 1000);
@@ -379,27 +327,31 @@ var ICONS={
       if (want && !confirm('Block the internet for EVERYONE using this Pi-hole?')) return;
       withBusy(function () { return setKill(want).then(function () { return restart(); }); }, want ? 'Internet blocked' : 'Internet unblocked');
     },
-    timer: function (h) {
+    timer: function (mode, h) {
+      mode = mode || 'free';
       withBusy(function () {
-        return freeTime().then(function () {
-          localStorage.setItem(TIMER_KEY, JSON.stringify({ expires: Date.now() + h * 3600000 }));
+        var snap = captureSnapshot();
+        var start = (mode === 'block') ? blockEverything() : freeTime();
+        return start.then(function () {
+          localStorage.setItem(TIMER_KEY, JSON.stringify({ expires: Date.now() + h * 3600000, snapshot: snap, mode: mode }));
           scheduleTimer();
         });
-      }, 'Free time for ' + h + ' hour' + (h === 1 ? '' : 's'));
+      }, (mode === 'block' ? 'Blocking for ' : 'Free time for ') + h + ' hour' + (h === 1 ? '' : 's'));
     },
-    timerCustom: function () {
-      var h = parseFloat($('timerHours').value);
+    timerCustom: function (mode) {
+      mode = mode || 'free';
+      var h = parseFloat($(mode === 'block' ? 'blockHours' : 'timerHours').value);
       if (!(h > 0)) { toast('Enter the number of hours'); return; }
-      window.PC.timer(h);
+      window.PC.timer(mode, h);
     },
     timerCancel: function () {
       withBusy(function () {
-        var snap = (timerData() || {}).snapshot;
-        return restoreSnapshot(snap).then(function () {
+        var d = timerData() || {};
+        return timerEnd(d.mode || 'free', d.snapshot).then(function () {
           localStorage.removeItem(TIMER_KEY);
           scheduleTimer();
         });
-      }, 'Timer cancelled — blocked again');
+      }, 'Timer cancelled');
     }
   };
 
@@ -418,8 +370,8 @@ var ICONS={
     if (act === 'toggle') window.PC.toggle(el.getAttribute('data-comment'), el.getAttribute('data-want') === 'true');
     else if (act === 'lock') window.PC.lock(el.getAttribute('data-client'), el.getAttribute('data-want') === 'true');
     else if (act === 'rm') window.PC.rm(el.getAttribute('data-client'));
-    else if (act === 'timer-set') window.PC.timer(parseFloat(el.getAttribute('data-hours')));
-    else if (act === 'timer-custom') window.PC.timerCustom();
+    else if (act === 'timer-set') window.PC.timer(el.getAttribute('data-mode') || 'free', parseFloat(el.getAttribute('data-hours')));
+    else if (act === 'timer-custom') window.PC.timerCustom(el.getAttribute('data-mode') || 'free');
     else if (act === 'timer-cancel') window.PC.timerCancel();
   });
 
