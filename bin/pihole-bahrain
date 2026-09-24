@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import http.client
 import json
 import logging
 import os
@@ -140,7 +141,8 @@ class ApiError(Exception):
 
 
 def ftl_config(key: str) -> str:
-    out = subprocess.run(["pihole-FTL", "--config", "-q", key],
+    # No "-q": with it, reading a boolean that is false exits with status 1.
+    out = subprocess.run(["pihole-FTL", "--config", key],
                          check=True, capture_output=True, text=True, timeout=30)
     return out.stdout.strip()
 
@@ -151,7 +153,7 @@ def ftl_set_config(key: str, value: str) -> None:
 
 
 def parse_cli_array(text: str) -> list:
-    """Parse `pihole-FTL --config -q <array>` output: [ a b, c d ] (unquoted)."""
+    """Parse `pihole-FTL --config <array>` output: [ a b, c d ] (unquoted)."""
     text = text.strip()
     if text.startswith("[") and text.endswith("]"):
         text = text[1:-1]
@@ -664,7 +666,7 @@ def cmd_run(args) -> int:
             Controller(api, catalog).tick()
             backoff = 5
             wait = TICK_SECONDS
-        except (ApiError, OSError, ValueError, KeyError) as err:
+        except (ApiError, OSError, ValueError, KeyError, http.client.HTTPException) as err:
             # FTL restarting, cli_pw rotated, network hiccup… retry with backoff.
             log.warning("scheduler: %s (retrying in %ss)", err, backoff)
             api = None
@@ -761,14 +763,17 @@ def cmd_configure(args) -> int:
     conf = read_config()
     ftl_set_config("webserver.serve_all", "true")
     ftl_set_config("webserver.api.cli_pw", "true")
-    hostname = args.hostname if args.hostname is not None else conf.get("PB_HOSTNAME", "")
+    # The config file still holds the name added by the previous run (install.sh
+    # rewrites it afterwards), so a renamed or removed name does not linger.
     old = conf.get("PB_HOSTNAME", "")
+    hostname = args.hostname if args.hostname is not None else old
+    ours = {n for n in (old, hostname) if n}
     hosts = parse_cli_array(ftl_config("dns.hosts"))
     new = hosts
-    if args.remove_hostname:
-        new = [h for h in hosts if (hostname or old) not in h.split()[1:]]
-    elif hostname and args.ip:
-        new = merged_hosts(hosts, args.ip, hostname)
+    if args.remove_hostname or args.ip:
+        new = [h for h in hosts if not ours & set(h.split()[1:])]
+        if hostname and args.ip and not args.remove_hostname:
+            new = merged_hosts(new, args.ip, hostname)
     if new != hosts:
         ftl_set_config("dns.hosts", json.dumps(new))
     if args.disable_web:

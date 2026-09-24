@@ -32,6 +32,9 @@ The installer:
 Running the same command again updates everything and keeps the password,
 devices and rules.
 
+An existing Pi-hole v6 is used as it is. If the device still runs Pi-hole v5,
+update it first with `sudo pihole -up` (the installer stops and says so).
+
 ### Options
 
 Pass these as environment variables after `sudo`, for example
