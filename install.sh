@@ -17,6 +17,7 @@
 #   PB_REPO, PB_REF    git source, default this repository, branch master
 #   PB_NONINTERACTIVE  1 = never prompt
 set -Eeuo pipefail
+shopt -s inherit_errexit   # also stop on failures inside $(…), e.g. a failed download
 
 main() {
   # ---------------------------------------------------------------- constants
@@ -55,9 +56,9 @@ main() {
   detect_network
   install_pihole
   install_files
-  write_settings
   set_timezone
-  configure_pihole
+  configure_pihole          # before write_settings: it reads the previous hostname
+  write_settings
   set_password
   step "Setting up groups, rules and block lists (downloads lists, can take a minute)"
   "$BIN_LINK" setup
@@ -182,11 +183,15 @@ detect_network() {
 
 install_pihole() {
   step "Checking Pi-hole"
-  if command -v pihole-FTL >/dev/null && [[ -f "$TOML" ]]; then
-    pihole-FTL --config -q webserver.serve_all >/dev/null 2>&1 \
-      || die "Pi-hole is older than v6. Update it first with: sudo pihole -up"
-    ok "Pi-hole v6 is already installed"
-    return
+  if command -v pihole-FTL >/dev/null; then
+    # v6 keeps its settings in pihole.toml and answers --config. (Not with -q:
+    # that exits 1 whenever a true/false setting is false.) A v5 install must
+    # be upgraded by Pi-hole itself, which migrates its old settings.
+    if [[ -f "$TOML" ]] && pihole-FTL --config webserver.paths.webroot >/dev/null 2>&1; then
+      ok "Pi-hole v6 is already installed"
+      return
+    fi
+    die "Pi-hole is older than v6. Update it first with: sudo pihole -up"
   fi
   if [[ ! -f "$TOML" ]]; then
     # A config file makes Pi-hole's --unattended mode skip every dialog.
@@ -298,9 +303,7 @@ set_timezone() {
 
 configure_pihole() {
   step "Applying Pi-hole settings"
-  local args=(configure --ip "$IPV4")
-  [[ -n "$PB_HOSTNAME" ]] && args+=(--hostname "$PB_HOSTNAME")
-  "$BIN_LINK" "${args[@]}"
+  "$BIN_LINK" configure --ip "$IPV4" --hostname "$PB_HOSTNAME"   # "" removes the name
   ok "Parent page enabled at http://$IPV4/${PB_HOSTNAME:+ and http://$PB_HOSTNAME/}"
 }
 
