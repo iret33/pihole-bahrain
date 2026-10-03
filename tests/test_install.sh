@@ -44,7 +44,8 @@ db = "$WORK/ftl.json"
 conf = json.load(open(db)) if os.path.exists(db) else {
     "webserver.serve_all": "false", "webserver.api.cli_pw": "true",
     "webserver.paths.webroot": "$ROOT/var/www/html", "webserver.port": "80o,443os",
-    "dns.hosts": "[ 192.168.1.9 nas.lan ]"}
+    "dns.hosts": "[ 192.168.1.9 nas.lan ]", "resolver.macNames": "true", "dns.blocking.active": "true",
+    "files.log.ftl": "$WORK/FTL.log"}
 args = [a for a in sys.argv[1:] if a != "-q"]
 assert args[0] == "--config", args
 if len(args) == 2:
