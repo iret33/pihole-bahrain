@@ -106,6 +106,12 @@ grep -q 'content="pihole-bahrain"' "$ROOT/var/www/html/index.html" || fail "wron
 [[ ! -e "$ROOT/var/www/html/parental" ]] || fail "legacy page not removed"
 [[ ! -e "$ROOT/var/www/html/index.html.pb-backup" ]] || fail "legacy page should not be backed up"
 [[ -f "$ROOT/var/www/html/pb/app.js" && -f "$ROOT/var/www/html/pb/services.json" ]] || fail "assets missing"
+python3 - "$ROOT/var/www/html/pb/domains.json" <<'PYEOF' || fail "domains.json is missing or wrong"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["v"] == 1 and d["domains"]["youtube.com"] == "youtube" and d["domains"]["googlevideo.com"] == "youtube", d["domains"].get("youtube.com")
+assert len(d["domains"]) > 200
+PYEOF
 [[ -f "$ROOT/var/www/html/pb/fonts/plex-arabic-arabic-400.woff2" ]] || fail "fonts missing"
 [[ -L "$ROOT/usr/local/bin/pihole-bahrain" ]] || fail "cli link missing"
 grep -q '^PB_HOSTNAME=family.lan' "$ROOT/etc/pihole-bahrain/config" || fail "config not written"

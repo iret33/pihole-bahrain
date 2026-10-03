@@ -20,8 +20,10 @@ jobs:
         run: |
           pip install shellcheck-py
           shellcheck install.sh uninstall.sh tests/test_install.sh
-      - name: JavaScript syntax
-        run: node --check web/app.js
+      - name: JavaScript syntax and logic tests
+        run: |
+          for f in web/*.js; do node --check "$f"; done
+          node --test tests/pb-core.test.js
       - name: Installer end-to-end (stubbed system)
         run: sudo -E env "PATH=$PATH" bash tests/test_install.sh
       - name: Browser test (Arabic/English, timers, devices)
