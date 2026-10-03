@@ -34,6 +34,14 @@ main() {
 
   mkdir -p "$(dirname "$LOG_FILE")"
   if [[ "${PB_REEXEC:-}" != 1 ]]; then
+    # Older versions printed the generated parent password into this log. Remove such lines now,
+    # while nothing has the file open: sed -i replaces the file, so doing it after tee has opened
+    # it would send the rest of this run into a deleted file. Then keep the log root-only.
+    if [[ -f "$LOG_FILE" ]]; then
+      sed -i '/^[[:space:]]*Password:/d' "$LOG_FILE"
+    fi
+    ( umask 077; : >>"$LOG_FILE" )
+    chmod 600 "$LOG_FILE"
     exec > >(tee -a "$LOG_FILE") 2>&1
   fi
   trap 'on_error $LINENO' ERR
@@ -67,6 +75,7 @@ main() {
   step "Final check"
   "$BIN_LINK" doctor || warn "Some checks failed — see above. Run 'sudo pihole-bahrain doctor' again later."
   summary
+  show_generated_password
 }
 
 # ------------------------------------------------------------------ output
@@ -79,7 +88,9 @@ on_error() {
   printf '\n%sInstallation failed%s (line %s). Full log: %s\n' "$RD" "$N" "$1" "$LOG_FILE" >&2
   printf 'It is safe to run the installer again after fixing the problem.\n' >&2
 }
-can_prompt() { [[ "${PB_NONINTERACTIVE:-}" != 1 ]] && { : </dev/tty; } 2>/dev/null; }
+TTY_DEV="${PB_TTY:-/dev/tty}"      # the terminal; PB_TTY is a test hook
+can_prompt() { [[ "${PB_NONINTERACTIVE:-}" != 1 ]] && { : <"$TTY_DEV"; } 2>/dev/null; }
+has_tty() { { : >>"$TTY_DEV"; } 2>/dev/null; }
 
 # ------------------------------------------------------------------ steps
 # shellcheck disable=SC1091  # /etc/os-release is read at runtime
@@ -326,9 +337,9 @@ set_password() {
   if [[ -z "$pw" ]] && can_prompt; then
     local again
     while true; do
-      read -r -s -p "  Choose a password for the parent page (8+ characters): " pw </dev/tty; echo
+      read -r -s -p "  Choose a password for the parent page (8+ characters): " pw <"$TTY_DEV"; echo
       if (( ${#pw} < 8 )); then echo "  Too short, try again."; continue; fi
-      read -r -s -p "  Type it again: " again </dev/tty; echo
+      read -r -s -p "  Type it again: " again <"$TTY_DEV"; echo
       [[ "$pw" == "$again" ]] && break
       echo "  The two passwords are different, try again."
     done
@@ -357,6 +368,22 @@ install_services() {
   ok "Scheduler running; lists refresh every night"
 }
 
+# A password we generated is never written to stdout, because stdout is copied into the install log.
+# It goes to the terminal only; without a terminal it is saved in a root-only file instead.
+show_generated_password() {
+  [[ -n "${SHOW_PASSWORD:-}" ]] || return 0
+  if has_tty; then
+    sleep 0.3   # let the copy of stdout (tee) finish printing, so this lands last on the screen
+    printf '\n  %sParent password: %s%s\n  Shown on this screen only. Change it any time with: sudo pihole setpassword\n\n' \
+      "$B" "$SHOW_PASSWORD" "$N" >>"$TTY_DEV"
+  else
+    local file="$CONF_DIR/initial-password"
+    ( umask 077; printf '%s\n' "$SHOW_PASSWORD" >"$file" )
+    chmod 600 "$file"
+    printf '\n  Parent password: saved in %s (readable by root only).\n  Read it, then delete the file. Change it any time with: sudo pihole setpassword\n\n' "$file"
+  fi
+}
+
 summary() {
   local url="http://$IPV4/"
   cat <<EOF
@@ -367,7 +394,7 @@ ${G}${B}Family Internet is ready.${N}
                  or http://$PB_HOSTNAME/ (after the router step below)}
 EOF
   if [[ -n "${SHOW_PASSWORD:-}" ]]; then
-    printf '  Password:      %s%s%s   (write it down; change it with: sudo pihole setpassword)\n' "$B" "$SHOW_PASSWORD" "$N"
+    printf '  Password:      generated for you, shown below\n'
   fi
   cat <<EOF
   Pi-hole admin: http://$IPV4/admin/

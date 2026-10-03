@@ -158,9 +158,41 @@ grep -q 'older than v6' "$WORK/v5.out" || { cat "$WORK/v5.out"; fail "no v5 mess
 [[ ! -e "$ROOT/etc/pihole/pihole.toml" ]] || fail "v6 settings written over a v5 install"
 mv "$WORK/toml.bak" "$ROOT/etc/pihole/pihole.toml"
 
+echo "--- a generated parent password never reaches the install log"
+set_auth() { curl -s -X POST "http://127.0.0.1:$PORT/__mock__/require_auth" -d "{\"value\": $1}" >/dev/null; }
+LOG="$ROOT/var/log/pihole-bahrain-install.log"
+last_password() { grep 'pihole setpassword' "$WORK/calls.log" | tail -1 | awk '{print $3}'; }
+printf '  Password:      OLD-OLD-OLD-OLD   (written by an older version)\n' >>"$LOG"
+chmod 644 "$LOG"
+set_auth false                                  # Pi-hole has no password: the installer generates one
+echo "    without a terminal"
+PB_TTY="$WORK/no-such-dir/tty" bash "$REPO/install.sh" >"$WORK/pw1.out" 2>&1 || { cat "$WORK/pw1.out"; fail "install without a password failed"; }
+pw1="$(last_password)"
+[[ ${#pw1} -ge 8 ]] || fail "no password was generated"
+grep -qF "$pw1" "$LOG" && fail "generated password is in the install log"
+grep -qF "$pw1" "$WORK/pw1.out" && fail "generated password was printed to stdout"
+[[ "$(stat -c %a "$LOG")" == 600 ]] || fail "install log mode is $(stat -c %a "$LOG"), expected 600"
+grep -q 'OLD-OLD-OLD-OLD' "$LOG" && fail "password line from an older version was not scrubbed"
+grep -q 'Installing version' "$LOG" || fail "this run's output is missing from the log (scrubbed file swapped under tee?)"
+PWFILE="$ROOT/etc/pihole-bahrain/initial-password"
+[[ "$(stat -c %a "$PWFILE")" == 600 ]] || fail "initial-password mode is $(stat -c %a "$PWFILE"), expected 600"
+[[ "$(cat "$PWFILE")" == "$pw1" ]] || fail "initial-password does not hold the generated password"
+grep -q "$PWFILE" "$WORK/pw1.out" || fail "the path of the saved password was not shown"
+echo "    with a terminal"
+rm -f "$PWFILE"; : >"$WORK/fake_tty"
+PB_TTY="$WORK/fake_tty" bash "$REPO/install.sh" >"$WORK/pw2.out" 2>&1 || { cat "$WORK/pw2.out"; fail "install with a terminal failed"; }
+pw2="$(last_password)"
+[[ -n "$pw2" && "$pw2" != "$pw1" ]] || fail "second run did not generate a new password"
+grep -qF "$pw2" "$WORK/fake_tty" || fail "password was not shown on the terminal"
+grep -qF "$pw2" "$LOG" && fail "generated password is in the install log (terminal run)"
+grep -qF "$pw2" "$WORK/pw2.out" && fail "generated password was printed to stdout (terminal run)"
+[[ ! -e "$PWFILE" ]] || fail "password file written although a terminal was available"
+[[ "$(stat -c %a "$LOG")" == 600 ]] || fail "install log mode changed"
+set_auth true
+
 echo "--- uninstall"
 bash "$ROOT/opt/pihole-bahrain/uninstall.sh" >"$WORK/un.out" 2>&1 || { cat "$WORK/un.out"; fail "uninstall failed"; }
-[[ ! -e "$ROOT/opt/pihole-bahrain" && ! -e "$ROOT/var/www/html/pb" ]] || fail "files left behind"
+[[ ! -e "$ROOT/opt/pihole-bahrain" && ! -e "$ROOT/var/www/html/pb" && ! -e "$ROOT/etc/pihole-bahrain" ]] || fail "files left behind"
 grep -q mine "$ROOT/var/www/html/index.html" || fail "custom page not restored"
 grep -q '"webserver.serve_all": "false"' "$WORK/ftl.json" || fail "serve_all not reverted"
 grep -q 'kids.home' "$WORK/ftl.json" && fail "host entry not removed"

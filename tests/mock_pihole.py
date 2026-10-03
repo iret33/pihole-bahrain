@@ -96,6 +96,10 @@ class Handler(BaseHTTPRequestHandler):
         url = urllib.parse.urlsplit(self.path)
         path = url.path
         query = urllib.parse.parse_qs(url.query)
+        if path == "/__mock__/require_auth" and method == "POST":
+            # Test hook: False = Pi-hole has no password set (so the installer has to generate one).
+            type(self).require_auth = bool(self.body().get("value"))
+            return self.send(200, {})
         if not path.startswith("/api"):
             return self.static(path)
         parts = [urllib.parse.unquote(p) for p in path.split("/")[2:]]
