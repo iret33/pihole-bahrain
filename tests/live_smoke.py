@@ -365,12 +365,21 @@ with sync_playwright() as p:
     store.add_query("pixel.facebook.com", "GRAVITY", KID1, "Sara-iPad")
     store.add_query("www.youtube.com", "GRAVITY", KID1, "Sara-iPad")                 # YouTube really is blocked
     store.add_query("www.youtube.com", "GRAVITY", KID1, "Sara-iPad", when=time.time() + 3600)   # a row from the future (the box clock stepped back)
-    time.sleep(6)
+    store.add_query("www.youtube.com", "FORWARDED", "192.168.1.9", "parents-phone")            # a grown-up's phone is not under the children's rules
+    offenders = []
+    end = time.time() + 7
+    while time.time() < end:
+        offenders += [k["text"] for k in packets(page) if "is-allowed" in k["cls"] and "YouTube" in k["text"]]
+        if re.match(r"^Yes.*YouTube", page.inner_text("#boxSub")):
+            offenders.append("voice: " + page.inner_text("#boxSub"))
+        time.sleep(0.2)
+    expect(not offenders, "an allowed lookup from a grown-up's phone is never labelled with an app the children are blocked from: %s" % offenders[:3])
     page.click("#liveRecentTitle")
     recent = page.locator("#liveRecentList .recent-item").all_inner_texts()
     expect(any("Stopped YouTube" in r for r in recent), "a stop is credited to YouTube, which is blocked: %s" % recent)
     expect(any("Stopped An unwanted site" in r and "\u00d72" in r for r in recent), "trackers on Netflix and Facebook (allowed) are 'an unwanted site': %s" % recent)
     expect(not any("Stopped Netflix" in r or "Stopped Facebook" in r for r in recent), "never 'Stopped Netflix' while Netflix is allowed")
+    expect(not any("Allowed YouTube" in r for r in recent), "and the text list does not say 'Allowed YouTube' for the parent's phone: %s" % recent)
     expect("privacy" not in page.inner_text("#liveRecentList").lower(), "one row with a hidden name does not switch the list to the privacy note")
     store.add_query("www.youtube.com", "GRAVITY", KID1, "Sara-iPad")
     pk = wait_until(lambda: [k for k in packets(page) if "is-blocked" in k["cls"]], 9)

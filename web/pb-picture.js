@@ -109,7 +109,9 @@
       if (kid && ev.app && m.blockedApps.indexOf(ev.app) >= 0 && appInfo(ev.app)) return { app: ev.app };
       return { key: 'lvUnwanted' };           // also keeps adult domain names off the screen
     }
-    if (ev.app && appInfo(ev.app)) return { app: ev.app };
+    // A grown-up's phone is not under the children's rules: "Yes · Instagram" from it, while Instagram is blocked for the children,
+    // would read as "the block does not work". Only a child's own wire may show a blocked app being allowed (that IS the bad news).
+    if (ev.app && appInfo(ev.app) && (kid || m.blockedApps.indexOf(ev.app) < 0)) return { app: ev.app };
     return { key: 'lvWebsite' };
   }
   function resolveLabel(p) {
@@ -378,7 +380,7 @@
   function ago(ms) {
     var s = Math.max(0, Math.round((now() - ms) / 1000));
     if (s < 10) return t('lvNow');
-    if (s < 60) return t('lvSecs', { n: s });
+    if (s < 60) return t('lvSecs', { n: Math.floor(s / 10) * 10 });                 // in steps of 10, so the list is not rebuilt every tick
     return t('lvMins', { n: Math.round(s / 60) });
   }
   function renderRecent() {
@@ -547,7 +549,7 @@
         if (!summaryAt || ev.time > summaryAt) { delta.total++; if (ev.kind === 'blocked') delta.blocked++; }   // the summary already holds the older ones
         minute.push({ at: ts, blocked: ev.kind === 'blocked' });
         parts = labelParts(ev);
-        if (ev.kind === 'blocked' || ev.app) pushRecent(ev, parts, ev.kind === 'blocked' ? whoFor(ev) : '', ts);
+        if (ev.kind === 'blocked' || parts.app) pushRecent(ev, parts, ev.kind === 'blocked' ? whoFor(ev) : '', ts);
         if (late <= 20) fresh.push(ev);
       }
       if (fresh.length) {
