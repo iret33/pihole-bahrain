@@ -30,6 +30,7 @@
   <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M3.8 12h16.4M12 3.5c2.3 2.4 3.4 5.2 3.4 8.5s-1.1 6.1-3.4 8.5c-2.3-2.4-3.4-5.2-3.4-8.5S9.7 5.9 12 3.5z" fill="none" stroke="currentColor" stroke-width="1.6"/></symbol>
   <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4.2 3.6 19h16.8z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v4.2M12 16.9v.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
   <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 11v5M12 7.9v.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   <symbol id="i-moon-sm" viewBox="0 0 24 24"><path d="M19.5 14.6A7.5 7.5 0 0 1 9.4 4.5a7.5 7.5 0 1 0 10.1 10.1z" fill="currentColor"/></symbol>
   <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
 </svg>
@@ -85,10 +86,14 @@
           <h2 id="liveTitle"></h2>
           <p class="live-sub" id="liveSub"></p>
         </div>
+        <button type="button" class="icon-btn live-toggle" id="liveToggle" data-act="liveToggle" aria-expanded="true" aria-controls="stage">
+          <svg aria-hidden="true"><use href="#i-chevron"/></svg><span class="sr-only" id="liveToggleText"></span>
+        </button>
       </div>
       <div class="live-pillrow"><span class="live-pill" id="livePill"><i class="dot"></i><span id="livePillText"></span></span></div>
 
       <div class="stage" id="stage">
+        <i class="rail-end rail-a" data-node="rail-a" aria-hidden="true"></i><i class="rail-end rail-b" data-node="rail-b" aria-hidden="true"></i>
         <svg class="live-wires" aria-hidden="true"></svg>
         <div class="live-packets" aria-hidden="true"></div>
         <div class="stage-devices" id="stageDevices"></div>

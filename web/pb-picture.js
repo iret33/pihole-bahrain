@@ -23,7 +23,7 @@
   var m = null;                // the view-model from app.js (see app.js picModel())
   var el = {};                 // cached elements
   var stage = null, feed = null, pacer = null, poller = null, io = null;
-  var started = false, inView = true, collapsedByDialog = false;
+  var started = false, inView = true, collapsed = false;
   var slots = [];              // what is drawn in the device row: [{ id, kind: 'kid'|'more'|'rest'|'add', kids: [...] }]
   var slotKey = '';
   var ipSlot = {};             // ip -> slot id ('dev-0'...)
@@ -38,7 +38,7 @@
   var wireUntil = {};          // wire id -> ms until which it looks busy
   var voice = { until: 0, last: 0, timer: 0 };
   var pumpTimer = 0, recentTimer = 0, ariaTimer = 0, recentTick = 0, wireTimer = 0, captionTimer = 0, repaintTimer = 0;
-  var captionHeld = false, wired = false;
+  var captionHeld = false, wired = false, lastDirect = 0;
   var tour = { on: false, i: 0, timer: 0 };
   var minute = [];             // [{ at, blocked }] events of the last minute, for the screen-reader summary
   var lastAria = '';
@@ -66,7 +66,12 @@
     return s;
   }
   function hasDialog() { return !!doc.querySelector('dialog[open]'); }
-  function active() { return started && !doc.hidden && inView && !hasDialog(); }
+  function watching() { return started && !doc.hidden && inView && !hasDialog(); }   // the page is being looked at
+  function active() { return watching() && !collapsed; }                              // ... and the picture is open
+  function store(val) {                                                               // the open/closed choice is remembered per phone
+    try { if (val === undefined) return root.localStorage.getItem('pb.live'); root.localStorage.setItem('pb.live', val); } catch (e) { /* private mode */ }
+    return null;
+  }
 
   // ------------------------------------------------------------------ app names
   function appInfo(id) {
@@ -86,6 +91,7 @@
   /** Which nodes the device row shows for this model, and which kid / address belongs to which node. */
   function buildSlots() {
     var kids = m.kids, out = [], i;
+    if (tour.on) return [{ id: 'dev-0', kind: 'example', kids: [] }, { id: 'rest', kind: 'rest', kids: [] }];   // examples never come from a real child
     if (!kids.length) {
       out.push({ id: 'dev-0', kind: 'add', kids: [] });
     } else if (kids.length <= SLOT_MAX) {
@@ -110,7 +116,7 @@
     return best;
   }
   function slotState(s) {
-    if (s.kind === 'rest' || s.kind === 'add') return null;
+    if (s.kind === 'rest' || s.kind === 'add' || s.kind === 'example') return null;
     return worst(s.kids.map(function (k) { return kidState[k.key]; }));
   }
   var STATE_TEXT = { active: 'lvActive', quiet: 'lvQuiet', paused: 'lvPaused', offline: 'lvOffline', overridden: 'lvOverridden', unreachable: 'lvUnreachable' };
@@ -160,8 +166,8 @@
     if (s.kind === 'kid') { name = kidName(s.kids[0]); state = t(STATE_TEXT[st]); cls += ' st-' + st; }
     else if (s.kind === 'more') { name = t('lvMore', { n: s.kids.length }); state = t(STATE_TEXT[st]); cls += ' st-' + st; b.querySelector('.node-more').textContent = '+' + s.kids.length; }
     else if (s.kind === 'add') { name = t('lvAddDevice'); state = t('lvAddHint'); cls += ' st-none'; }
+    else if (s.kind === 'example') { name = t('lvExamplePhone'); state = t('lvExample'); cls += ' st-none'; }
     else { name = clientsHidden ? t('lvAllHome') : t('lvRest'); state = clientsHidden ? t('lvAllHomeSt') : t('lvRestSt'); cls += ' st-rest'; }
-    if (tour.on && s.id === 'dev-0') cls += ' is-example';
     b.className = cls + (b.classList.contains('is-focus') ? ' is-focus' : '');
     b.querySelector('.node-name').textContent = name;
     b.querySelector('.node-state-text').textContent = state;
@@ -170,7 +176,7 @@
   }
 
   function wireDefs() {
-    var defs = [{ id: 'w-rest', from: 'rest', to: 'box' }, { id: 'w-out', from: 'box', to: 'net' }], i;
+    var defs = [{ id: 'w-rest', from: 'rest', to: 'box' }, { id: 'w-out', from: 'box', to: 'net' }, { id: 'w-direct', from: 'rail-a', to: 'rail-b' }], i;
     for (i = 0; i < SLOT_MAX; i++) defs.push({ id: 'w-dev-' + i, from: 'dev-' + i, to: 'box' });
     return defs;
   }
@@ -180,7 +186,7 @@
     var n = now();
     slots.forEach(function (s) {
       var cls = '', st = slotState(s), id = wireOf(s.id);
-      if (s.kind === 'add') cls = 'is-quiet';
+      if (s.kind === 'add' || s.kind === 'example') cls = 'is-quiet';
       else if (s.kind === 'rest') cls = 'is-rest';
       else if (st === 'overridden' || st === 'unreachable') cls = 'is-warn';
       else if (st === 'paused' || st === 'offline') cls = 'is-off';
@@ -189,6 +195,7 @@
       stage.wireState(id, cls);
     });
     stage.wireState('w-out', wireUntil['w-out'] > n ? 'is-active' : '');
+    stage.wireState('w-direct', 'is-direct');
     var soonest = 0, k;
     for (k in wireUntil) if (wireUntil[k] > n && (!soonest || wireUntil[k] < soonest)) soonest = wireUntil[k];
     root.clearTimeout(wireTimer);
@@ -211,6 +218,9 @@
       return { tone: 'warn', title: t('lvCheckMany', { n: bad.length }), sub: t('lvCheckManySub') };
     }
     if (m.offline) return { tone: 'off', title: t('lvOff'), sub: t('lvOffSub') };
+    if (kids.every(function (k) { return kidState[k.key] === 'quiet'; })) return {   // reachable in the last 24 h, but nobody is using the internet now
+      tone: 'good', title: kids.length === 1 ? t('lvSetOne', { n: kidName(kids[0]) }) : t('lvSetAll', { n: kids.length }),
+      sub: apps ? t('lvBlockedApps', { n: apps }) : t('lvNoBlockedApps') };
     if (kids.every(function (k) { return k.paused; })) return { tone: 'off', title: kids.length === 1 ? t('lvPausedOne', { n: kidName(kids[0]) }) : t('lvPausedAll'), sub: t('lvPausedSub') };
     return {
       tone: 'good',
@@ -281,6 +291,7 @@
     el.boxName.textContent = t('lvBox');
     el.netName.textContent = t('lvNet');
     el.nodeNet.setAttribute('aria-label', t('lvNet'));
+    el.liveToggleText.textContent = t(collapsed ? 'lvShow' : 'lvHide');
     el.tourBack.textContent = t('lvBack');
     el.tourEnd.textContent = t('lvEndTour');
   }
@@ -301,7 +312,9 @@
     else {
       var s = slots.filter(function (x) { return x.id === which; })[0];
       if (!s) return;
-      if (s.kind === 'more') { text = t('lvExMore', { n: s.kids.length }); if (env.goDevices) env.goDevices(); }
+      if (s.kind === 'example') text = t('lvExExample');
+      else if (s.kind === 'add') text = t('lvExAdd');
+      else if (s.kind === 'more') { text = t('lvExMore', { n: s.kids.length }); if (env.goDevices) env.goDevices(); }
       else text = t('lvEx_' + slotState(s), { n: kidName(s.kids[0]) });
     }
     setCaption(text, 14000);
@@ -365,7 +378,7 @@
   }
   function whoFor(slotId) {
     var s = slots.filter(function (x) { return x.id === slotId; })[0];
-    if (!s || s.kind === 'rest' || s.kind === 'add') return '';
+    if (!s || s.kind === 'rest' || s.kind === 'add' || s.kind === 'example') return '';
     if (s.kind === 'more') return t('lvMore', { n: s.kids.length });
     return kidName(s.kids[0]);
   }
@@ -395,8 +408,29 @@
           say(t(ev.kind === 'blocked' ? 'lvSayNo' : 'lvSayYes', { a: spoken }), ev.kind === 'blocked' ? 'no' : 'yes');
         }
         if (ev.kind === 'allowed' && i === 2) stage.pulse('net', 'is-reached', 600);
-      }
+      },
+      onDone: ev.kind === 'allowed' ? directLine : undefined
     });
+  }
+
+  /** After a yes the device goes online by itself: a dot runs along the dotted line, around the box (at most one every 2.5 s). */
+  function directLine() {
+    var n = now();
+    if (!active() || tour.on || n - lastDirect < 2500) return;
+    lastDirect = n;
+    stage.send({ tone: 'is-direct', route: [{ wire: 'w-direct', ms: 1000 }] });
+  }
+
+  function setCollapsed(v, remember) {
+    collapsed = !!v;
+    el.live.classList.toggle('is-collapsed', collapsed);
+    el.liveToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    el.liveToggleText.textContent = t(collapsed ? 'lvShow' : 'lvHide');
+    if (remember) store(collapsed ? 'closed' : 'open');
+    if (collapsed) { if (tour.on) endTour(); stage.clear(); pacer.queue.length = 0; }
+    else { feed = new C.Feed({ length: 60 }); stage.layout(); wake(); }          // start again from "now": nothing old is replayed
+    el.live.classList.toggle('is-paused', !active());
+    if (m) renderHead();
   }
 
   /** Hands out queued events at a gentle pace. */
@@ -427,6 +461,7 @@
   }
 
   function pollQueries() {
+    if (collapsed) return Promise.resolve();                 // the picture is closed: only the totals are kept up to date
     return env.call('GET', feed.url()).then(function (j) {
       var evs = feed.ingest(j), i, ev, wasQ = queriesHidden;
       failing = 0;
@@ -461,7 +496,7 @@
         { name: 'summary', every: 15000, run: pollSummary },
         { name: 'queries', every: 3500, run: pollQueries }
       ],
-      visible: active
+      visible: watching
     });
     poller.start();
   }
@@ -485,7 +520,7 @@
     stage.send({ label: label, tone: tone, route: route, onStep: function (i) {
       if (i === 0) { stage.pulse('box', kind === 'blocked' ? 'is-refusing' : 'is-checking', 700); say(t(kind === 'blocked' ? 'lvSayNoEx' : 'lvSayYesEx'), kind === 'blocked' ? 'no' : 'yes', true); }
       if (kind === 'allowed' && i === 2) stage.pulse('net', 'is-reached', 600);
-    } });
+    }, onDone: kind === 'allowed' ? function () { if (tour.on && active()) stage.send({ tone: 'is-direct', route: [{ wire: 'w-direct', ms: 1100 }] }); } : undefined });
   }
   function tourStep(i) {
     root.clearTimeout(tour.timer);
@@ -504,6 +539,7 @@
   }
   function startTour() {
     if (tour.on) return;
+    if (collapsed) setCollapsed(false, true);
     tour.on = true;
     pacer.queue.length = 0;
     el.live.classList.add('is-touring');
@@ -511,7 +547,8 @@
     el.caption.textContent = '';
     renderSlots(); renderHead();
     tourStep(0);
-    var first = el.tour.querySelector('#tourNext'); if (first) first.focus();
+    if (el.live.scrollIntoView) el.live.scrollIntoView({ behavior: L.reducedMotion() ? 'auto' : 'smooth', block: 'start' });   // picture and words in one screen
+    var first = el.tour.querySelector('#tourNext'); if (first) first.focus({ preventScroll: true });
   }
   function endTour() {
     if (!tour.on) return;
@@ -662,6 +699,7 @@
     var act = n.getAttribute('data-act');
     if (act === 'node') explain(n.getAttribute('data-which'));
     else if (act === 'stat') explainStat(n.getAttribute('data-which'));
+    else if (act === 'liveToggle') setCollapsed(!collapsed, true);
     else if (act === 'tour') startTour();
     else if (act === 'tourNext') { if (tour.i >= TOUR.length - 1) endTour(); else tourStep(tour.i + 1); }
     else if (act === 'tourBack') tourStep(tour.i - 1);
@@ -675,7 +713,7 @@
     ['live', 'liveIcon', 'liveTitle', 'liveSub', 'livePill', 'livePillText', 'stage', 'stageDevices', 'nodeBox', 'boxName', 'boxSub', 'nodeNet', 'netName',
       'liveCaption', 'liveTour', 'tourStep', 'tourCount', 'tourBack', 'tourNext', 'tourEnd', 'statChecked', 'statCheckedLabel', 'statStopped', 'statStoppedLabel',
       'statShare', 'statShareLabel', 'liveScope', 'liveNote', 'liveRecent', 'liveRecentTitle', 'liveRecentList', 'liveAria', 'tourBtn', 'detailBtn',
-      'sheetTitle', 'sheetBody', 'liveSheet'].forEach(function (id) { el[id] = $(id); });
+      'sheetTitle', 'sheetBody', 'liveSheet', 'liveToggle', 'liveToggleText'].forEach(function (id) { el[id] = $(id); });
     el.devices = el.stageDevices; el.title = el.liveTitle; el.sub = el.liveSub; el.icon = el.liveIcon; el.pill = el.livePill; el.pillText = el.livePillText;
     el.box = el.nodeBox; el.caption = el.liveCaption; el.tour = el.liveTour; el.scope = el.liveScope; el.note = el.liveNote;
     el.recentTitle = el.liveRecentTitle; el.recentList = el.liveRecentList; el.aria = el.liveAria;
@@ -685,7 +723,9 @@
   function onGate() {                       // page hidden, a dialog opened or closed, the card scrolled away
     if (!started) return;
     if (!active()) { stage.clear(); pacer.queue.length = 0; if (tour.on) root.clearTimeout(tour.timer); }
-    else { wake(); if (tour.on) tourStep(tour.i); }
+    else { if (tour.on) tourStep(tour.i); }
+    if (watching()) wake();
+    el.live.classList.toggle('is-paused', !active());
     renderHead();
   }
 
@@ -703,6 +743,8 @@
     stage = new L.Stage(el.stage, { wires: wireDefs(), poolSize: 8, onLayout: function () { paintWires(); } });
     started = true;
     el.live.hidden = false;
+    collapsed = store() === 'closed';
+    if (collapsed) setCollapsed(true, false);
     if (!wired) {                              // the page may sign out and in again: listen only once
       wired = true;
       doc.addEventListener('click', function (ev) { if (started && el.live.contains(ev.target)) onClick(ev); });

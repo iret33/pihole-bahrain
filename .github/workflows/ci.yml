@@ -32,6 +32,7 @@ jobs:
           python -m playwright install --with-deps chromium
           python tests/ui_smoke.py --shots screenshots
           python tests/stage_smoke.py
+          python tests/live_smoke.py --shots screenshots
       - uses: actions/upload-artifact@v4
         if: always()
         with:
