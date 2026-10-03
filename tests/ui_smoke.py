@@ -9,6 +9,7 @@ import importlib.machinery
 import importlib.util
 import os
 import sys
+import time
 
 from playwright.sync_api import sync_playwright
 
@@ -172,6 +173,45 @@ with sync_playwright() as p:
     page.click(".topbar [data-act=logout]")
     page.wait_for_selector("#login:not([hidden])")
     expect(True, "signed out")
+
+    # --- another Pi-hole client row that overrides a child's MAC row (FTL prefers IP/subnet rows)
+    catalog = pb.load_catalog(os.path.join(ROOT, "lists"))
+
+    def pb_api(method, path, body=None):
+        api.login()
+        try:
+            return api.request(method, path, body)
+        finally:
+            api.logout()
+
+    pb_api("POST", "/api/clients", {"client": "192.168.1.0/24", "comment": "", "groups": [0]})
+    page.fill("#pw", "test")
+    page.click("#loginBtn")
+    page.wait_for_selector(".tile")
+    page.click("[data-act=openAdd]")
+    page.wait_for_selector("#picker .pick")
+    page.click("#picker .pick >> nth=0")                         # Sara-iPad, 192.168.1.21
+    page.click("[data-act=addDevice]")
+    page.locator(".device-warn").wait_for()
+    expect("192.168.1.0/24" in page.inner_text(".device-warn"), "a subnet row that overrides the child is called out")
+    expect("overrides it" in page.inner_text("#toast"), "adding such a device warns right away")
+    shot(page, "09-shadowed.png", full=True)
+    page.click(".topbar [data-act=lang]")
+    expect("لوحة Pi-hole" in page.inner_text(".device-warn"), "the warning is translated")
+    page.click(".topbar [data-act=lang]")
+    pb_api("DELETE", "/api/clients/" + api.q("192.168.1.0/24"))
+    page.reload()
+    page.wait_for_selector(".tile")
+    expect(page.locator(".device-warn").count() == 0, "no warning once the overriding row is gone")
+
+    store.devices.append({"id": 40, "hwaddr": "aa:bb:cc:00:00:04", "macVendor": "", "lastQuery": int(time.time()) - 20,
+                          "numQueries": 9, "ips": [{"ip": "fe80::4", "name": ""}, {"ip": "2001:db8::4", "name": ""}]})
+    gid = {g["name"]: g["id"] for g in pb_api("GET", "/api/groups")["groups"]}
+    pb_api("POST", "/api/clients", {"client": "AA:BB:CC:00:00:04", "comment": "Tablet", "groups": pb.kid_groups(gid, catalog)})
+    pb_api("POST", "/api/clients", {"client": "2001:db8::/32", "comment": "", "groups": [0]})
+    page.reload()
+    page.wait_for_selector(".tile")
+    expect(page.locator(".device-warn").count() == 1, "an IPv6 subnet row is detected too")
 
     dark = browser.new_page(viewport={"width": 1280, "height": 900}, color_scheme="dark")
     dark.goto(args.url)

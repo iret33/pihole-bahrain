@@ -28,9 +28,11 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import http.client
+import ipaddress
 import json
 import logging
 import os
+import re
 import signal
 import ssl
 import subprocess
@@ -129,6 +131,103 @@ def kid_groups(group_ids: dict, catalog: dict) -> list:
     """Every group a kid device must belong to (except pb-paused)."""
     names = [G_KIDS, G_GUARD, G_OFFLINE] + [svc_group(s["id"]) for s in catalog["services"]]
     return [DEFAULT_GROUP] + [group_ids[n] for n in names if n in group_ids]
+
+
+# --------------------------------------------------------------------------- #
+# Client matching (mirrors Pi-hole FTL)
+# --------------------------------------------------------------------------- #
+# FTL (get_client_groupids() in src/database/gravity-db.c) chooses a client's
+# groups like this: first the client rows whose IP address or subnet contains the
+# address the query came from, and among those the longest prefix (highest id on a
+# tie). Only when no such row exists does it try the device's MAC address, then
+# its host name, then its interface. So an IP or subnet row silently overrides a
+# child's MAC row, and every pb-* rule on that MAC row is ignored.
+# /api/network/devices returns only 10 devices with 3 addresses each by default.
+NETWORK_QUERY = "/api/network/devices?max_devices=200&max_addresses=50"
+MAC_RE = re.compile(r"^[0-9a-f]{2}([:-][0-9a-f]{2}){5}$", re.IGNORECASE)
+
+
+def is_mac(value) -> bool:
+    return isinstance(value, str) and bool(MAC_RE.match(value))
+
+
+def parse_ip(text):
+    """ipaddress object for an IPv4/IPv6 address (a %zone suffix is ignored), else None."""
+    try:
+        return ipaddress.ip_address(str(text).split("%", 1)[0])
+    except ValueError:
+        return None
+
+
+def parse_net(text):
+    """ip_network for a client row that is an address or subnet; None for MAC, host name and :interface rows."""
+    try:
+        return ipaddress.ip_network(str(text).split("%", 1)[0], strict=False)
+    except ValueError:
+        return None
+
+
+def device_ips(dev: dict) -> list:
+    """Every address FTL has seen for a network-table device (an 'ip-<addr>' entry has just that one)."""
+    ips = [i.get("ip") for i in dev.get("ips") or [] if i.get("ip")]
+    hw = dev.get("hwaddr") or ""
+    if hw.startswith("ip-") and hw[3:] not in ips:
+        ips.append(hw[3:])
+    return ips
+
+
+def find_device(devices: list, client: str):
+    """The network-table entry for a client row, matched by MAC or by one of its addresses; None if unknown."""
+    if is_mac(client):
+        return next((d for d in devices if (d.get("hwaddr") or "").lower() == client.lower()), None)
+    want = parse_ip(client)
+    if want is None:
+        return None
+    return next((d for d in devices if want in {parse_ip(i) for i in device_ips(d)}), None)
+
+
+def winning_row(ip, clients: list):
+    """The client row FTL applies to source address `ip`: longest matching prefix, highest id on a tie."""
+    best = None
+    for c in clients:
+        net = parse_net(c.get("client"))
+        if net is None or net.version != ip.version or ip not in net:
+            continue
+        key = (net.prefixlen, c.get("id") or 0)
+        if best is None or key > best[0]:
+            best = (key, c)
+    return best[1] if best else None
+
+
+def needed_pb_groups(groups: dict, catalog: dict, paused: bool = False) -> set:
+    """Ids of the pb-* groups a child's effective client row must have (not Default)."""
+    names = [G_KIDS, G_GUARD, G_OFFLINE] + [svc_group(s["id"]) for s in catalog["services"]]
+    if paused:
+        names.append(G_PAUSED)
+    return {groups[n]["id"] for n in names if n in groups}
+
+
+def shadowing_rows(kid: dict, devices: list, clients: list, needed: set) -> list:
+    """IP/subnet client rows that FTL will use instead of this MAC-registered child's own row.
+
+    Only rows that lack some of the child's pb-* groups count: a duplicate IP row
+    that carries them all filters correctly. Returns [{"client", "groups", "ip"}].
+    """
+    if not is_mac(kid.get("client")):
+        return []
+    dev = find_device(devices, kid["client"])
+    found = {}
+    for ip_text in device_ips(dev) if dev else []:
+        ip = parse_ip(ip_text)
+        row = winning_row(ip, clients) if ip is not None else None
+        if row is not None and needed - set(row.get("groups", [])):
+            found.setdefault(row["client"], {"client": row["client"], "groups": row.get("groups", []), "ip": ip_text})
+    return list(found.values())
+
+
+def group_names(ids, groups: dict) -> list:
+    by_id = {g["id"]: g["name"] for g in groups.values()}
+    return [by_id.get(i, "#%s" % i) for i in sorted(ids)]
 
 
 # --------------------------------------------------------------------------- #
@@ -305,6 +404,13 @@ class Api:
 
     def clients(self) -> list:
         return self.request("GET", "/api/clients").get("clients", [])
+
+    def network_devices(self) -> list:
+        """Devices FTL has seen on the network ([] when unavailable)."""
+        try:
+            return self.request("GET", NETWORK_QUERY).get("devices", [])
+        except ApiError:
+            return []
 
     def domains(self) -> list:
         return self.request("GET", "/api/domains").get("domains", [])
@@ -682,81 +788,145 @@ def cmd_run(args) -> int:
     return 0
 
 
+def kid_rows(groups: dict, clients: list) -> list:
+    kid_id = groups.get(G_KIDS, {}).get("id")
+    return [c for c in clients if kid_id in c.get("groups", [])]
+
+
+def kid_shadows(kid: dict, groups: dict, catalog: dict, clients: list, devices: list) -> list:
+    paused_id = groups.get(G_PAUSED, {}).get("id")
+    needed = needed_pb_groups(groups, catalog, paused_id in kid.get("groups", []))
+    return shadowing_rows(kid, devices, clients, needed)
+
+
+def build_status(api: Api, catalog: dict) -> dict:
+    ctl = Controller(api, catalog)
+    state, blocked, offline, groups = ctl.read_state()
+    paused_id = groups.get(G_PAUSED, {}).get("id")
+    clients = api.clients()
+    devices = api.network_devices()
+    return {
+        "version": VERSION,
+        "internet_off": offline,
+        "blocked": sorted(k for k, v in blocked.items() if v),
+        "devices": [{"client": c["client"], "name": c.get("comment") or "",
+                     "paused": paused_id in c.get("groups", []),
+                     # IP/subnet rows FTL uses instead of this device's row (empty = filtered as intended)
+                     "shadowed_by": [{"client": r["client"], "groups": group_names(r["groups"], groups)}
+                                     for r in kid_shadows(c, groups, catalog, clients, devices)]}
+                    for c in kid_rows(groups, clients)],
+        "timer": state["timer"],
+        "schedule": state["schedule"],
+        "bedtime_now": state["scheduleActive"],
+    }
+
+
 def cmd_status(args) -> int:
     api = Api()
     api.login()
     try:
-        catalog = load_catalog()
-        ctl = Controller(api, catalog)
-        state, blocked, offline, groups = ctl.read_state()
-        kid_id = groups.get(G_KIDS, {}).get("id")
-        paused_id = groups.get(G_PAUSED, {}).get("id")
-        kids = [c for c in api.clients() if kid_id in c.get("groups", [])]
-        out = {
-            "version": VERSION,
-            "internet_off": offline,
-            "blocked": sorted(k for k, v in blocked.items() if v),
-            "devices": [{"client": c["client"], "name": c.get("comment") or "",
-                         "paused": paused_id in c.get("groups", [])} for c in kids],
-            "timer": state["timer"],
-            "schedule": state["schedule"],
-            "bedtime_now": state["scheduleActive"],
-        }
+        out = build_status(api, load_catalog())
     finally:
         api.logout()
     print(json.dumps(out, indent=2, ensure_ascii=False))
     return 0
 
 
+class Report:
+    """The lines `doctor` prints. Only FIX makes the command fail; WARN and info are advice."""
+
+    def __init__(self, out=print):
+        self.out = out
+        self.fixes = []
+        self.warnings = []
+
+    def _emit(self, tag: str, msg: str) -> None:
+        self.out("  " + tag.ljust(6) + msg)
+
+    def ok(self, msg: str) -> None:
+        self._emit("ok", msg)
+
+    def info(self, msg: str) -> None:
+        self._emit("info", msg)
+
+    def warn(self, msg: str) -> None:
+        self.warnings.append(msg)
+        self._emit("WARN", msg)
+
+    def fix(self, msg: str) -> None:
+        self.fixes.append(msg)
+        self._emit("FIX", msg)
+
+    def check(self, cond: bool, msg: str) -> None:
+        (self.ok if cond else self.fix)(msg)
+
+    def finish(self) -> int:
+        if self.fixes:
+            self.out("\n%d problem(s) found." % len(self.fixes))
+        elif self.warnings:
+            self.out("\nNo problems, but %d warning(s) above." % len(self.warnings))
+        else:
+            self.out("\nAll good.")
+        return 1 if self.fixes else 0
+
+
+def kid_checks(rep: Report, catalog: dict, groups: dict, clients: list, devices: list) -> None:
+    """Checks on the children's devices: is each one really filtered?"""
+    kids = kid_rows(groups, clients)
+    rep.info("%d child device(s) added" % len(kids))
+    for kid in kids:
+        label = "%s (%s)" % (kid.get("comment") or kid["client"], kid["client"])
+        for row in kid_shadows(kid, groups, catalog, clients, devices):
+            rep.fix("%s is not filtered: Pi-hole applies the client row %s (groups: %s) to %s instead. "
+                    "Remove that row in the Pi-hole admin under Clients, or give it the pb groups if it is only this device."
+                    % (label, row["client"], ", ".join(group_names(row["groups"], groups)), row["ip"]))
+
+
+def doctor_api_checks(rep: Report, api: Api, catalog: dict) -> None:
+    """Everything `doctor` learns from the Pi-hole API (needs a logged-in `api`)."""
+    groups = api.group_map()
+    missing = [n for n in [G_KIDS, G_GUARD, G_OFFLINE, G_PAUSED, G_STATE]
+               + [svc_group(s["id"]) for s in catalog["services"]] if n not in groups]
+    rep.check(not missing, "all groups present" + (" (missing: %s)" % ", ".join(missing) if missing else ""))
+    lists = [l for l in api.lists() if (l.get("comment") or "").startswith(LIST_COMMENT_PREFIX)]
+    empty = [l["comment"] for l in lists if not l.get("number")]
+    rep.check(len(lists) == len(catalog["services"]) + 1, "%d service lists registered" % len(lists))
+    rep.check(not empty, "all lists compiled into gravity" +
+              (" (empty: %s — run 'pihole -g')" % ", ".join(empty) if empty else ""))
+    kid_checks(rep, catalog, groups, api.clients(), api.network_devices())
+
+
 def cmd_doctor(args) -> int:
-    problems = []
-
-    def check(ok, msg):
-        print(("  ok    " if ok else "  FIX   ") + msg)
-        if not ok:
-            problems.append(msg)
-
+    rep = Report()
     try:
-        check(subprocess.run(["systemctl", "is-active", "--quiet", "pihole-FTL"]).returncode == 0,
-              "pihole-FTL service is running")
-        check(subprocess.run(["systemctl", "is-active", "--quiet", "pihole-bahrain"]).returncode == 0,
-              "pihole-bahrain scheduler is running")
+        rep.check(subprocess.run(["systemctl", "is-active", "--quiet", "pihole-FTL"]).returncode == 0,
+                  "pihole-FTL service is running")
+        rep.check(subprocess.run(["systemctl", "is-active", "--quiet", "pihole-bahrain"]).returncode == 0,
+                  "pihole-bahrain scheduler is running")
     except OSError:
         pass
     try:
-        check(ftl_config("webserver.serve_all") == "true", "webserver.serve_all is true")
-        check(ftl_config("webserver.api.cli_pw") == "true", "webserver.api.cli_pw is true")
+        rep.check(ftl_config("webserver.serve_all") == "true", "webserver.serve_all is true")
+        rep.check(ftl_config("webserver.api.cli_pw") == "true", "webserver.api.cli_pw is true")
         webroot = ftl_config("webserver.paths.webroot")
-        check(os.path.isfile(os.path.join(webroot, "pb", "app.js")), "web page installed in " + webroot)
+        rep.check(os.path.isfile(os.path.join(webroot, "pb", "app.js")), "web page installed in " + webroot)
     except (OSError, subprocess.SubprocessError) as err:
-        check(False, "pihole-FTL CLI available (%s)" % err)
+        rep.fix("pihole-FTL CLI available (%s)" % err)
     try:
         api = Api()
         api.login()
-        catalog = load_catalog()
-        groups = api.group_map()
-        missing = [n for n in [G_KIDS, G_GUARD, G_OFFLINE, G_PAUSED, G_STATE]
-                   + [svc_group(s["id"]) for s in catalog["services"]] if n not in groups]
-        check(not missing, "all groups present" + (" (missing: %s)" % ", ".join(missing) if missing else ""))
-        lists = [l for l in api.lists() if (l.get("comment") or "").startswith(LIST_COMMENT_PREFIX)]
-        empty = [l["comment"] for l in lists if not l.get("number")]
-        check(len(lists) == len(catalog["services"]) + 1, "%d service lists registered" % len(lists))
-        check(not empty, "all lists compiled into gravity" +
-              (" (empty: %s — run 'pihole -g')" % ", ".join(empty) if empty else ""))
-        kids = [c for c in api.clients() if groups.get(G_KIDS, {}).get("id") in c.get("groups", [])]
-        print("  info  %d child device(s) added" % len(kids))
+        doctor_api_checks(rep, api, load_catalog())
         base = lists_base()
         if base.startswith("http"):
             try:
                 with urllib.request.urlopen(base + "/guard.txt", timeout=15) as resp:
-                    check(resp.status == 200, "list server reachable (%s)" % base)
+                    rep.check(resp.status == 200, "list server reachable (%s)" % base)
             except (OSError, urllib.error.URLError) as err:
-                check(False, "list server reachable (%s: %s)" % (base, err))
+                rep.fix("list server reachable (%s: %s)" % (base, err))
         api.logout()
     except (ApiError, OSError, ValueError) as err:
-        check(False, "Pi-hole API reachable (%s)" % err)
-    print("\nAll good." if not problems else "\n%d problem(s) found." % len(problems))
-    return 1 if problems else 0
+        rep.fix("Pi-hole API reachable (%s)" % err)
+    return rep.finish()
 
 
 def cmd_configure(args) -> int:

@@ -119,7 +119,11 @@ class Handler(BaseHTTPRequestHandler):
             if parts == ["info", "version"]:
                 return self.send(200, {"version": {"core": {"local": {"version": "v6.3"}}}})
             if parts == ["network", "devices"]:
-                return self.send(200, {"devices": s.devices})
+                # FTL returns only 10 devices with 3 addresses each unless the caller asks for more.
+                max_devices = int((query.get("max_devices") or [10])[0])
+                max_addresses = int((query.get("max_addresses") or [3])[0])
+                return self.send(200, {"devices": [dict(d, ips=d["ips"][:max_addresses])
+                                                   for d in s.devices[:max_devices]]})
             if parts and parts[0] == "groups":
                 return self.groups(method, parts[1:])
             if parts and parts[0] == "lists":

@@ -68,6 +68,8 @@
       failed: 'That did not work: {e}', sessionEnded: 'Your session ended. Sign in again.',
       days: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'],
       daysLong: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'],
+      shadowed: 'Pi-hole has another rule for this device\u2019s address ({r}), so these settings may not apply. Remove that rule in Pi-hole admin \u203A Clients.',
+      shadowedToast: '{n} added, but Pi-hole has another rule ({r}) that overrides it. Remove that rule in Pi-hole admin.',
       cat: {}, langSwitch: 'العربية', minutesShort: '{n} min'
     },
     ar: {
@@ -117,6 +119,8 @@
       failed: 'لم تنجح العملية: {e}', sessionEnded: 'انتهت الجلسة. سجّل الدخول مجددًا.',
       days: ['أحد', 'اثنين', 'ثلاثاء', 'أربعاء', 'خميس', 'جمعة', 'سبت'],
       daysLong: ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'],
+      shadowed: 'يوجد في Pi-hole قاعدة أخرى لعنوان هذا الجهاز ({r})، لذلك قد لا تُطبَّق هذه الإعدادات. احذف تلك القاعدة من لوحة Pi-hole ‹ العملاء.',
+      shadowedToast: 'تمت إضافة {n}، لكن توجد قاعدة أخرى في Pi-hole ({r}) تتجاوزها. احذف تلك القاعدة من لوحة Pi-hole.',
       cat: {}, langSwitch: 'English', minutesShort: '{n} دقيقة'
     }
   };
@@ -265,6 +269,94 @@
     (had ? call('DELETE', '/api/auth').catch(function () {}) : Promise.resolve()).then(endSession);
   }
 
+  // ------------------------------------------------------------------ client matching
+  // Pi-hole (FTL) picks a client's groups from the client rows whose IP or subnet contains the
+  // address a query comes from (longest prefix wins, highest id on a tie) and only then looks at
+  // the device's MAC row. So an IP or subnet row silently overrides a child's MAC row.
+  // Same logic as shadowing_rows() in bin/pihole-bahrain.
+  function parseIpv4(s) {
+    var m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s);
+    if (!m) return null;
+    var out = [];
+    for (var i = 1; i <= 4; i++) { if (+m[i] > 255) return null; out.push(+m[i]); }
+    return out;
+  }
+  function parseIpv6(s) {
+    var zone = s.indexOf('%'); if (zone >= 0) s = s.slice(0, zone);
+    if (s.indexOf(':') < 0 || !/^[0-9a-f:.]+$/i.test(s)) return null;
+    var tail = /^(.*:)(\d+\.\d+\.\d+\.\d+)$/.exec(s);
+    if (tail) {
+      var v4 = parseIpv4(tail[2]); if (!v4) return null;
+      s = tail[1] + ((v4[0] << 8) | v4[1]).toString(16) + ':' + ((v4[2] << 8) | v4[3]).toString(16);
+    }
+    var halves = s.split('::'); if (halves.length > 2) return null;
+    var head = halves[0] ? halves[0].split(':') : [];
+    var rest = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+    var groups = head.slice();
+    if (halves.length === 2) { while (groups.length + rest.length < 8) groups.push('0'); }
+    groups = groups.concat(rest);
+    if (groups.length !== 8) return null;
+    var out = [];
+    for (var i = 0; i < 8; i++) {
+      if (!/^[0-9a-f]{1,4}$/i.test(groups[i])) return null;
+      var v = parseInt(groups[i], 16); out.push(v >> 8, v & 255);
+    }
+    return out;
+  }
+  function parseIp(s) { s = String(s || ''); return s.indexOf(':') >= 0 ? parseIpv6(s) : parseIpv4(s); }
+  function parseNet(text) {            // an address or CIDR subnet; null for MAC, host name and :interface rows
+    var parts = String(text || '').split('/'); if (parts.length > 2) return null;
+    var b = parseIp(parts[0]); if (!b) return null;
+    var bits = b.length * 8;
+    if (parts.length === 2) { if (!/^\d+$/.test(parts[1]) || +parts[1] > bits) return null; bits = +parts[1]; }
+    return { bytes: b, bits: bits };
+  }
+  function inNet(ip, net) {
+    if (ip.length !== net.bytes.length) return false;
+    for (var i = 0, left = net.bits; left > 0; i++, left -= 8) {
+      var mask = left >= 8 ? 255 : (255 << (8 - left)) & 255;
+      if ((ip[i] & mask) !== (net.bytes[i] & mask)) return false;
+    }
+    return true;
+  }
+  function winningRow(ip, clients) {
+    var best = null, bestKey = null;
+    clients.forEach(function (c) {
+      var net = parseNet(c.client);
+      if (!net || !inNet(ip, net)) return;
+      var key = net.bits * 1e9 + (c.id || 0);
+      if (bestKey === null || key > bestKey) { best = c; bestKey = key; }
+    });
+    return best;
+  }
+  function deviceIps(d) {
+    var ips = (d.ips || []).map(function (i) { return i.ip; }).filter(Boolean);
+    var hw = d.hwaddr || '';
+    if (hw.indexOf('ip-') === 0 && ips.indexOf(hw.slice(3)) < 0) ips.push(hw.slice(3));
+    return ips;
+  }
+  function neededGroupIds(byName, paused) {   // the pb-* groups a child's row must have (not Default)
+    var ids = [];
+    [G.kids, G.guard, G.offline].concat(paused ? [G.paused] : []).forEach(function (n) { if (byName[n]) ids.push(byName[n].id); });
+    catalog.services.forEach(function (s) { var g = byName[SVC + s.id]; if (g) ids.push(g.id); });
+    return ids;
+  }
+  // Client rows FTL would use instead of this MAC-registered child's own row, if they lack its pb groups.
+  function shadowRowsFor(addr, devices, clients, byName, paused) {
+    if (!MAC_RE.test(addr || '')) return [];
+    var dev = devices.filter(function (d) { return (d.hwaddr || '').toLowerCase() === addr.toLowerCase(); })[0];
+    if (!dev) return [];
+    var needed = neededGroupIds(byName, paused), found = {}, out = [];
+    deviceIps(dev).forEach(function (ipText) {
+      var ip = parseIp(ipText); if (!ip) return;
+      var row = winningRow(ip, clients);
+      if (!row || found[row.client]) return;
+      var have = row.groups || [];
+      if (needed.some(function (id) { return have.indexOf(id) < 0; })) { found[row.client] = true; out.push(row); }
+    });
+    return out;
+  }
+
   // ------------------------------------------------------------------ model
   function parseState(raw) {
     var s = JSON.parse(JSON.stringify(DEFAULT_STATE)), d = {};
@@ -290,7 +382,7 @@
     return Promise.all([
       call('GET', '/api/groups'),
       call('GET', '/api/clients'),
-      call('GET', '/api/network/devices?max_devices=100').catch(function () { return { devices: [] }; }),
+      call('GET', '/api/network/devices?max_devices=200&max_addresses=50').catch(function () { return { devices: [] }; }),
       call('GET', '/api/info/client').catch(function () { return {}; }),
       catalog ? Promise.resolve(catalog) : fetch('/pb/services.json', { cache: 'no-store' }).then(function (r) { return r.json(); })
     ]).then(function (r) {
@@ -309,7 +401,9 @@
         .map(function (c) {
           var key = c.client.toLowerCase();
           var dev = devicesByMac[key] || devicesByIp[c.client] || null;
-          return { row: c, name: c.comment || deviceLabel(dev) || c.client, paused: c.groups.indexOf(pausedId) >= 0, dev: dev };
+          var paused = c.groups.indexOf(pausedId) >= 0;
+          return { row: c, name: c.comment || deviceLabel(dev) || c.client, paused: paused, dev: dev,
+            shadow: shadowRowsFor(c.client, r[2].devices || [], r[1].clients || [], byName, paused) };
         });
       var services = catalog.services.map(function (s) {
         var g = byName[SVC + s.id];
@@ -530,6 +624,7 @@
     if (!addr) { $('addErr').textContent = t('pickOrType'); return; }
     var name = $('devName').value.trim();
     var existing = M.clients.filter(function (c) { return c.client.toLowerCase() === addr.toLowerCase(); })[0];
+    var shadow = shadowRowsFor(addr, M.devices, M.clients, M.groups, false);
     closeDialog('addDialog');
     run(function () {
       var need = kidGroupIds();
@@ -538,7 +633,9 @@
         return call('PUT', '/api/clients/' + q(existing.client), { comment: name || existing.comment || '', groups: merged });
       }
       return call('POST', '/api/clients', { client: addr, comment: name, groups: need });
-    }, t('deviceAdded', { n: name || addr }));
+    }, t('deviceAdded', { n: name || addr })).then(function () {
+      if (shadow.length) toast(t('shadowedToast', { n: name || addr, r: shadow.map(function (x) { return x.client; }).join(', ') }), true);
+    });
   }
 
   function saveBedtime() {
@@ -658,7 +755,9 @@
         el('span', { class: 'device-text' }, [
           el('span', { class: 'device-name' }, [k.name, k.paused ? el('span', { class: 'tag', text: t('paused') }) : null]),
           el('span', { class: 'device-meta', text: meta }),
-          el('span', { class: 'device-meta', text: fmtAgo(k.dev && k.dev.lastQuery) })
+          el('span', { class: 'device-meta', text: fmtAgo(k.dev && k.dev.lastQuery) }),
+          k.shadow.length ? el('span', { class: 'device-warn', role: 'alert',
+            text: t('shadowed', { r: k.shadow.map(function (x) { return x.client; }).join(', ') }) }) : null
         ]),
         el('span', { class: 'device-actions' }, [
           el('button', { type: 'button', class: 'btn btn-small', 'data-act': 'pause', 'data-client': k.row.client },
