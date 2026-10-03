@@ -139,3 +139,88 @@ test('wires: S-curves with exact ends, and points along them', () => {
   assert.equal(C.easeInOut(0), 0);
   assert.equal(C.easeInOut(1), 1);
 });
+
+// ------------------------------------------------------------------ the poller, driven by a fake clock
+function fakeClock() {
+  const c = { t: 0, q: [], id: 0 };
+  c.now = () => c.t;
+  c.setTimeout = (f, ms) => { const id = ++c.id; c.q.push({ id, at: c.t + ms, f }); return id; };
+  c.clearTimeout = (id) => { c.q = c.q.filter(x => x.id !== id); };
+  c.advance = async (ms) => {                      // run everything due up to t + ms, letting promises settle in between
+    const end = c.t + ms;
+    for (;;) {
+      c.q.sort((a, b) => a.at - b.at);
+      const next = c.q[0];
+      if (!next || next.at > end) break;
+      c.q.shift(); c.t = next.at; next.f();
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+    }
+    c.t = end;
+  };
+  return c;
+}
+
+test('poller: tasks start staggered, repeat after finishing, and never overlap', async () => {
+  const clk = fakeClock(), calls = [];
+  let inFlight = 0, maxInFlight = 0;
+  const slow = (name) => () => { calls.push([name, clk.t]); inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
+    return new Promise(res => clk.setTimeout(() => { inFlight--; res(); }, 100)); };
+  const p = new C.Poller({ tasks: [{ name: 'a', every: 1000, run: slow('a') }, { name: 'b', every: 5000, run: slow('b') }], ...clk, stagger: 250 });
+  p.start();
+  await clk.advance(2600);
+  assert.deepEqual(calls.filter(c => c[0] === 'a').map(c => c[1]), [0, 1100, 2200], 'next run is `every` ms after the previous one FINISHED');
+  assert.deepEqual(calls.filter(c => c[0] === 'b').map(c => c[1]), [250]);
+  assert.ok(maxInFlight <= 2);
+  p.stop();
+  const n = calls.length;
+  await clk.advance(20000);
+  assert.equal(calls.length, n, 'nothing runs after stop');
+});
+
+test('poller: failures back off and recover, and are reported', async () => {
+  const clk = fakeClock(), errors = [], oks = [];
+  let fail = true, runs = 0;
+  const p = new C.Poller({ tasks: [{ name: 'q', every: 1000, run: () => { runs++; return fail ? Promise.reject(new Error('down')) : Promise.resolve(); } }],
+    ...clk, onError: (n, e, f) => errors.push([n, e.message, f, clk.t]), onOk: n => oks.push([n, clk.t]) });
+  p.start();
+  await clk.advance(0);                                   // fails at 0 -> next after 2000
+  await clk.advance(2000);                                // fails at 2000 -> next after 4000
+  await clk.advance(4000);                                // fails at 6000 -> next after 8000
+  assert.deepEqual(errors.map(e => e[3]), [0, 2000, 6000]);
+  assert.deepEqual(errors.map(e => e[2]), [1, 2, 3]);
+  fail = false;
+  await clk.advance(8000);                                // succeeds at 14000
+  assert.deepEqual(oks, [['q', 14000]]);
+  await clk.advance(1000);
+  assert.equal(runs, 5, 'back to the normal rhythm: every 1000 ms');
+  for (let i = 0; i < 12; i++) { fail = true; await clk.advance(40000); }
+  assert.ok(Math.max.apply(null, errors.map(e => e[3])) > 0);
+  const gaps = errors.slice(-3).map((e, i, a) => i ? e[3] - a[i - 1][3] : 0).slice(1);
+  assert.ok(gaps.every(g => g <= 30000 + 1), 'backoff is capped at 30 s, got ' + gaps);
+});
+
+test('poller: pauses while the page is hidden and catches up when it is visible again', async () => {
+  const clk = fakeClock(); let visible = true, runs = 0;
+  const p = new C.Poller({ tasks: [{ name: 'q', every: 1000, run: () => { runs++; return Promise.resolve(); } }], ...clk, visible: () => visible });
+  p.start();
+  await clk.advance(2500);
+  const before = runs;
+  visible = false;
+  await clk.advance(60000);
+  assert.ok(runs - before <= 1, 'at most the run that was already due when it was hidden');
+  const frozen = runs;
+  visible = true;
+  p.wake();
+  await clk.advance(0);
+  assert.equal(runs, frozen + 1, 'wake() runs what is due at once');
+  await clk.advance(1000);
+  assert.equal(runs, frozen + 2);
+});
+
+test('poller: a task that throws synchronously is treated as a failure, not a crash', async () => {
+  const clk = fakeClock(), errors = [];
+  const p = new C.Poller({ tasks: [{ name: 'x', every: 500, run: () => { throw new Error('boom'); } }], ...clk, onError: (n, e) => errors.push(e.message) });
+  p.start();
+  await clk.advance(100);
+  assert.deepEqual(errors, ['boom']);
+});

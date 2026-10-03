@@ -188,9 +188,78 @@
     return { x: a * w.p0.x + b * w.p1.x + c * w.p2.x + d * w.p3.x, y: a * w.p0.y + b * w.p1.y + c * w.p2.y + d * w.p3.y };
   }
 
+  // ------------------------------------------------------------------ polling
+  /**
+   * Runs named tasks on their own schedules: each starts right away (staggered a little), then repeats `every` ms
+   * AFTER the previous run finished, so requests never pile up. A failing task backs off (x2 each time, up to 30 s) and
+   * recovers by itself. Nothing runs while the page is hidden; when it becomes visible again, tasks that are due run at once.
+   *
+   *   var poller = new Poller({ tasks: [{ name: 'queries', every: 3500, run: function () { return promise; } }],
+   *                             onError: function (name, err, fails) {}, visible: function () { return true; } });
+   *   poller.start(); poller.wake();   // wake() after visibilitychange
+   *   poller.stop();
+   *
+   * setTimeout/clearTimeout/now/visible can be replaced, which is how the tests drive it with a fake clock.
+   */
+  function Poller(options) {
+    this.tasks = (options.tasks || []).map(function (t) {
+      return { name: t.name, every: t.every, run: t.run, fails: 0, timer: null, due: 0, running: false };
+    });
+    this.onError = options.onError || function () {};
+    this.onOk = options.onOk || function () {};
+    this.visible = options.visible || function () { return true; };
+    this.now = options.now || function () { return new Date().getTime(); };
+    this.setTimeout = options.setTimeout || function (f, ms) { return setTimeout(f, ms); };
+    this.clearTimeout = options.clearTimeout || function (id) { clearTimeout(id); };
+    this.maxBackoff = options.maxBackoff || 30000;
+    this.stagger = options.stagger === undefined ? 250 : options.stagger;
+    this.active = false;
+  }
+  Poller.prototype.start = function () {
+    var self = this;
+    this.active = true;
+    this.tasks.forEach(function (t, i) { self._plan(t, i * self.stagger); });
+  };
+  Poller.prototype.stop = function () {
+    var self = this;
+    this.active = false;
+    this.tasks.forEach(function (t) { if (t.timer !== null) { self.clearTimeout(t.timer); t.timer = null; } });
+  };
+  /** Call when the page becomes visible again: whatever is due runs now. */
+  Poller.prototype.wake = function () {
+    var self = this, now = this.now();
+    if (!this.active || !this.visible()) return;
+    this.tasks.forEach(function (t) {
+      if (!t.running && t.due <= now) { if (t.timer !== null) self.clearTimeout(t.timer); self._plan(t, 0); }
+    });
+  };
+  Poller.prototype._plan = function (t, delay) {
+    var self = this;
+    t.due = this.now() + delay;
+    if (t.timer !== null) this.clearTimeout(t.timer);
+    t.timer = this.setTimeout(function () { t.timer = null; self._tick(t); }, delay);
+  };
+  Poller.prototype._tick = function (t) {
+    var self = this;
+    if (!this.active) return;
+    if (!this.visible()) { t.due = 0; return; }              // paused: wake() picks it up again
+    t.running = true;
+    var done = function (ok, err) {
+      t.running = false;
+      if (!self.active) return;
+      if (ok) { t.fails = 0; self.onOk(t.name); }
+      else { t.fails++; self.onError(t.name, err, t.fails); }
+      self._plan(t, ok ? t.every : Math.min(self.maxBackoff, t.every * Math.pow(2, t.fails)));
+    };
+    var result;
+    try { result = t.run(); } catch (e) { return done(false, e); }
+    if (result && typeof result.then === 'function') result.then(function () { done(true); }, function (e) { done(false, e); });
+    else done(true);
+  };
+
   var api = {
     classify: classify, isHiddenDomain: isHiddenDomain, isHiddenClient: isHiddenClient, baseDomain: baseDomain, appFor: appFor,
-    formatCount: formatCount, percent: percent, Feed: Feed, priority: priority, Pacer: Pacer,
+    formatCount: formatCount, percent: percent, Feed: Feed, priority: priority, Pacer: Pacer, Poller: Poller,
     lerp: lerp, easeInOut: easeInOut, clamp01: clamp01, wire: wire, pointAt: pointAt,
   };
   root.PBCore = api;
