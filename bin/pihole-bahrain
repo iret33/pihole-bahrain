@@ -8,6 +8,7 @@ Commands
   status       Print the current state.
   doctor       Check the installation and print anything that needs fixing.
   update       Update the add-on to the latest version from GitHub.
+  use-mac      Re-register children that were added by IP address under their MAC address.
   remove       Delete everything this add-on created inside Pi-hole.
 
 How it works
@@ -637,6 +638,40 @@ class Controller:
                 self.api.put_client(c["client"], c.get("comment") or "", merged)
         self._pending_kids = []
 
+    def convert_to_mac(self, only: str | None = None, dry_run: bool = False) -> list:
+        """Re-register children that were added by IP address under their MAC address.
+
+        Keeps name and groups (also pb-paused) and removes the IP row only after the MAC row exists.
+        Returns a line per child that was considered. Never runs on its own; `use-mac` calls it.
+        """
+        groups = self.api.group_map()
+        clients = self.api.clients()
+        devices = self.api.network_devices()
+        lines = []
+        for kid in kid_rows(groups, clients):
+            ip = parse_ip(kid["client"])
+            if ip is None or (only and parse_ip(only) != ip):
+                continue
+            dev = find_device(devices, kid["client"])
+            mac = dev.get("hwaddr") if dev and is_mac(dev.get("hwaddr")) else None
+            name = kid.get("comment") or kid["client"]
+            if not mac:
+                lines.append("%s (%s): its MAC address is not known yet, left as it is" % (name, kid["client"]))
+                continue
+            mac = mac.upper()
+            existing = next((c for c in clients if c["client"].lower() == mac.lower()), None)
+            merged = sorted(set(kid.get("groups", [])) | set(existing.get("groups", []) if existing else []))
+            lines.append("%s: %s -> %s%s" % (name, kid["client"], mac, " (dry run)" if dry_run else ""))
+            if dry_run:
+                continue
+            comment = kid.get("comment") or (existing.get("comment") if existing else "") or ""
+            if existing:
+                self.api.put_client(existing["client"], existing.get("comment") or comment, merged)
+            else:
+                self.api.request("POST", "/api/clients", {"client": mac, "comment": comment, "groups": merged})
+            self.api.request("DELETE", "/api/clients/" + Api.q(kid["client"]))
+        return lines
+
     def remove(self) -> None:
         groups = self.api.group_map()
         ours = {g["id"] for n, g in groups.items() if n.startswith("pb-")}
@@ -872,6 +907,34 @@ class Report:
         return 1 if self.fixes else 0
 
 
+def identity_warning(rep: Report, label: str, kid: dict, dev, groups: dict, clients: list) -> None:
+    """A child registered by IP address is only filtered while it keeps that address."""
+    ip = parse_ip(kid["client"])
+    if ip is None:
+        return
+    mac = dev.get("hwaddr") if dev and is_mac(dev.get("hwaddr")) else None
+    notes = []
+    if ip.version == 6:
+        notes.append("an IPv6 address; phones rotate their IPv6 privacy addresses, which silently ends the filtering")
+    if mac:
+        kid_id = groups.get(G_KIDS, {}).get("id")
+        loose = []
+        for other in device_ips(dev):
+            o = parse_ip(other)
+            if o is None or o == ip or o.is_link_local:
+                continue
+            row = winning_row(o, clients)
+            if row is None or kid_id not in row.get("groups", []):
+                loose.append(other)
+        notes.append("its MAC address %s is known now, so it can be added by MAC (sudo pihole-bahrain use-mac %s)"
+                     % (mac, kid["client"]))
+        if loose:
+            notes.append("it also uses %s, which no rule covers" % ", ".join(loose))
+    elif ip.version == 4:
+        return                                         # nothing better is known yet
+    rep.warn("%s is registered by its address: %s." % (label, "; ".join(notes)))
+
+
 SILENT_HINT = ("Check that its Wi-Fi really uses this box for DNS: a Private Wi-Fi address, Private DNS, "
                "a VPN or mobile data can bypass it.")
 
@@ -889,6 +952,7 @@ def kid_checks(rep: Report, catalog: dict, groups: dict, clients: list, devices:
         if not (is_mac(kid["client"]) or parse_ip(kid["client"]) is not None):
             continue                                  # a subnet or host name row: no device to look up
         dev = find_device(devices, kid["client"])
+        identity_warning(rep, label, kid, dev, groups, clients)
         if dev is None:
             rep.warn("%s has not been seen on the network yet. %s" % (label, SILENT_HINT))
         elif (dev.get("lastQuery") or 0) < now - 24 * 3600:
@@ -1159,6 +1223,17 @@ def cmd_password_state(args) -> int:
     return 0 if api.password_set() else 3
 
 
+def cmd_use_mac(args) -> int:
+    api = Api()
+    api.login()
+    try:
+        lines = Controller(api, load_catalog()).convert_to_mac(args.address, args.dry_run)
+    finally:
+        api.logout()
+    print("\n".join(lines) if lines else "Nothing to convert: no child device is registered by IP address.")
+    return 0
+
+
 def cmd_remove(args) -> int:
     api = Api()
     api.login()
@@ -1188,6 +1263,10 @@ def main(argv=None) -> int:
     p.add_argument("--ref", default=None, help="git branch or tag (default from config)")
     p.set_defaults(fn=cmd_update)
     sub.add_parser("password-state", help=argparse.SUPPRESS).set_defaults(fn=cmd_password_state)
+    p = sub.add_parser("use-mac", help="re-register children added by IP address under their MAC address")
+    p.add_argument("address", nargs="?", default=None, help="only this child's IP address (default: all)")
+    p.add_argument("--dry-run", action="store_true", help="show what would change")
+    p.set_defaults(fn=cmd_use_mac)
     sub.add_parser("run", help="run the scheduler (systemd)").set_defaults(fn=cmd_run)
     sub.add_parser("status", help="print current state").set_defaults(fn=cmd_status)
     sub.add_parser("doctor", help="check the installation").set_defaults(fn=cmd_doctor)

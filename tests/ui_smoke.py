@@ -213,6 +213,32 @@ with sync_playwright() as p:
     page.wait_for_selector(".tile")
     expect(page.locator(".device-warn").count() == 1, "an IPv6 subnet row is detected too")
 
+    # --- IPv6-only network-table entries are not offered; typing an IPv6 address asks first
+    now_ts = int(time.time())
+    store.devices.append({"id": 41, "hwaddr": "ip-fd00::1234", "macVendor": "", "lastQuery": now_ts - 5,
+                          "numQueries": 3, "ips": [{"ip": "fd00::1234", "name": ""}]})
+    store.devices.append({"id": 42, "hwaddr": "ip-fd00::2", "macVendor": "", "lastQuery": now_ts - 6,
+                          "numQueries": 3, "ips": [{"ip": "fd00::2", "name": ""}, {"ip": "192.168.1.88", "name": ""}]})
+    page.reload()
+    page.wait_for_selector(".tile")
+    page.click("[data-act=openAdd]")
+    page.wait_for_selector("#picker .pick")
+    expect(page.locator("#picker [data-addr*=fd00]").count() == 0, "an IPv6-only entry is not offered in the picker")
+    expect(page.locator("#picker [data-addr='192.168.1.88']").count() == 1, "an entry with an IPv4 address is offered by it")
+    page.click("#addForm .manual summary")
+    page.fill("#manualAddr", "fd00::5")
+    page.click("[data-act=addDevice]")
+    page.locator("#confirmDialog[open]").wait_for()
+    expect("IPv6" in page.inner_text("#confirmText"), "typing an IPv6 address asks for confirmation")
+    page.click("#confirmDialog button[value=no]")
+    page.wait_for_timeout(300)
+    expect("fd00::5" not in [c["client"] for c in store.clients], "cancelling adds nothing")
+    page.click("[data-act=addDevice]")
+    page.locator("#confirmDialog[open]").wait_for()
+    page.click("#confirmYes")
+    settle(page)
+    expect("fd00::5" in [c["client"] for c in store.clients], "confirming adds the device")
+
     dark = browser.new_page(viewport={"width": 1280, "height": 900}, color_scheme="dark")
     dark.goto(args.url)
     dark.fill("#pw", "test")

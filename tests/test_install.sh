@@ -130,6 +130,9 @@ EOF
 )"
 [[ "$lists" == "20 https://raw.githubusercontent.com/iret33/pihole-bahrain/master/lists/"* ]] || fail "lists: $lists"
 
+"$ROOT/usr/local/bin/pihole-bahrain" status | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["version"] and d["devices"] == []' || fail "status output is not the expected JSON"
+"$ROOT/usr/local/bin/pihole-bahrain" use-mac --dry-run | grep -q "Nothing to convert" || fail "use-mac did not run"
+
 echo "--- re-run (update) keeps settings, hostname change replaces host entry"
 PB_HOSTNAME=kids.home bash "$REPO/install.sh" >"$WORK/install2.out" 2>&1 || { cat "$WORK/install2.out"; fail "second run failed"; }
 grep -q '^PB_HOSTNAME=kids.home' "$ROOT/etc/pihole-bahrain/config" || fail "hostname not updated"

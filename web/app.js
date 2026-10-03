@@ -70,6 +70,7 @@
       daysLong: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'],
       shadowed: 'Pi-hole has another rule for this device\u2019s address ({r}), so these settings may not apply. Remove that rule in Pi-hole admin \u203A Clients.',
       shadowedToast: '{n} added, but Pi-hole has another rule ({r}) that overrides it. Remove that rule in Pi-hole admin.',
+      ipv6Warn: 'This is an IPv6 address. Phones change their IPv6 privacy addresses often, so the rules would stop applying without warning. Use the device\u2019s MAC address instead if you can. Add it anyway?',
       cat: {}, langSwitch: 'العربية', minutesShort: '{n} min'
     },
     ar: {
@@ -121,6 +122,7 @@
       daysLong: ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'],
       shadowed: 'يوجد في Pi-hole قاعدة أخرى لعنوان هذا الجهاز ({r})، لذلك قد لا تُطبَّق هذه الإعدادات. احذف تلك القاعدة من لوحة Pi-hole ‹ العملاء.',
       shadowedToast: 'تمت إضافة {n}، لكن توجد قاعدة أخرى في Pi-hole ({r}) تتجاوزها. احذف تلك القاعدة من لوحة Pi-hole.',
+      ipv6Warn: 'هذا عنوان IPv6. تغيّر الهواتف عناوين IPv6 الخاصة بها كثيرًا، فتتوقف القواعد عن العمل دون تنبيه. استخدم عنوان MAC للجهاز إن أمكن. هل تريد إضافته على أي حال؟',
       cat: {}, langSwitch: 'English', minutesShort: '{n} دقيقة'
     }
   };
@@ -566,10 +568,15 @@
     if (v.indexOf(':') >= 0 && /^[0-9a-f:]+$/i.test(v) && v.length >= 3) return v.toLowerCase();  // IPv6
     return null;
   }
+  // The address to register a network-table entry by. A real MAC is stable. An "ip-<addr>" entry means
+  // FTL has no MAC for it: prefer its IPv4 address, and offer nothing for an IPv6-only entry (phones
+  // rotate their IPv6 privacy addresses daily, which would silently end the filtering).
   function deviceAddr(d) {
     var hw = d.hwaddr || '';
-    if (hw.indexOf('ip-') === 0) return hw.slice(3);
-    return hw.toUpperCase();
+    if (hw.indexOf('ip-') !== 0) return hw.toUpperCase();
+    if (parseIpv4(hw.slice(3))) return hw.slice(3);
+    var v4 = (d.ips || []).map(function (i) { return i.ip; }).filter(function (a) { return parseIpv4(a); })[0];
+    return v4 || '';
   }
   function openAdd() {
     pickedDevice = null;
@@ -622,6 +629,13 @@
     var addr = typed ? normalizeAddr(typed) : pickedDevice;
     if (typed && !addr) { $('addErr').textContent = t('badAddr'); $('manualAddr').focus(); return; }
     if (!addr) { $('addErr').textContent = t('pickOrType'); return; }
+    if (typed && addr.indexOf(':') >= 0 && !MAC_RE.test(addr)) {       // an IPv6 address typed by hand
+      confirmBox(t('ipv6Warn'), t('add')).then(function (yes) { if (yes) submitDevice(addr); });
+      return;
+    }
+    submitDevice(addr);
+  }
+  function submitDevice(addr) {
     var name = $('devName').value.trim();
     var existing = M.clients.filter(function (c) { return c.client.toLowerCase() === addr.toLowerCase(); })[0];
     var shadow = shadowRowsFor(addr, M.devices, M.clients, M.groups, false);

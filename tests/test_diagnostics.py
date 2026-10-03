@@ -312,8 +312,10 @@ class SilentKidTests(Base):
         self.add_row("192.168.1.77", self.all_pb_groups(), "Ali")
         self.add_row("192.168.1.0/24", self.all_pb_groups(), "Whole LAN")      # nothing to look up
         rep = self.report()
-        self.assertEqual(len(rep.warnings), 1)
-        self.assertIn("Ali", rep.warnings[0])
+        silent = [w for w in rep.warnings if "no DNS query" in w]
+        self.assertEqual(len(silent), 1, rep.lines)
+        self.assertIn("Ali", silent[0])
+        self.assertFalse([w for w in rep.warnings if "Whole LAN" in w], "a subnet row has no device to look up")
 
     def test_warnings_do_not_fail_doctor(self):
         lines = []
@@ -323,6 +325,92 @@ class SilentKidTests(Base):
         self.assertIn("1 warning(s)", lines[-1])
         rep.fix("broken")
         self.assertEqual(rep.finish(), 1)
+
+
+class IdentityTests(Base):
+    """Children registered by IP address stop being filtered when the address changes."""
+
+    def test_ip_registered_child_whose_mac_is_known_warns(self):
+        self.add_device("aa:bb:cc:00:00:77", ["192.168.1.77", "2001:db8::77", "fe80::77"])
+        self.add_row("192.168.1.77", self.all_pb_groups(), "Ali")
+        rep = self.report()
+        self.assertEqual(rep.fixes, [])
+        self.assertEqual(len(rep.warnings), 1, rep.lines)
+        w = rep.warnings[0]
+        self.assertIn("aa:bb:cc:00:00:77", w)
+        self.assertIn("use-mac 192.168.1.77", w)
+        self.assertIn("2001:db8::77", w, "another address of the same device that no rule covers")
+        self.assertNotIn("fe80::77", w, "link-local addresses are not worth mentioning")
+
+    def test_other_addresses_covered_by_a_child_row_are_not_listed(self):
+        self.add_device("aa:bb:cc:00:00:77", ["192.168.1.77", "2001:db8::77"])
+        self.add_row("192.168.1.77", self.all_pb_groups(), "Ali")
+        self.add_row("2001:db8::/64", self.all_pb_groups(), "Ali v6")
+        warnings = [w for w in self.report().warnings if w.startswith("Ali (")]
+        self.assertEqual(len(warnings), 1)
+        self.assertNotIn("2001:db8::77", warnings[0])
+
+    def test_ipv6_registered_child_warns_about_rotating_addresses(self):
+        self.add_device("ip-2001:db8::99", ["2001:db8::99"])
+        self.add_row("2001:db8::99", self.all_pb_groups(), "Tablet")
+        rep = self.report()
+        self.assertEqual(len(rep.warnings), 1, rep.lines)
+        self.assertIn("IPv6", rep.warnings[0])
+        self.assertIn("privacy addresses", rep.warnings[0])
+
+    def test_ipv4_child_without_a_known_mac_is_left_alone(self):
+        self.add_device("ip-192.168.1.30", ["192.168.1.30"])
+        self.add_row("192.168.1.30", self.all_pb_groups(), "Console")
+        self.assertEqual(self.report().warnings, [])
+
+    def test_mac_registered_child_has_no_identity_warning(self):
+        self.add_device("aa:bb:cc:00:00:23", ["192.168.1.23", "2001:db8::23"])
+        self.add_row("AA:BB:CC:00:00:23", self.all_pb_groups(), "Sara")
+        self.assertEqual(self.report().warnings, [])
+
+
+class UseMacTests(Base):
+    def setUp(self):
+        super().setUp()
+        self.add_device("aa:bb:cc:00:00:77", ["192.168.1.77", "2001:db8::77"])
+        self.paused_groups = self.all_pb_groups(paused=True)
+        self.add_row("192.168.1.77", self.paused_groups, "Ali")
+
+    def rows(self):
+        return {c["client"]: c for c in self.store.clients}
+
+    def test_converts_keeping_name_and_groups(self):
+        lines = self.ctl.convert_to_mac()
+        self.assertEqual(len(lines), 1)
+        rows = self.rows()
+        self.assertNotIn("192.168.1.77", rows)
+        self.assertEqual(rows["AA:BB:CC:00:00:77"]["comment"], "Ali")
+        self.assertEqual(sorted(rows["AA:BB:CC:00:00:77"]["groups"]), sorted(self.paused_groups), "pb-paused is kept too")
+        self.assertEqual(self.report().warnings, [], "the identity warning is gone")
+        self.assertEqual(self.ctl.convert_to_mac(), [], "nothing left to convert")
+
+    def test_dry_run_changes_nothing(self):
+        before = json.dumps(self.store.clients, sort_keys=True)
+        lines = self.ctl.convert_to_mac(dry_run=True)
+        self.assertIn("dry run", lines[0])
+        self.assertEqual(json.dumps(self.store.clients, sort_keys=True), before)
+
+    def test_merges_into_an_existing_mac_row(self):
+        self.add_row("AA:BB:CC:00:00:77", [0], "")
+        self.ctl.convert_to_mac()
+        rows = self.rows()
+        self.assertNotIn("192.168.1.77", rows)
+        self.assertEqual(sorted(rows["AA:BB:CC:00:00:77"]["groups"]), sorted(self.paused_groups))
+        self.assertEqual(rows["AA:BB:CC:00:00:77"]["comment"], "Ali")
+
+    def test_unknown_mac_and_address_filter(self):
+        self.add_device("ip-192.168.1.30", ["192.168.1.30"])
+        self.add_row("192.168.1.30", self.all_pb_groups(), "Console")
+        lines = self.ctl.convert_to_mac(only="192.168.1.30")
+        self.assertEqual(len(lines), 1)
+        self.assertIn("not known yet", lines[0])
+        self.assertIn("192.168.1.77", self.rows(), "the other child was not touched")
+        self.assertIn("192.168.1.30", self.rows())
 
 
 class SystemProbeTests(unittest.TestCase):
