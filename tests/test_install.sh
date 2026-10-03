@@ -132,6 +132,15 @@ EOF
 
 "$ROOT/usr/local/bin/pihole-bahrain" status | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["version"] and d["devices"] == []' || fail "status output is not the expected JSON"
 "$ROOT/usr/local/bin/pihole-bahrain" use-mac --dry-run | grep -q "Nothing to convert" || fail "use-mac did not run"
+# diagnose and watch through the real CLI; the stubbed pihole-FTL has no sqlite shell, so the databases are "unreadable"
+"$ROOT/usr/local/bin/pihole-bahrain" diagnose youtube >"$WORK/diagnose.out" 2>&1 || { cat "$WORK/diagnose.out"; fail "diagnose failed"; }
+grep -q "Findings, most likely first" "$WORK/diagnose.out" || { cat "$WORK/diagnose.out"; fail "diagnose printed no findings"; }
+grep -q "Could not read" "$WORK/diagnose.out" || fail "diagnose did not report the unreadable database"
+if "$ROOT/usr/local/bin/pihole-bahrain" diagnose no-such-service >"$WORK/diagnose2.out" 2>&1; then fail "diagnose accepted an unknown service"; fi
+grep -q "unknown service" "$WORK/diagnose2.out" || fail "no message for an unknown service"
+: >"$WORK/pihole.log"
+PB_DNSMASQ_LOG="$WORK/pihole.log" "$ROOT/usr/local/bin/pihole-bahrain" watch 0.02 >"$WORK/watch.out" 2>&1 || { cat "$WORK/watch.out"; fail "watch failed"; }
+grep -q "not using this box for DNS" "$WORK/watch.out" || { cat "$WORK/watch.out"; fail "watch printed no summary"; }
 
 echo "--- re-run (update) keeps settings, hostname change replaces host entry"
 PB_HOSTNAME=kids.home bash "$REPO/install.sh" >"$WORK/install2.out" 2>&1 || { cat "$WORK/install2.out"; fail "second run failed"; }

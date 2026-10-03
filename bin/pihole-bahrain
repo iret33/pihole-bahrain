@@ -7,6 +7,8 @@ Commands
   run          Background scheduler (timers + bedtime). Run by systemd.
   status       Print the current state.
   doctor       Check the installation and print anything that needs fixing.
+  diagnose     Read-only report on why a service is still reachable after it was blocked.
+  watch        Follow the DNS log to see whether a device's queries reach the box.
   update       Update the add-on to the latest version from GitHub.
   use-mac      Re-register children that were added by IP address under their MAC address.
   remove       Delete everything this add-on created inside Pi-hole.
@@ -34,6 +36,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import socket
 import ssl
@@ -1179,6 +1182,541 @@ def cmd_doctor(args) -> int:
     return rep.finish()
 
 
+# --------------------------------------------------------------------------- #
+# Diagnostics: `diagnose` (a read-only report) and `watch` (follow the DNS log)
+# --------------------------------------------------------------------------- #
+GRAVITY_DB = "/etc/pihole/gravity.db"
+FTL_DB = "/etc/pihole/pihole-FTL.db"
+DNSMASQ_LOG = "/var/log/pihole/pihole.log"
+DEFAULT_DIAGNOSE_SERVICES = ("youtube", "instagram")
+
+# FTL's query status codes (enum query_status in FTL's enums.h).
+QUERY_STATUS = {0: "unknown", 1: "blocked (gravity)", 2: "forwarded", 3: "cached", 4: "blocked (regex)",
+                5: "blocked (denylist)", 6: "blocked upstream (IP)", 7: "blocked upstream (NULL)",
+                8: "blocked upstream (NXRA)", 9: "blocked (gravity, CNAME)", 10: "blocked (regex, CNAME)",
+                11: "blocked (denylist, CNAME)", 12: "retried", 13: "retried (DNSSEC)", 14: "in progress",
+                15: "blocked (database busy)", 16: "blocked (special domain)", 17: "cached (stale)",
+                18: "blocked upstream (EDE15)"}
+BLOCKED_STATUS = {1, 4, 5, 6, 7, 8, 9, 10, 11, 15, 16, 18}
+SQL_LITERAL = re.compile(r"^[A-Za-z0-9._:/%^|@*,-]+$")
+
+
+class SqlError(Exception):
+    pass
+
+
+def sql_str(value: str) -> str:
+    """A quoted SQL string. The sqlite3 command line cannot bind parameters, so only plain
+    domain/address text (no quotes, no spaces) is accepted."""
+    if not SQL_LITERAL.match(value):
+        raise ValueError("unsafe value for SQL: %r" % (value,))
+    return "'" + value + "'"
+
+
+def sql_ints(values) -> str:
+    return ",".join(str(int(v)) for v in values) or "NULL"
+
+
+def sql_rows(db: str, sql: str) -> list:
+    """Run one read-only query and return its rows as dicts.
+
+    Uses Pi-hole's own sqlite shell (`pihole-FTL sqlite3 -readonly -json`); without pihole-FTL on the
+    PATH (tests, a development machine) the standard library's sqlite3 module reads the file instead.
+    """
+    exe = shutil.which("pihole-FTL")
+    if exe and os.environ.get("PB_SQL_BACKEND") != "python":
+        try:
+            out = subprocess.run([exe, "sqlite3", "-readonly", "-json", db, sql],
+                                 capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError) as err:
+            raise SqlError(str(err))
+        if out.returncode != 0:
+            raise SqlError((out.stderr or out.stdout).strip() or "exit status %d" % out.returncode)
+        text = out.stdout.strip()
+        try:
+            return json.loads(text) if text else []        # no rows: the shell prints nothing
+        except ValueError as err:
+            raise SqlError("unreadable sqlite3 output: %s" % err)
+    import sqlite3
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(db), uri=True)
+        con.row_factory = sqlite3.Row
+        try:
+            return [dict(r) for r in con.execute(sql)]
+        finally:
+            con.close()
+    except sqlite3.Error as err:
+        raise SqlError(str(err))
+
+
+def db_path(env: str, key: str, default: str) -> str:
+    if os.environ.get(env):
+        return os.environ[env]
+    value, err = ftl_try(key)
+    return value if value and err is None else default
+
+
+def list_domains(sid: str, lists_dir: str | None = None) -> list:
+    """Entries of a service's list as Pi-hole stores them in gravity: '||example.com^'."""
+    try:
+        with open(os.path.join(lists_dir or LISTS_DIR, sid + ".txt"), encoding="utf-8") as fh:
+            lines = [l.strip() for l in fh]
+    except OSError:
+        return []
+    return [l for l in lines if l.startswith("||") and l.endswith("^")]
+
+
+def bare_domain(abp: str) -> str:
+    return abp[2:-1]
+
+
+def sample_domains(sid: str, count: int = 3) -> list:
+    """A few of a service's gravity entries to test, preferring its best-known name (youtube.com, not googlevideo.com)."""
+    word = sid.split("-")[0]
+
+    def rank(entry: str) -> int:
+        name = bare_domain(entry)
+        return 0 if name == sid + ".com" else 1 if word in name else 2
+    return sorted(list_domains(sid), key=rank)[:count]      # sorted() is stable: file order within a rank
+
+
+def effective_groups(kid: dict, devices: list, clients: list) -> list:
+    """What FTL applies to each address a child uses: [{"ip", "groups", "via"}].
+
+    A MAC row is used only when no IP/subnet row matches the address, so each address gets the
+    longest-prefix matching row if there is one (see winning_row).
+    """
+    own_ip = parse_ip(kid["client"])
+    dev = find_device(devices, kid["client"])
+    if own_ip is not None:
+        addrs = [kid["client"]]
+    elif is_mac(kid["client"]) and dev:
+        addrs = [a for a in device_ips(dev) if parse_ip(a) is not None and not parse_ip(a).is_link_local]
+    else:
+        addrs = []
+    out = []
+    for addr in addrs:
+        row = winning_row(parse_ip(addr), clients)
+        use = row if row is not None else kid
+        out.append({"ip": addr, "groups": list(use.get("groups", [])), "via": use["client"]})
+    return out or [{"ip": None, "groups": list(kid.get("groups", [])), "via": kid["client"]}]
+
+
+def gather_diagnose(api: Api, catalog: dict, targets: list, now: float, sql=sql_rows, probe=None) -> dict:
+    """Collect everything `diagnose` reports. Read-only. Errors are recorded, never raised."""
+    facts = {"now": now, "errors": [], "targets": [], "kids": [], "allow_rules": [],
+             "sources_1h": {}, "sources_24h": {}, "gateway": None}
+    groups = api.group_map()
+    clients = api.clients()
+    devices = api.network_devices()
+    lists = {l.get("comment"): l for l in api.lists() if (l.get("comment") or "").startswith(LIST_COMMENT_PREFIX)}
+    facts["groups"] = groups
+    facts["clients"] = clients
+    try:
+        facts["blocking"] = api.request("GET", "/api/dns/blocking").get("blocking")
+    except ApiError:
+        facts["blocking"] = None
+    facts["gateway"] = (probe or SystemProbe()).default_gateway()
+    gravity_db = db_path("PB_GRAVITY_DB", "files.gravity", GRAVITY_DB)
+    ftl_db = db_path("PB_FTL_DB", "files.database", FTL_DB)
+
+    def query(db, text, what):
+        try:
+            return sql(db, text)
+        except (SqlError, ValueError) as err:
+            facts["errors"].append("%s: %s" % (what, err))
+            return None
+
+    by_id = {s["id"]: s for s in catalog["services"]}
+    for sid in targets:
+        t = {"id": sid, "name": by_id[sid]["name"], "group": groups.get(svc_group(sid)),
+             "list": lists.get(LIST_COMMENT_PREFIX + sid), "domains": sample_domains(sid),
+             "gravity": {}, "allow_hits": [], "queries": []}
+        if not t["domains"]:
+            facts["errors"].append("%s: its list file %s is missing or empty, so its domains cannot be checked"
+                                   % (sid, os.path.join(LISTS_DIR, sid + ".txt")))
+        for d in t["domains"]:
+            rows = query(gravity_db, "SELECT adlist_id, count(*) AS n FROM gravity WHERE domain = %s GROUP BY adlist_id"
+                         % sql_str(d), "gravity.db")
+            t["gravity"][d] = None if rows is None else {r["adlist_id"]: r["n"] for r in rows}
+        facts["targets"].append(t)
+
+    rules = query(gravity_db, "SELECT d.type, d.domain, d.enabled, group_concat(g.group_id) AS groups FROM domainlist d "
+                  "LEFT JOIN domainlist_by_group g ON g.domainlist_id = d.id WHERE d.type IN (0, 2) GROUP BY d.id", "gravity.db")
+    facts["allow_rules"] = [r for r in rules or [] if r.get("enabled")]
+    for t in facts["targets"]:
+        for d in t["domains"]:
+            name = bare_domain(d)
+            for r in facts["allow_rules"]:
+                try:
+                    hit = r["domain"] == name if r["type"] == 0 else bool(re.search(r["domain"], name))
+                except re.error:
+                    hit = False
+                if hit:
+                    t["allow_hits"].append("%s allow rule %s" % ("exact" if r["type"] == 0 else "regex", r["domain"]))
+            anti = query(gravity_db, "SELECT count(*) AS n FROM antigravity WHERE domain IN (%s, %s)"
+                         % (sql_str(d), sql_str(name)), "gravity.db")
+            if anti and anti[0]["n"]:
+                t["allow_hits"].append("an allow list contains %s" % name)
+
+    for kid in kid_rows(groups, clients):
+        ips = device_ips(find_device(devices, kid["client"]) or {})
+        if parse_ip(kid["client"]) is not None:
+            ips = [kid["client"]] + [a for a in ips if a != kid["client"]]
+        k = {"client": kid["client"], "label": kid.get("comment") or kid["client"],
+             "eff": effective_groups(kid, devices, clients), "ips": ips}
+        for e in k["eff"]:
+            e["blocked"] = {}
+            for t in facts["targets"]:
+                if not t["domains"]:
+                    continue
+                hit = query(gravity_db, "SELECT 1 AS hit FROM vw_gravity WHERE domain = %s AND group_id IN (%s) LIMIT 1"
+                            % (sql_str(t["domains"][0]), sql_ints(e["groups"])), "gravity.db")
+                e["blocked"][t["id"]] = None if hit is None else bool(hit)
+        facts["kids"].append(k)
+
+    for window, key in ((3600, "sources_1h"), (86400, "sources_24h")):
+        rows = query(ftl_db, "SELECT client, COUNT(*) AS n FROM queries WHERE timestamp > %d GROUP BY client "
+                     "ORDER BY n DESC" % int(now - window), "pihole-FTL.db")
+        facts[key] = {r["client"]: r["n"] for r in rows or []}
+    for t in facts["targets"]:
+        names = [bare_domain(d) for d in sample_domains(t["id"], 6)]
+        if not names or t["group"] is None:
+            continue
+        where = " OR ".join("domain = %s OR domain LIKE %s" % (sql_str(n), sql_str("%." + n)) for n in names)
+        modified = int(t["group"].get("date_modified") or 0)
+        rows = query(ftl_db, "SELECT client, status, CASE WHEN timestamp >= %d THEN 'after' ELSE 'before' END AS period, "
+                     "COUNT(*) AS n FROM queries WHERE timestamp > %d AND (%s) GROUP BY client, status, period "
+                     "ORDER BY n DESC" % (modified, int(now - 86400), where), "pihole-FTL.db")
+        t["queries"] = rows or []
+        t["modified"] = modified
+    return facts
+
+
+def diagnose_findings(facts: dict) -> list:
+    """Likely reasons a toggled service is still reachable, most likely first. Pure: works on gather_diagnose()'s facts."""
+    found = []
+    groups = facts["groups"]
+    if facts.get("blocking") == "disabled":
+        found.append("Pi-hole blocking is switched off, so nothing is filtered. Turn it on: sudo pihole enable")
+    for t in facts["targets"]:
+        g, lst = t["group"], t["list"]
+        if g is None:
+            found.append("%s: its group pb-svc-%s does not exist. Run: sudo pihole-bahrain setup" % (t["name"], t["id"]))
+        elif not g.get("enabled"):
+            found.append("%s: its group is disabled, which means NOT blocked. The toggle on the page did not take effect "
+                         "(or a timer or bedtime changed it back)." % t["name"])
+        if lst is None:
+            found.append("%s: its block list is not registered in Pi-hole. Run: sudo pihole-bahrain setup" % t["name"])
+        elif not lst.get("enabled"):
+            found.append("%s: its block list is disabled in Pi-hole. Run: sudo pihole-bahrain setup" % t["name"])
+        elif not lst.get("number"):
+            found.append("%s: its block list holds 0 domains in gravity. Run: sudo pihole -g (and check that the list "
+                         "server is reachable: sudo pihole-bahrain doctor)" % t["name"])
+        searched = {d: hits for d, hits in t["gravity"].items() if hits is not None}
+        if searched and not any(searched.values()):
+            found.append("%s: none of its domains (%s) is in gravity. Pi-hole stores them as ||domain^; run: sudo pihole -g"
+                         % (t["name"], ", ".join(searched)))
+        for hit in dict.fromkeys(t["allow_hits"]):
+            found.append("%s: an allow rule overrides the block: %s. Remove it in the Pi-hole admin under Domains." % (t["name"], hit))
+    if not facts["kids"]:
+        found.append("No child device is added, and rules only apply to devices added on the page. Add the device.")
+    for k in facts["kids"]:
+        for e in k["eff"]:
+            missing = [t for t in facts["targets"] if t["group"] is not None and t["group"].get("enabled")
+                       and t["group"]["id"] not in e["groups"]]       # (a missing or disabled group is reported above)
+            if not missing:
+                continue
+            names = ", ".join(group_names(e["groups"], groups)) if len(e["groups"]) < 8 else group_summary(e["groups"], groups)
+            where = "" if e["ip"] is None else " at %s" % e["ip"]
+            apps = " and ".join(t["name"] for t in missing)
+            if e["via"] != k["client"]:
+                found.append("%s%s is treated as the client row %s (groups: %s), which overrides its own row, so %s %s not "
+                             "blocked for it. Remove that row in the Pi-hole admin under Clients (or give it the pb groups)."
+                             % (k["label"], where, e["via"], names, apps, "is" if len(missing) == 1 else "are"))
+            else:
+                found.append("%s%s: the groups Pi-hole applies (%s) lack %s, so %s %s not blocked for it. Run: sudo pihole-bahrain setup"
+                             % (k["label"], where, names, ", ".join("pb-svc-" + t["id"] for t in missing), apps,
+                                "is" if len(missing) == 1 else "are"))
+    seen = facts["sources_24h"]
+    for k in facts["kids"]:
+        if k["ips"] and seen and not any(ip in seen for ip in k["ips"]):
+            found.append("%s: no DNS query from %s reached this box in the last 24 hours. The device is not using the box for "
+                         "DNS (router DNS setting, IPv6 DNS, Private DNS, a VPN or mobile data). Run: sudo pihole-bahrain watch"
+                         % (k["label"], ", ".join(k["ips"][:3])))
+    gw = facts.get("gateway")
+    if gw and facts["sources_1h"] and sum(facts["sources_1h"].values()) >= RELAY_MIN_QUERIES:
+        total = sum(n for ip, n in facts["sources_1h"].items() if ip not in ("127.0.0.1", "::1"))
+        if total and facts["sources_1h"].get(gw, 0) * 2 > total:
+            found.append("The router (%s) sends most DNS queries, so per-child rules cannot match. Make the router give out this "
+                         "box as the DHCP DNS server." % gw)
+    if not found:
+        for t in facts["targets"]:
+            late = [q for q in t["queries"] if q["period"] == "after" and q["status"] not in BLOCKED_STATUS]
+            if late:
+                who = ", ".join("%s (%d)" % (q["client"], q["n"]) for q in late[:4])
+                found.append("%s was still answered normally after its group last changed, from %s, although the rules look "
+                             "right. Run: sudo pihole-bahrain watch while opening it on the device." % (t["name"], who))
+    if not found and facts["errors"]:
+        found.append("Nothing wrong found in what could be read, but some checks could not run (see 'Could not read' above).")
+    elif not found:
+        found.append("Nothing wrong found on the box: the rules look right. Run: sudo pihole-bahrain watch, then open the app "
+                     "on the child's device, to see whether its queries reach the box.")
+    return found
+
+
+def group_summary(ids, groups: dict) -> str:
+    """'Default, pb-kids, pb-guard, pb-offline, 19/19 services' instead of every service group by name."""
+    names = group_names(ids, groups)
+    svc_total = len([n for n in groups if n.startswith(SVC_PREFIX)])
+    svc = [n for n in names if n.startswith(SVC_PREFIX)]
+    other = [n for n in names if not n.startswith(SVC_PREFIX)]
+    return ", ".join(other + (["%d/%d service groups" % (len(svc), svc_total)] if svc or svc_total else []))
+
+
+def render_diagnose(facts: dict, findings: list) -> list:
+    """The text of `diagnose`."""
+    out = []
+    add = out.append
+    groups = facts["groups"]
+    add("Blocking: %s" % (facts.get("blocking") or "unknown"))
+    add("\nGroups (enabled = the service is blocked)")
+    for name in sorted(n for n in groups if n.startswith("pb-") and n != G_STATE):
+        if name.startswith(SVC_PREFIX) and name[len(SVC_PREFIX):] not in [t["id"] for t in facts["targets"]]:
+            continue
+        add("  %-24s %s" % (name, "ENABLED" if groups[name].get("enabled") else "disabled"))
+    add("\nBlock lists")
+    for t in facts["targets"]:
+        l = t["list"]
+        add("  pb:%-14s %s" % (t["id"], "not registered" if l is None else
+            "%s  domains=%s  abp=%s  groups=%s" % ("enabled" if l.get("enabled") else "DISABLED", l.get("number"),
+                                                    l.get("abp_entries"), ",".join(group_names(l.get("groups", []), groups)))))
+    add("\nGravity (searched as ||domain^, the form Pi-hole stores)")
+    for t in facts["targets"]:
+        for d, hits in t["gravity"].items():
+            add("  %-12s %-34s %s" % (t["id"], d, "database unreadable" if hits is None else
+                ("in list(s) %s" % ", ".join("#%s" % i for i in hits)) if hits else "NOT FOUND"))
+    add("\nAllow rules that match these domains")
+    hits = [(t["name"], h) for t in facts["targets"] for h in dict.fromkeys(t["allow_hits"])]
+    add("\n".join("  %s: %s" % x for x in hits) if hits else "  none (%d enabled allow rule(s) in total)" % len(facts["allow_rules"]))
+    add("\nClient rows")
+    for c in facts["clients"]:
+        add("  %-22s %-14s %s" % (c["client"], (c.get("comment") or "")[:14], group_summary(c.get("groups", []), groups)))
+    add("\nWhat Pi-hole applies to each child")
+    if not facts["kids"]:
+        add("  no child device is added")
+    for k in facts["kids"]:
+        for e in k["eff"]:
+            verdict = ", ".join("%s %s" % (tid, {True: "blocked", False: "NOT blocked", None: "?"}[b])
+                                for tid, b in e["blocked"].items())
+            add("  %s%s via %s: %s" % (k["label"], "" if e["ip"] is None else " @ " + e["ip"], e["via"], verdict or "-"))
+    add("\nQuery sources, last hour")
+    add("\n".join("  %-40s %d" % (ip, n) for ip, n in list(facts["sources_1h"].items())[:10]) or "  none")
+    add("\nQueries for these apps, last 24 hours (before/after the group last changed)")
+    shown = False
+    for t in facts["targets"]:
+        for q in t["queries"]:
+            shown = True
+            add("  %-10s %-34s %-26s %-6s %d" % (t["id"], q["client"], QUERY_STATUS.get(q["status"], q["status"]), q["period"], q["n"]))
+    if not shown:
+        add("  none")
+    if facts["errors"]:
+        add("\nCould not read")
+        add("\n".join("  " + e for e in facts["errors"]))
+    add("\nFindings, most likely first")
+    add("\n".join("  %d. %s" % (i, f) for i, f in enumerate(findings, 1)))
+    return out
+
+
+# ---- watch: follow the DNS log --------------------------------------------- #
+LOG_PREFIX = re.compile(r"dnsmasq\[\d+\]: (?:\d+ \S+/\d+ )?(?P<msg>.+)$")      # the id/port part exists with log-queries=extra
+QUERY_LINE = re.compile(r"^query\[(?P<qtype>[A-Za-z0-9]+)\] (?P<domain>\S+) from (?P<client>\S+)$")
+
+
+def service_domain_map(catalog: dict, lists_dir: str | None = None, only=None) -> dict:
+    """{'youtube.com': 'youtube', ...} for the given services (default: all)."""
+    out = {}
+    for s in catalog["services"]:
+        if only and s["id"] not in only:
+            continue
+        for d in list_domains(s["id"], lists_dir):
+            out[bare_domain(d).lower()] = s["id"]
+    return out
+
+
+def service_of(domain: str, dmap: dict):
+    d = domain.lower().rstrip(".")
+    while d:
+        if d in dmap:
+            return dmap[d]
+        d = d.partition(".")[2]
+    return None
+
+
+class WatchState:
+    """Turns pihole.log lines into per-client counts for the watched services."""
+
+    def __init__(self, dmap: dict):
+        self.dmap = dmap
+        self.last_client = {}                  # domain -> client of its latest query (the log has no query id)
+        self.counts = {}                       # client -> {"queries", "blocked", "answered", "services": {sid: n}}
+
+    def feed(self, line: str):
+        """Returns (client, service, outcome, domain) when the line belongs to a watched service, else None.
+        outcome is 'query', 'blocked' or 'answered'."""
+        m = LOG_PREFIX.search(line)
+        if not m:
+            return None
+        msg = m.group("msg").strip()
+        q = QUERY_LINE.match(msg)
+        if q:
+            sid = service_of(q.group("domain"), self.dmap)
+            if sid is None:
+                return None
+            self.last_client[q.group("domain").lower()] = q.group("client")
+            c = self.counts.setdefault(q.group("client"), {"queries": 0, "blocked": 0, "answered": 0, "services": {}})
+            c["queries"] += 1
+            c["services"][sid] = c["services"].get(sid, 0) + 1
+            return q.group("client"), sid, "query", q.group("domain")
+        head, sep, _answer = msg.rpartition(" is ")
+        if not sep:
+            return None
+        reason, _, domain = head.rpartition(" ")
+        sid = service_of(domain, self.dmap)
+        client = self.last_client.get(domain.lower())
+        if sid is None or client is None:
+            return None
+        if "blocked" in reason or "denied" in reason:
+            self.counts[client]["blocked"] += 1
+            return client, sid, "blocked", domain
+        if reason in ("reply", "cached", "cached-stale", "config"):
+            self.counts[client]["answered"] += 1
+            return client, sid, "answered", domain
+        return None
+
+
+def watch_log(path: str, dmap: dict, seconds: float, out=print, clock=time.time, sleep=time.sleep, poll: float = 0.5,
+              names: dict | None = None) -> WatchState:
+    """Follow `path` for `seconds`, printing the lines for watched services. Returns the counts."""
+    state = WatchState(dmap)
+    names = names or {}
+    deadline = clock() + seconds
+    fh = None
+    inode = None
+    try:
+        while clock() < deadline:
+            try:
+                st = os.stat(path)
+            except OSError:
+                st = None
+            if st is not None and (fh is None or st.st_ino != inode):      # first open, or the log was rotated
+                if fh:
+                    fh.close()
+                fh = open(path, encoding="utf-8", errors="replace")
+                if inode is None:
+                    fh.seek(0, os.SEEK_END)                                 # only what happens from now on
+                inode = st.st_ino
+            line = fh.readline() if fh else ""
+            if not line:
+                sleep(poll)
+                continue
+            ev = state.feed(line)
+            if ev:
+                client, sid, outcome, domain = ev
+                stamp = time.strftime("%H:%M:%S")
+                if outcome == "query":
+                    out("  %s  %s asks for %s (%s)" % (stamp, names.get(client, client), domain, sid))
+                else:
+                    out("  %s    -> %s" % (stamp, "BLOCKED" if outcome == "blocked" else "answered normally"))
+    except KeyboardInterrupt:
+        out("  (stopped)")
+    finally:
+        if fh:
+            fh.close()
+    return state
+
+
+def watch_summary(state: WatchState, kid_names: dict, minutes: float) -> list:
+    """What `watch` concluded."""
+    out = []
+    if not state.counts:
+        out.append("No query for these apps reached the box in %g minute(s). The device is not using this box for DNS: "
+                   "check the router's DNS setting, IPv6 DNS, Private DNS, a VPN or mobile data (see: sudo pihole-bahrain doctor)."
+                   % minutes)
+        return out
+    for client, c in sorted(state.counts.items(), key=lambda x: -x[1]["queries"]):
+        who = kid_names.get(client)
+        out.append("  %s%s: %d quer%s (%s); %d blocked, %d answered normally"
+                   % (client, " = child device " + who if who else " (not a registered child device)", c["queries"],
+                      "y" if c["queries"] == 1 else "ies", ", ".join("%s %d" % kv for kv in sorted(c["services"].items())),
+                      c["blocked"], c["answered"]))
+        if c["answered"] and not c["blocked"]:
+            out.append("    -> answered normally: no child rule matches this address (%s). Check: sudo pihole-bahrain doctor"
+                       % ("it is registered, so look for a row that overrides it" if who else "add it as a child device"))
+        elif c["blocked"]:
+            out.append("    -> blocking works for this address")
+    return out
+
+
+def kid_address_names(groups: dict, clients: list, devices: list) -> dict:
+    """{address: child's name} for every address a registered child is known to use."""
+    names = {}
+    for kid in kid_rows(groups, clients):
+        label = kid.get("comment") or kid["client"]
+        if parse_ip(kid["client"]) is not None:
+            names[str(parse_ip(kid["client"]))] = label
+        dev = find_device(devices, kid["client"])
+        for a in device_ips(dev) if dev else []:
+            names.setdefault(a, label)
+    return names
+
+
+def cmd_diagnose(args) -> int:
+    api = Api()
+    api.login()
+    try:
+        catalog = load_catalog()
+        ids = {s["id"] for s in catalog["services"]}
+        unknown = [s for s in args.services if s not in ids]
+        if unknown:
+            print("pihole-bahrain: unknown service(s): %s (known: %s)" % (", ".join(unknown), ", ".join(sorted(ids))), file=sys.stderr)
+            return 1
+        targets = args.services or [s for s in DEFAULT_DIAGNOSE_SERVICES if s in ids]
+        facts = gather_diagnose(api, catalog, targets, time.time())
+    finally:
+        api.logout()
+    print("\n".join(render_diagnose(facts, diagnose_findings(facts))))
+    return 0
+
+
+def cmd_watch(args) -> int:
+    catalog = load_catalog()
+    ids = {s["id"] for s in catalog["services"]}
+    unknown = [s for s in args.service if s not in ids]
+    if unknown:
+        print("pihole-bahrain: unknown service(s): %s" % ", ".join(unknown), file=sys.stderr)
+        return 1
+    dmap = service_domain_map(catalog, only=set(args.service) or None)
+    path = db_path("PB_DNSMASQ_LOG", "files.log.dnsmasq", DNSMASQ_LOG)
+    logging_on, _ = ftl_try("dns.queryLogging")
+    if logging_on == "false":
+        print("Query logging is switched off, so there is nothing to watch. Turn it on: sudo pihole-FTL --config dns.queryLogging true")
+        return 1
+    api = Api()
+    api.login()
+    try:
+        groups = api.group_map()
+        names = kid_address_names(groups, api.clients(), api.network_devices())
+    finally:
+        api.logout()
+    print("Watching %s for %g minute(s). Turn Wi-Fi off and on on the child's device, then open the app or m.youtube.com "
+          "in its browser. Ctrl-C stops early." % (path, args.minutes))
+    state = watch_log(path, dmap, args.minutes * 60, names=names)
+    print("\nSummary")
+    print("\n".join(watch_summary(state, names, args.minutes)))
+    return 0
+
+
 def cmd_configure(args) -> int:
     conf = read_config()
     ftl_set_config("webserver.serve_all", "true")
@@ -1263,6 +1801,13 @@ def main(argv=None) -> int:
     p.add_argument("--ref", default=None, help="git branch or tag (default from config)")
     p.set_defaults(fn=cmd_update)
     sub.add_parser("password-state", help=argparse.SUPPRESS).set_defaults(fn=cmd_password_state)
+    p = sub.add_parser("diagnose", help="read-only report on why a service is not blocked")
+    p.add_argument("services", nargs="*", help="service ids to test (default: youtube instagram)")
+    p.set_defaults(fn=cmd_diagnose)
+    p = sub.add_parser("watch", help="follow the DNS log to see whether a device's queries reach the box")
+    p.add_argument("minutes", nargs="?", type=float, default=2, help="how long to watch (default 2)")
+    p.add_argument("--service", action="append", default=[], help="only this service (repeatable; default all)")
+    p.set_defaults(fn=cmd_watch)
     p = sub.add_parser("use-mac", help="re-register children added by IP address under their MAC address")
     p.add_argument("address", nargs="?", default=None, help="only this child's IP address (default: all)")
     p.add_argument("--dry-run", action="store_true", help="show what would change")

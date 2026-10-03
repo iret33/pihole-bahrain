@@ -3,6 +3,10 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import sqlite3
+import subprocess
+import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -463,6 +467,340 @@ class SystemProbeTests(unittest.TestCase):
             tail = probe.ftl_log_tail()
         self.assertLess(len(tail), 600 * 1024)
         self.assertIn("Rate-limiting 10.0.0.1", tail)
+
+
+# A hand-written subset of Pi-hole's databases: just the tables and columns `diagnose` reads.
+GRAVITY_SCHEMA = """
+CREATE TABLE "group" (id INTEGER PRIMARY KEY AUTOINCREMENT, enabled BOOLEAN NOT NULL DEFAULT 1, name TEXT UNIQUE NOT NULL,
+                      date_added INTEGER NOT NULL DEFAULT 0, date_modified INTEGER NOT NULL DEFAULT 0, description TEXT);
+CREATE TABLE domainlist (id INTEGER PRIMARY KEY AUTOINCREMENT, type INTEGER NOT NULL DEFAULT 0, domain TEXT NOT NULL,
+                         enabled BOOLEAN NOT NULL DEFAULT 1, comment TEXT, UNIQUE(domain, type));
+CREATE TABLE domainlist_by_group (domainlist_id INTEGER NOT NULL, group_id INTEGER NOT NULL, PRIMARY KEY (domainlist_id, group_id));
+CREATE TABLE adlist (id INTEGER PRIMARY KEY AUTOINCREMENT, address TEXT NOT NULL, enabled BOOLEAN NOT NULL DEFAULT 1,
+                     comment TEXT, number INTEGER NOT NULL DEFAULT 0, abp_entries INTEGER NOT NULL DEFAULT 0, type INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE adlist_by_group (adlist_id INTEGER NOT NULL, group_id INTEGER NOT NULL, PRIMARY KEY (adlist_id, group_id));
+CREATE TABLE gravity (domain TEXT NOT NULL, adlist_id INTEGER NOT NULL);
+CREATE TABLE antigravity (domain TEXT NOT NULL, adlist_id INTEGER NOT NULL);
+CREATE VIEW vw_gravity AS SELECT domain, adlist.id AS adlist_id, adlist_by_group.group_id AS group_id
+    FROM gravity
+    LEFT JOIN adlist_by_group ON adlist_by_group.adlist_id = gravity.adlist_id
+    LEFT JOIN adlist ON adlist.id = gravity.adlist_id
+    LEFT JOIN "group" ON "group".id = adlist_by_group.group_id
+    WHERE adlist.enabled = 1 AND (adlist_by_group.group_id IS NULL OR "group".enabled = 1);
+"""
+FTL_SCHEMA = """
+CREATE TABLE query_storage (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER NOT NULL, type INTEGER, status INTEGER,
+                            domain INTEGER, client INTEGER);
+CREATE TABLE domain_by_id (id INTEGER PRIMARY KEY, domain TEXT UNIQUE);
+CREATE TABLE client_by_id (id INTEGER PRIMARY KEY, ip TEXT UNIQUE, name TEXT);
+CREATE VIEW queries AS SELECT q.id, q.timestamp, q.type, q.status, d.domain AS domain, c.ip AS client
+    FROM query_storage q LEFT JOIN domain_by_id d ON q.domain = d.id LEFT JOIN client_by_id c ON q.client = c.id;
+"""
+
+
+class DiagnoseBase(Base):
+    MAC = "AA:BB:CC:00:00:23"
+
+    def setUp(self):
+        super().setUp()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.gdb, self.fdb = os.path.join(tmp.name, "gravity.db"), os.path.join(tmp.name, "pihole-FTL.db")
+        env = mock.patch.dict(os.environ, {"PB_GRAVITY_DB": self.gdb, "PB_FTL_DB": self.fdb, "PB_SQL_BACKEND": "python"})
+        env.start()
+        self.addCleanup(env.stop)
+        lists = mock.patch.object(pb, "LISTS_DIR", LISTS)         # where the installed service lists would be
+        lists.start()
+        self.addCleanup(lists.stop)
+        self.now = int(time.time())
+        self.allow = []                      # (type, domain, enabled)
+        self.antigravity = []
+        self.queries = []                    # (timestamp, status, domain, client)
+        for sid in ("youtube", "instagram"):
+            self.group("pb-svc-" + sid)["enabled"] = True
+        self.add_device(self.MAC.lower(), ["192.168.1.23"])
+        self.add_row(self.MAC, self.all_pb_groups(), "Sara")
+
+    def group(self, name):
+        return next(g for g in self.store.groups if g["name"] == name)
+
+    def build(self, gravity=None):
+        """Write gravity.db and pihole-FTL.db from the mock's state plus what the test set up."""
+        for path in (self.gdb, self.fdb):
+            if os.path.exists(path):
+                os.remove(path)
+        con = sqlite3.connect(self.gdb)
+        con.executescript(GRAVITY_SCHEMA)
+        for g in self.store.groups:
+            con.execute('INSERT INTO "group" (id, enabled, name, date_modified) VALUES (?,?,?,?)',
+                        (g["id"], 1 if g["enabled"] else 0, g["name"], g.get("date_modified", 0)))
+        for l in self.store.lists:
+            con.execute("INSERT INTO adlist (id, address, enabled, comment, number, abp_entries) VALUES (?,?,?,?,?,?)",
+                        (l["id"], l["address"], 1 if l["enabled"] else 0, l["comment"], l["number"], l["number"]))
+            for gid in l["groups"]:
+                con.execute("INSERT INTO adlist_by_group VALUES (?,?)", (l["id"], gid))
+        by_comment = {l["comment"]: l["id"] for l in self.store.lists}
+        if gravity is None:                                  # every list is in gravity, as after `pihole -g`
+            gravity = {sid: pb.list_domains(sid, LISTS) for sid in ("youtube", "instagram")}
+        for sid, domains in gravity.items():
+            for d in domains:
+                con.execute("INSERT INTO gravity VALUES (?,?)", (d, by_comment["pb:" + sid]))
+        for typ, domain, enabled in self.allow:
+            con.execute("INSERT INTO domainlist (type, domain, enabled) VALUES (?,?,?)", (typ, domain, enabled))
+        for d in self.antigravity:
+            con.execute("INSERT INTO antigravity VALUES (?,?)", (d, 1))
+        con.commit()
+        con.close()
+        con = sqlite3.connect(self.fdb)
+        con.executescript(FTL_SCHEMA)
+        ids = {}
+        for ts, status, domain, client in self.queries:
+            for table, value in (("domain_by_id", domain), ("client_by_id", client)):
+                if (table, value) not in ids:
+                    col = "domain" if table == "domain_by_id" else "ip"
+                    ids[(table, value)] = con.execute("INSERT INTO %s (%s) VALUES (?)" % (table, col), (value,)).lastrowid
+            con.execute("INSERT INTO query_storage (timestamp, type, status, domain, client) VALUES (?,?,?,?,?)",
+                        (ts, 1, status, ids[("domain_by_id", domain)], ids[("client_by_id", client)]))
+        con.commit()
+        con.close()
+
+    def diagnose(self, targets=("youtube", "instagram"), gravity=None, probe=None):
+        self.build(gravity)
+        facts = pb.gather_diagnose(self.api, self.catalog, list(targets), self.now, probe=probe or FakeProbe(gateway=None))
+        findings = pb.diagnose_findings(facts)
+        return facts, findings, "\n".join(pb.render_diagnose(facts, findings))
+
+
+class DiagnoseTests(DiagnoseBase):
+    def test_healthy_setup_has_nothing_to_report(self):
+        self.group("pb-svc-youtube")["date_modified"] = self.now - 600
+        self.queries = [(self.now - 3000, 2, "www.youtube.com", "192.168.1.23"),       # before the toggle: allowed
+                        (self.now - 100, 1, "www.youtube.com", "192.168.1.23")]        # after it: blocked
+        facts, findings, text = self.diagnose()
+        self.assertEqual(len(findings), 1, findings)
+        self.assertIn("Nothing wrong found", findings[0])
+        self.assertEqual(facts["errors"], [])
+        self.assertTrue(all(b for e in facts["kids"][0]["eff"] for b in e["blocked"].values()))
+        self.assertIn("youtube blocked", text)
+        periods = {(q["period"], q["status"]) for q in facts["targets"][0]["queries"]}
+        self.assertEqual(periods, {("before", 2), ("after", 1)})
+        self.assertIn("blocked (gravity)", text)
+
+    def test_disabled_group_is_the_first_finding(self):
+        self.group("pb-svc-youtube")["enabled"] = False
+        _, findings, text = self.diagnose()
+        self.assertIn("YouTube: its group is disabled", findings[0])
+        self.assertIn("disabled", text)
+
+    def test_list_without_domains_and_wrong_form_in_gravity(self):
+        for l in self.store.lists:
+            if l["comment"] == "pb:youtube":
+                l["number"] = 0
+        _, findings, text = self.diagnose(gravity={"youtube": ["youtube.com"], "instagram": pb.list_domains("instagram", LISTS)})
+        self.assertTrue(any("YouTube: its block list holds 0 domains" in f for f in findings), findings)
+        self.assertTrue(any("none of its domains" in f and "||youtube.com^" in f for f in findings), findings)
+        self.assertFalse(any("lack pb-svc-youtube" in f for f in findings),
+                         "a domain missing from gravity must not be blamed on the child's groups")
+        self.assertIn("NOT FOUND", text)
+
+    def test_allow_rules_that_override(self):
+        self.allow = [(0, "youtube.com", 1), (2, r"(\.|^)instagram\.com$", 1), (0, "youtu.be", 0)]
+        self.antigravity = ["||youtube.com^"]
+        _, findings, _ = self.diagnose()
+        text = "\n".join(findings)
+        self.assertIn("exact allow rule youtube.com", text)
+        self.assertIn("regex allow rule", text)
+        self.assertIn("an allow list contains youtube.com", text)
+        self.assertNotIn("youtu.be", text, "a disabled allow rule does not count")
+
+    def test_a_row_that_overrides_the_childs_own_row_is_named(self):
+        self.add_row("192.168.1.0/24", [0])
+        facts, findings, text = self.diagnose()
+        self.assertEqual(facts["kids"][0]["eff"][0]["via"], "192.168.1.0/24")
+        self.assertEqual(len([f for f in findings if "is treated as the client row" in f]), 1, "one finding for both apps")
+        self.assertTrue(any("is treated as the client row 192.168.1.0/24" in f and "YouTube and Instagram are not blocked" in f
+                            for f in findings), findings)
+        self.assertIn("youtube NOT blocked", text)
+        self.assertNotIn("Nothing wrong", "\n".join(findings))
+
+    def test_a_missing_group_on_the_childs_row_is_named(self):
+        self.api.put_client(self.MAC, "Sara", [g for g in self.all_pb_groups() if g != self.gid()["pb-svc-youtube"]])
+        _, findings, _ = self.diagnose()
+        self.assertTrue(any("lack pb-svc-youtube" in f and "YouTube is not blocked" in f for f in findings), findings)
+
+    def test_no_child_device_added(self):
+        self.api.request("DELETE", "/api/clients/" + self.api.q(self.MAC))
+        _, findings, _ = self.diagnose()
+        self.assertTrue(any("No child device is added" in f for f in findings), findings)
+
+    def test_child_that_never_reaches_the_box(self):
+        self.queries = [(self.now - 300, 2, "example.org", "192.168.1.99")]
+        _, findings, _ = self.diagnose()
+        self.assertTrue(any("no DNS query from 192.168.1.23 reached this box" in f for f in findings), findings)
+        self.queries.append((self.now - 100, 1, "youtube.com", "192.168.1.23"))
+        _, findings, _ = self.diagnose()
+        self.assertFalse(any("reached this box" in f for f in findings), findings)
+
+    def test_router_relaying_is_found(self):
+        self.queries = [(self.now - 60, 2, "example.org", "192.168.1.1")] * 40 + [(self.now - 60, 2, "example.org", "192.168.1.23")] * 5
+        _, findings, _ = self.diagnose(probe=FakeProbe(gateway="192.168.1.1"))
+        self.assertTrue(any("The router (192.168.1.1) sends most DNS queries" in f for f in findings), findings)
+
+    def test_still_answered_after_the_toggle_although_rules_look_right(self):
+        self.group("pb-svc-youtube")["date_modified"] = self.now - 600
+        self.queries = [(self.now - 100, 2, "m.youtube.com", "192.168.1.23")] * 3
+        _, findings, _ = self.diagnose()
+        self.assertEqual(len(findings), 1)
+        self.assertIn("still answered normally after its group last changed", findings[0])
+        self.assertIn("192.168.1.23 (3)", findings[0])
+
+    def test_unreadable_database_is_reported_not_fatal(self):
+        self.build()
+        os.remove(self.gdb)
+        self.group("pb-svc-youtube")["enabled"] = False
+        facts = pb.gather_diagnose(self.api, self.catalog, ["youtube"], self.now, probe=FakeProbe(gateway=None))
+        self.assertTrue(facts["errors"] and "gravity.db" in facts["errors"][0])
+        findings = pb.diagnose_findings(facts)
+        self.assertTrue(any("its group is disabled" in f for f in findings), "API-based findings still work")
+        self.assertIn("Could not read", "\n".join(pb.render_diagnose(facts, findings)))
+
+    def test_sample_domains_prefer_the_best_known_name(self):
+        self.assertEqual(pb.sample_domains("youtube", 1), ["||youtube.com^"])
+        self.assertEqual(pb.sample_domains("instagram", 1)[0], "||instagram.com^")
+        self.assertEqual(len(pb.sample_domains("x-twitter")), 3)
+
+    def test_missing_list_files_are_an_error_not_an_all_clear(self):
+        with mock.patch.object(pb, "LISTS_DIR", "/nonexistent/lists"):
+            facts, findings, text = self.diagnose()
+        self.assertTrue(any("list file" in e for e in facts["errors"]), facts["errors"])
+        self.assertNotIn("the rules look right", "\n".join(findings))
+        self.assertIn("some checks could not run", findings[-1])
+
+    def test_output_never_contains_credentials(self):
+        _, _, text = self.diagnose()
+        for secret in (mock_pihole.PASSWORD, "cli_pw", "sid"):
+            self.assertNotIn(" %s " % secret, " %s " % text.replace("\n", " "))
+
+
+class SqlAccessTests(unittest.TestCase):
+    def test_sql_literals(self):
+        self.assertEqual(pb.sql_str("||youtube.com^"), "'||youtube.com^'")
+        self.assertEqual(pb.sql_str("%.youtube.com"), "'%.youtube.com'")
+        for bad in ("a'b", "x; DROP TABLE y", "a b", ""):
+            with self.assertRaises(ValueError):
+                pb.sql_str(bad)
+        self.assertEqual(pb.sql_ints([3, "4"]), "3,4")
+        self.assertEqual(pb.sql_ints([]), "NULL")
+
+    def test_pihole_ftl_sqlite3_is_used_read_only_with_json(self):
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, stdout='[{"n": 2}]\n', stderr="")
+        env = {k: v for k, v in os.environ.items() if k != "PB_SQL_BACKEND"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(pb.shutil, "which", return_value="/usr/bin/pihole-FTL"), \
+                mock.patch.object(pb.subprocess, "run", fake_run):
+            self.assertEqual(pb.sql_rows("/etc/pihole/gravity.db", "SELECT 2 AS n"), [{"n": 2}])
+        self.assertEqual(calls[0][:5], ["/usr/bin/pihole-FTL", "sqlite3", "-readonly", "-json", "/etc/pihole/gravity.db"])
+
+    def test_empty_output_means_no_rows_and_errors_are_reported(self):
+        env = {k: v for k, v in os.environ.items() if k != "PB_SQL_BACKEND"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(pb.shutil, "which", return_value="/x/pihole-FTL"):
+            with mock.patch.object(pb.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout="", stderr="")):
+                self.assertEqual(pb.sql_rows("db", "SELECT 1 WHERE 0"), [])
+            with mock.patch.object(pb.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, stdout="", stderr="no such table")):
+                with self.assertRaises(pb.SqlError):
+                    pb.sql_rows("db", "SELECT * FROM nope")
+
+
+SAMPLE_LOG = """\
+Oct  3 08:00:01 dnsmasq[123]: query[A] www.youtube.com from 192.168.1.23
+Oct  3 08:00:01 dnsmasq[123]: gravity blocked www.youtube.com is 0.0.0.0
+Oct  3 08:00:02 dnsmasq[123]: query[A] example.org from 192.168.1.23
+Oct  3 08:00:02 dnsmasq[123]: reply example.org is 93.184.216.34
+Oct  3 08:00:03 dnsmasq[123]: query[AAAA] i.instagram.com from 192.168.1.50
+Oct  3 08:00:03 dnsmasq[123]: forwarded i.instagram.com to 1.1.1.3
+Oct  3 08:00:03 dnsmasq[123]: reply i.instagram.com is 157.240.1.1
+Oct  3 08:00:04 dnsmasq[123]: 77 192.168.1.23/53012 query[A] youtube.com from 192.168.1.23
+Oct  3 08:00:04 dnsmasq[123]: 77 192.168.1.23/53012 regex denied youtube.com is 0.0.0.0
+Oct  3 08:00:05 dnsmasq[123]: query[A] notyoutube.com from 192.168.1.23
+"""
+
+
+class WatchTests(unittest.TestCase):
+    def dmap(self):
+        return pb.service_domain_map(pb.load_catalog(LISTS), LISTS)
+
+    def test_service_domain_map_and_suffix_matching(self):
+        d = self.dmap()
+        self.assertEqual(d["youtube.com"], "youtube")
+        self.assertEqual(pb.service_of("a.b.YouTube.com.", d), "youtube")
+        self.assertIsNone(pb.service_of("notyoutube.com", d))
+        self.assertEqual(set(pb.service_domain_map(pb.load_catalog(LISTS), LISTS, only={"instagram"}).values()), {"instagram"})
+
+    def test_feed_counts_queries_per_client_and_outcome(self):
+        state = pb.WatchState(self.dmap())
+        events = [state.feed(line) for line in SAMPLE_LOG.splitlines()]
+        c = state.counts
+        self.assertEqual(set(c), {"192.168.1.23", "192.168.1.50"}, "queries for other domains are ignored")
+        self.assertEqual((c["192.168.1.23"]["queries"], c["192.168.1.23"]["blocked"], c["192.168.1.23"]["answered"]), (2, 2, 0))
+        self.assertEqual((c["192.168.1.50"]["queries"], c["192.168.1.50"]["blocked"], c["192.168.1.50"]["answered"]), (1, 0, 1))
+        self.assertEqual(events[0][2], "query")
+        self.assertEqual(events[1][2], "blocked")
+        self.assertEqual(events[6][2], "answered")
+        self.assertIsNone(events[5], "forwarded lines carry no outcome")
+        self.assertEqual(events[7][0], "192.168.1.23", "log-queries=extra lines are understood")
+
+    def test_summary_verdicts(self):
+        state = pb.WatchState(self.dmap())
+        for line in SAMPLE_LOG.splitlines():
+            state.feed(line)
+        text = "\n".join(pb.watch_summary(state, {"192.168.1.23": "Sara"}, 2))
+        self.assertIn("192.168.1.23 = child device Sara", text)
+        self.assertIn("blocking works for this address", text)
+        self.assertIn("192.168.1.50 (not a registered child device)", text)
+        self.assertIn("add it as a child device", text)
+        text = "\n".join(pb.watch_summary(state, {"192.168.1.50": "Ali"}, 2))
+        self.assertIn("look for a row that overrides it", text)
+        empty = "\n".join(pb.watch_summary(pb.WatchState({}), {}, 2))
+        self.assertIn("not using this box for DNS", empty)
+
+    def test_following_a_log_file_including_rotation(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "pihole.log")
+            with open(path, "w") as fh:
+                fh.write("Oct  3 07:00:00 dnsmasq[1]: query[A] youtube.com from 10.0.0.9\\n".replace("\\n", "\n"))   # before we start
+            out = []
+            result = {}
+
+            def run():
+                result["state"] = pb.watch_log(path, self.dmap(), 2.0, out=out.append, poll=0.02, names={"192.168.1.23": "Sara"})
+            t = threading.Thread(target=run)
+            t.start()
+            time.sleep(0.4)
+            with open(path, "a") as fh:
+                fh.write("\n".join(SAMPLE_LOG.splitlines()[:2]) + "\n")
+            time.sleep(0.3)
+            os.rename(path, path + ".1")                                     # log rotation: a new file appears
+            with open(path, "w") as fh:
+                fh.write("\n".join(SAMPLE_LOG.splitlines()[4:7]) + "\n")
+            t.join()
+        counts = result["state"].counts
+        self.assertNotIn("10.0.0.9", counts, "lines from before watching started are ignored")
+        self.assertEqual(counts["192.168.1.23"]["blocked"], 1)
+        self.assertEqual(counts["192.168.1.50"]["answered"], 1, "the rotated file is read from its start")
+        self.assertTrue(any("Sara asks for www.youtube.com" in l for l in out), out)
+        self.assertTrue(any("BLOCKED" in l for l in out))
+
+    def test_kid_address_names(self):
+        groups = {"pb-kids": {"id": 5, "name": "pb-kids"}}
+        clients = [{"client": "AA:BB:CC:00:00:23", "comment": "Sara", "groups": [0, 5]},
+                   {"client": "192.168.1.77", "comment": "Ali", "groups": [0, 5]},
+                   {"client": "192.168.1.9", "comment": "Dad", "groups": [0]}]
+        devices = [{"hwaddr": "aa:bb:cc:00:00:23", "ips": [{"ip": "192.168.1.23"}, {"ip": "2001:db8::23"}]}]
+        names = pb.kid_address_names(groups, clients, devices)
+        self.assertEqual(names, {"192.168.1.23": "Sara", "2001:db8::23": "Sara", "192.168.1.77": "Ali"})
 
 
 class MatchingHelpers(unittest.TestCase):
