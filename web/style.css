@@ -148,6 +148,7 @@ body.is-busy .app button{cursor:progress}
   unicode-bidi:plaintext}
 .device-actions{display:flex;align-items:center;gap:2px}
 .tag{font-size:.72rem;font-weight:700;padding:2px 8px;border-radius:999px;background:var(--coral);color:#fff}
+.device-warn{margin-top:6px;padding:6px 10px;border-radius:var(--radius-sm);background:var(--dune);color:var(--dune-ink);font-size:.8rem;line-height:1.4;white-space:normal}
 @media (max-width:420px){.device{grid-template-columns:auto 1fr}.device-actions{grid-column:1 / -1;justify-content:flex-end}}
 
 .bed-fields{transition:opacity .2s}

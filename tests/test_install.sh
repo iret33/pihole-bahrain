@@ -44,7 +44,8 @@ db = "$WORK/ftl.json"
 conf = json.load(open(db)) if os.path.exists(db) else {
     "webserver.serve_all": "false", "webserver.api.cli_pw": "true",
     "webserver.paths.webroot": "$ROOT/var/www/html", "webserver.port": "80o,443os",
-    "dns.hosts": "[ 192.168.1.9 nas.lan ]"}
+    "dns.hosts": "[ 192.168.1.9 nas.lan ]", "resolver.macNames": "true", "dns.blocking.active": "true",
+    "files.log.ftl": "$WORK/FTL.log"}
 args = [a for a in sys.argv[1:] if a != "-q"]
 assert args[0] == "--config", args
 if len(args) == 2:
@@ -129,6 +130,18 @@ EOF
 )"
 [[ "$lists" == "20 https://raw.githubusercontent.com/iret33/pihole-bahrain/master/lists/"* ]] || fail "lists: $lists"
 
+"$ROOT/usr/local/bin/pihole-bahrain" status | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["version"] and d["devices"] == []' || fail "status output is not the expected JSON"
+"$ROOT/usr/local/bin/pihole-bahrain" use-mac --dry-run | grep -q "Nothing to convert" || fail "use-mac did not run"
+# diagnose and watch through the real CLI; the stubbed pihole-FTL has no sqlite shell, so the databases are "unreadable"
+"$ROOT/usr/local/bin/pihole-bahrain" diagnose youtube >"$WORK/diagnose.out" 2>&1 || { cat "$WORK/diagnose.out"; fail "diagnose failed"; }
+grep -q "Findings, most likely first" "$WORK/diagnose.out" || { cat "$WORK/diagnose.out"; fail "diagnose printed no findings"; }
+grep -q "Could not read" "$WORK/diagnose.out" || fail "diagnose did not report the unreadable database"
+if "$ROOT/usr/local/bin/pihole-bahrain" diagnose no-such-service >"$WORK/diagnose2.out" 2>&1; then fail "diagnose accepted an unknown service"; fi
+grep -q "unknown service" "$WORK/diagnose2.out" || fail "no message for an unknown service"
+: >"$WORK/pihole.log"
+PB_DNSMASQ_LOG="$WORK/pihole.log" "$ROOT/usr/local/bin/pihole-bahrain" watch 0.02 >"$WORK/watch.out" 2>&1 || { cat "$WORK/watch.out"; fail "watch failed"; }
+grep -q "not using this box for DNS" "$WORK/watch.out" || { cat "$WORK/watch.out"; fail "watch printed no summary"; }
+
 echo "--- re-run (update) keeps settings, hostname change replaces host entry"
 PB_HOSTNAME=kids.home bash "$REPO/install.sh" >"$WORK/install2.out" 2>&1 || { cat "$WORK/install2.out"; fail "second run failed"; }
 grep -q '^PB_HOSTNAME=kids.home' "$ROOT/etc/pihole-bahrain/config" || fail "hostname not updated"
@@ -157,9 +170,54 @@ grep -q 'older than v6' "$WORK/v5.out" || { cat "$WORK/v5.out"; fail "no v5 mess
 [[ ! -e "$ROOT/etc/pihole/pihole.toml" ]] || fail "v6 settings written over a v5 install"
 mv "$WORK/toml.bak" "$ROOT/etc/pihole/pihole.toml"
 
+echo "--- the one-liner path: install.sh arrives on stdin, clones PB_REPO and runs itself again"
+THROW="$WORK/throwaway"; mkdir -p "$THROW"
+git -C "$REPO" ls-files -z | tar -C "$REPO" --null -T - -cf - | tar -x -C "$THROW"
+git -C "$THROW" init -q -b master && git -C "$THROW" add -A && git -C "$THROW" -c user.name=t -c user.email=t@t commit -qm test
+LOG="$ROOT/var/log/pihole-bahrain-install.log"
+rm -rf "$ROOT/opt/pihole-bahrain/src"
+PB_REPO="file://$THROW" bash <"$REPO/install.sh" >"$WORK/piped.out" 2>&1 || { cat "$WORK/piped.out"; fail "piped install.sh failed"; }
+grep -q "Starting the installer from the downloaded version" "$WORK/piped.out" || fail "the piped run did not start the downloaded installer"
+grep -q "Installing version $(cat "$REPO/VERSION") from $ROOT/opt/pihole-bahrain/src" "$WORK/piped.out" || fail "the downloaded copy was not the one installed"
+grep -q "Family Internet is ready" "$WORK/piped.out" || fail "the piped run did not finish"
+grep -q "Starting the installer from the downloaded version" "$LOG" || fail "the install log lost the start of the piped run"
+grep -q "Installing version" "$LOG" || fail "the install log lost the rest of the piped run (re-exec lost the log copy)"
+
+echo "--- a generated parent password never reaches the install log"
+set_auth() { curl -s -X POST "http://127.0.0.1:$PORT/__mock__/require_auth" -d "{\"value\": $1}" >/dev/null; }
+LOG="$ROOT/var/log/pihole-bahrain-install.log"
+last_password() { grep 'pihole setpassword' "$WORK/calls.log" | tail -1 | awk '{print $3}'; }
+printf '  Password:      OLD-OLD-OLD-OLD   (written by an older version)\n' >>"$LOG"
+chmod 644 "$LOG"
+set_auth false                                  # Pi-hole has no password: the installer generates one
+echo "    without a terminal"
+PB_TTY="$WORK/no-such-dir/tty" bash "$REPO/install.sh" >"$WORK/pw1.out" 2>&1 || { cat "$WORK/pw1.out"; fail "install without a password failed"; }
+pw1="$(last_password)"
+[[ ${#pw1} -ge 8 ]] || fail "no password was generated"
+grep -qF "$pw1" "$LOG" && fail "generated password is in the install log"
+grep -qF "$pw1" "$WORK/pw1.out" && fail "generated password was printed to stdout"
+[[ "$(stat -c %a "$LOG")" == 600 ]] || fail "install log mode is $(stat -c %a "$LOG"), expected 600"
+grep -q 'OLD-OLD-OLD-OLD' "$LOG" && fail "password line from an older version was not scrubbed"
+grep -q 'Installing version' "$LOG" || fail "this run's output is missing from the log (scrubbed file swapped under tee?)"
+PWFILE="$ROOT/etc/pihole-bahrain/initial-password"
+[[ "$(stat -c %a "$PWFILE")" == 600 ]] || fail "initial-password mode is $(stat -c %a "$PWFILE"), expected 600"
+[[ "$(cat "$PWFILE")" == "$pw1" ]] || fail "initial-password does not hold the generated password"
+grep -q "$PWFILE" "$WORK/pw1.out" || fail "the path of the saved password was not shown"
+echo "    with a terminal"
+rm -f "$PWFILE"; : >"$WORK/fake_tty"
+PB_TTY="$WORK/fake_tty" bash "$REPO/install.sh" >"$WORK/pw2.out" 2>&1 || { cat "$WORK/pw2.out"; fail "install with a terminal failed"; }
+pw2="$(last_password)"
+[[ -n "$pw2" && "$pw2" != "$pw1" ]] || fail "second run did not generate a new password"
+grep -qF "$pw2" "$WORK/fake_tty" || fail "password was not shown on the terminal"
+grep -qF "$pw2" "$LOG" && fail "generated password is in the install log (terminal run)"
+grep -qF "$pw2" "$WORK/pw2.out" && fail "generated password was printed to stdout (terminal run)"
+[[ ! -e "$PWFILE" ]] || fail "password file written although a terminal was available"
+[[ "$(stat -c %a "$LOG")" == 600 ]] || fail "install log mode changed"
+set_auth true
+
 echo "--- uninstall"
 bash "$ROOT/opt/pihole-bahrain/uninstall.sh" >"$WORK/un.out" 2>&1 || { cat "$WORK/un.out"; fail "uninstall failed"; }
-[[ ! -e "$ROOT/opt/pihole-bahrain" && ! -e "$ROOT/var/www/html/pb" ]] || fail "files left behind"
+[[ ! -e "$ROOT/opt/pihole-bahrain" && ! -e "$ROOT/var/www/html/pb" && ! -e "$ROOT/etc/pihole-bahrain" ]] || fail "files left behind"
 grep -q mine "$ROOT/var/www/html/index.html" || fail "custom page not restored"
 grep -q '"webserver.serve_all": "false"' "$WORK/ftl.json" || fail "serve_all not reverted"
 grep -q 'kids.home' "$WORK/ftl.json" && fail "host entry not removed"

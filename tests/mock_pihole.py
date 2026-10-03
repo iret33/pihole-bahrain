@@ -40,6 +40,11 @@ class Store:
              "numQueries": 10, "ips": [{"ip": "192.168.1.30", "name": ""}]},
         ]
         self.writes = 0
+        # Queries per client address: in the last hour, and two hours ago (must not count as recent).
+        self.query_counts = {}
+        self.old_query_counts = {}
+        self.history_hidden = False       # privacy level >= 2: FTL returns no per-client history
+        self.blocking = "enabled"
 
     def gid(self, name):
         return next((g["id"] for g in self.groups if g["name"] == name), None)
@@ -91,6 +96,10 @@ class Handler(BaseHTTPRequestHandler):
         url = urllib.parse.urlsplit(self.path)
         path = url.path
         query = urllib.parse.parse_qs(url.query)
+        if path == "/__mock__/require_auth" and method == "POST":
+            # Test hook: False = Pi-hole has no password set (so the installer has to generate one).
+            type(self).require_auth = bool(self.body().get("value"))
+            return self.send(200, {})
         if not path.startswith("/api"):
             return self.static(path)
         parts = [urllib.parse.unquote(p) for p in path.split("/")[2:]]
@@ -119,7 +128,15 @@ class Handler(BaseHTTPRequestHandler):
             if parts == ["info", "version"]:
                 return self.send(200, {"version": {"core": {"local": {"version": "v6.3"}}}})
             if parts == ["network", "devices"]:
-                return self.send(200, {"devices": s.devices})
+                # FTL returns only 10 devices with 3 addresses each unless the caller asks for more.
+                max_devices = int((query.get("max_devices") or [10])[0])
+                max_addresses = int((query.get("max_addresses") or [3])[0])
+                return self.send(200, {"devices": [dict(d, ips=d["ips"][:max_addresses])
+                                                   for d in s.devices[:max_devices]]})
+            if parts == ["history", "clients"]:
+                return self.history_clients(query)
+            if parts == ["dns", "blocking"] and method == "GET":
+                return self.send(200, {"blocking": s.blocking, "timer": None})
             if parts and parts[0] == "groups":
                 return self.groups(method, parts[1:])
             if parts and parts[0] == "lists":
@@ -129,6 +146,19 @@ class Handler(BaseHTTPRequestHandler):
             if parts and parts[0] == "clients":
                 return self.clients(method, parts[1:])
         return self.err(404, "not_found", "Not found")
+
+    def history_clients(self, query):
+        """Per-client query counts in 10-minute slots, shaped like FTL's /api/history/clients."""
+        s = self.store
+        if s.history_hidden:
+            return self.send(200, {"history": [], "clients": []})
+        now = int(time.time())
+        slots = []
+        if s.old_query_counts:
+            slots.append({"timestamp": now - 7200, "data": dict(s.old_query_counts, others=0)})
+        slots.append({"timestamp": now - 1800, "data": dict({ip: n // 2 for ip, n in s.query_counts.items()}, others=0)})
+        slots.append({"timestamp": now - 300, "data": dict({ip: n - n // 2 for ip, n in s.query_counts.items()}, others=0)})
+        return self.send(200, {"history": slots, "clients": {ip: {"name": None} for ip in s.query_counts}})
 
     def set_groups(self, row, b):
         if "groups" in b:

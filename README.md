@@ -23,7 +23,9 @@ curl -fsSL https://raw.githubusercontent.com/iret33/pihole-bahrain/master/instal
 The installer:
 
 1. installs Pi-hole v6 if it is missing (fully unattended);
-2. asks for a parent password (or generates one if there is no terminal);
+2. asks for a parent password. If it cannot ask, it generates one and shows it on the screen only; with no screen at
+   all it saves it in `/etc/pihole-bahrain/initial-password` (readable by root only: read it, then delete the file).
+   The password is never written to the install log;
 3. installs the parent page at `http://<box-ip>/` (the Pi-hole admin stays at `/admin/`);
 4. creates the Pi-hole groups, rules and block lists;
 5. starts the scheduler service and a nightly list refresh;
@@ -67,12 +69,32 @@ box too), otherwise devices can skip the filter over IPv6.
    <https://www.armbian.com/orange-pi-zero-3/> onto a high-endurance microSD card
    (8 GB or more).
 2. Connect Ethernet and power. Log in over SSH (`root` / `1234`) and finish
-   Armbian's first-login questions.
+   Armbian's first-login questions. **Choose a strong root password there** (see
+   [Keep the box itself safe](#keep-the-box-itself-safe)).
 3. Run the install command above.
 
 Notes: avoid the 1.5 GB RAM model (current kernels crash on it); use the
 Ethernet port rather than Wi-Fi; the installer keeps Pi-hole's query history to
 30 days to reduce SD-card wear.
+
+### Keep the box itself safe
+
+The box is on the same network as the children's devices. A child who can log in
+to it as `root` can take their own device out of the rules or switch the filter
+off, so:
+
+- change the default password at once (`passwd`) to something long that only you
+  know; never leave it at `1234`, and avoid short or numeric ones;
+- better, allow SSH keys only. From your computer run `ssh-copy-id root@<box-ip>`,
+  then **test that the key login works in a second window**, and only then on the box:
+
+  ```bash
+  echo 'PasswordAuthentication no' | sudo tee /etc/ssh/sshd_config.d/00-keys-only.conf
+  sudo systemctl restart ssh
+  ```
+
+- the parent password (also the Pi-hole admin password) is a separate secret; keep
+  it from the children as well.
 
 ## How it works
 
@@ -98,7 +120,16 @@ Child's device ──DNS──► │  blocked if the device is in an enabled pb
   disabled group `pb-state`. The page writes them; `pihole-bahrain run`
   (a systemd service) enforces them every 15 seconds.
 - Devices are added by MAC address when Pi-hole knows it (stable across IP
-  changes), otherwise by IP address.
+  changes), otherwise by IP address. An IPv6-only entry is not offered, because
+  phones rotate their IPv6 privacy addresses every day.
+- **Which rule applies to a device.** Pi-hole takes a device's groups from the
+  first of these that matches: a client row for its IP address or a subnet (the
+  longest match wins), then its MAC address, then its host name. So an IP or
+  subnet row, for example `192.168.1.0/24` added in the Pi-hole admin, silently
+  overrides a child's MAC row, and none of the child's rules apply. `doctor`,
+  `status` (`shadowed_by`) and the page warn about this. Remove such a row, or give
+  a row that covers only that one device the same groups. Matching by MAC also needs
+  Pi-hole's `resolver.macNames` setting to stay on (it is on by default).
 
 Everything the add-on creates in Pi-hole starts with `pb-` or has a comment
 starting with `pb:`, and your own groups, lists and rules are never touched.
@@ -121,7 +152,10 @@ infrastructure such as `google.com`, `apple.com` or `akamaihd.net`.
 ## Commands on the box
 
 ```bash
-sudo pihole-bahrain doctor     # check the installation
+sudo pihole-bahrain doctor     # check the installation, and that DNS really reaches the box
+sudo pihole-bahrain diagnose   # why is a blocked app still working? (read-only report)
+sudo pihole-bahrain watch      # does a device's DNS reach the box? (turn its Wi-Fi off/on, open the app)
+sudo pihole-bahrain use-mac    # re-register children added by IP address under their MAC address
 sudo pihole-bahrain status     # current rules, devices, timer, bedtime (JSON)
 sudo pihole-bahrain update     # update to the latest version
 sudo pihole-bahrain setup      # re-create groups/lists if something was deleted
@@ -133,6 +167,39 @@ sudo /opt/pihole-bahrain/uninstall.sh   # remove the add-on (Pi-hole stays)
 Files: code in `/opt/pihole-bahrain`, settings in `/etc/pihole-bahrain/config`,
 page in `/var/www/html/index.html` and `/var/www/html/pb/`, install log in
 `/var/log/pihole-bahrain-install.log`.
+
+## Troubleshooting
+
+**An app still works after it was blocked.** Go through these in order:
+
+1. `sudo pihole-bahrain doctor`. Every line should say `ok` or `info`. A `FIX` line
+   says what is wrong and what to do; a `WARN` line is advice (for example that a
+   child's device has sent no DNS query for a day, or that the network uses IPv6).
+2. `sudo pihole-bahrain diagnose`. A read-only report that ends with the likely
+   causes, most likely first. It tests YouTube and Instagram; name other apps with
+   `diagnose tiktok roblox`.
+3. `sudo pihole-bahrain watch`. Turn Wi-Fi off and on on the child's device, then open
+   the app, or `m.youtube.com` in its **browser** (apps remember answers for a while).
+   If no line appears, the device does not use the box for DNS. If it says "answered
+   normally", no child rule matches that address.
+
+The usual causes:
+
+- **The device was not added** on the page. Rules apply only to added devices.
+- **DNS never reaches the box.** The router relays DNS for everyone (then every query
+  looks like it comes from the router), the router hands out its own IPv6 DNS server,
+  or the phone uses Private DNS, a VPN or mobile data.
+- **Another client row overrides the child's** (see "Which rule applies to a device").
+- **The child was added by IP address** and the address changed. Run
+  `sudo pihole-bahrain use-mac` to re-register it by MAC.
+
+**Searching the lists by hand.** Pi-hole stores these Adblock-style entries as
+`||youtube.com^`, not `youtube.com`, so searching for the bare domain finds nothing
+even though it is blocked. Search for the stored form:
+
+```bash
+sudo pihole-FTL sqlite3 -readonly /etc/pihole/gravity.db "SELECT adlist_id, domain FROM gravity WHERE domain = '||youtube.com^'"
+```
 
 ## What it cannot do
 
@@ -149,7 +216,7 @@ DNS filtering is a strong everyday filter, not a lock:
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -p "test_*.py"   # core, schedule, lists
+python3 -m unittest discover -s tests -p "test_*.py"   # core, schedule, lists, doctor, diagnose
 sudo bash tests/test_install.sh                          # installer, stubbed system
 python3 tests/ui_smoke.py --shots /tmp/shots            # browser test (needs playwright)
 python3 tests/mock_pihole.py --web web --setup           # page on http://127.0.0.1:8080, password "test"
