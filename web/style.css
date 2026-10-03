@@ -270,7 +270,7 @@ body.is-busy .app button{cursor:progress}
 @keyframes live-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.45;transform:scale(.8)}}
 
 /* stage: devices at the top, the family box in the middle, the internet at the bottom, wires between them */
-.stage{position:relative;margin:14px 10px 0;padding:18px 10px 16px;border-radius:22px;display:grid;gap:66px;justify-items:center;
+.stage{position:relative;margin:14px 10px 0;padding:18px 16px 16px;border-radius:22px;display:grid;gap:66px;justify-items:center;
   background:radial-gradient(var(--stage-dot) 1px,transparent 1.3px) 0 0/16px 16px,var(--stage)}
 .stage>.node,.stage-devices{position:relative;z-index:2}
 .live-wires{position:absolute;inset:0;width:100%;height:100%;z-index:1;pointer-events:none;overflow:visible}
@@ -287,7 +287,7 @@ body.is-busy .app button{cursor:progress}
 .node-ico{display:grid;place-items:center;width:36px;height:36px;border-radius:12px;background:var(--lagoon-soft);color:var(--lagoon-ink);margin-bottom:2px}
 .node-ico svg{width:21px;height:21px}
 .node-more{font-weight:700;font-size:.8rem;direction:ltr}
-.node-name{max-width:100%;font-size:.8125rem;font-weight:600;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.node-name{max-width:100%;font-size:.8125rem;font-weight:600;line-height:1.25;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow-wrap:anywhere}
 .node-state{display:flex;align-items:flex-start;justify-content:center;gap:5px;max-width:100%;font-size:.6875rem;line-height:1.25;font-weight:600;color:var(--ink-2)}
 .node-state .sdot{flex:none;width:7px;height:7px;border-radius:50%;margin-top:.3em;background:var(--ink-2);opacity:.5}
 .node-state-text{min-width:0;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
@@ -332,7 +332,7 @@ body.is-busy .app button{cursor:progress}
 .node-net.is-reached{background:var(--night-2);box-shadow:0 0 0 6px rgba(43,165,151,.28)}
 
 /* the dotted "direct line": after a yes the device goes online by itself, not through the box */
-.rail-end{position:absolute;inset-inline-start:5px;width:2px;height:2px;z-index:1;pointer-events:none}
+.rail-end{position:absolute;inset-inline-start:6px;width:2px;height:2px;z-index:1;pointer-events:none}
 .rail-a{top:70px}
 .rail-b{bottom:42px}
 .wire.is-direct .wire-base{stroke:var(--ink-2);stroke-width:2;stroke-dasharray:1 7;opacity:.5}
