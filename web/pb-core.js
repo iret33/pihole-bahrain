@@ -97,7 +97,7 @@
     this.order.push(id);
     while (this.order.length > this.keep) delete this.seen[this.order.shift()];
   };
-  Feed.prototype.ingest = function (resp) {
+  Feed.prototype.ingest = function (resp, serverNow) {
     var rows = resp && resp.queries instanceof Array ? resp.queries : [];
     this.privacy = rows.length === 0 && resp && resp.cursor === null;
     var newest = null, fresh = [], i, r;
@@ -105,7 +105,9 @@
       r = rows[i];
       if (typeof r.time === 'number' && (newest === null || r.time > newest)) newest = r.time;
     }
-    if (newest !== null) this.from = Math.max(0, Math.floor(newest - this.overlap));
+    // A row stamped later than the box's own clock (it stepped back after a wrong boot time) must not pin `from` in the future.
+    var cap = typeof serverNow === 'number' && serverNow > 0 ? serverNow : Infinity;
+    if (newest !== null) this.from = Math.max(0, Math.floor(Math.min(newest, cap) - this.overlap));
     else if (this.from === null && resp) this.from = Math.floor(Number(resp.time) || 0) || null;
     if (!this.primed) {                                   // the first answer only tells us where "now" is
       this.primed = true;
@@ -194,18 +196,21 @@
    * (googlevideo.com and youtube.com are both "youtube"); domains of no known app are counted together as `other`, never
    * guessed to be "ads" and never shown as raw hostnames. Returns [{ app, count }] biggest first (`other` has app: null).
    */
-  function topByApp(domains, map, limit) {
-    var tally = {}, other = 0, i, d, app, out = [];
+  function topByApp(domains, map, limit, only) {
+    var tally = {}, other = 0, i, d, app, out = [], allowed = null;
+    if (only) { allowed = {}; only.forEach(function (id) { allowed[id] = true; }); }
     for (i = 0; i < (domains || []).length; i++) {
       d = domains[i];
       if (!d || isHiddenDomain(d.domain)) continue;
       app = appFor(d.domain, map);
-      if (app) tally[app] = (tally[app] || 0) + (d.count || 0); else other += d.count || 0;
+      // `only`: the apps that are blocked for children. A tracker on netflix.com is blocked by an ad list, not by "blocking Netflix".
+      if (app && (!allowed || allowed[app])) tally[app] = (tally[app] || 0) + (d.count || 0); else other += d.count || 0;
     }
     Object.keys(tally).forEach(function (k) { out.push({ app: k, count: tally[k] }); });
     out.sort(function (a, b) { return b.count - a.count; });
-    if (other) out.push({ app: null, count: other });
-    return typeof limit === 'number' ? out.slice(0, limit) : out;
+    if (typeof limit === 'number') out = out.slice(0, limit);
+    if (other) out.push({ app: null, count: other });          // everything else, always shown last and never cut off
+    return out;
   }
 
   /**

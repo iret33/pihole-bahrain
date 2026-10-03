@@ -233,9 +233,26 @@ test('topByApp groups domains by app, pools unknown ones as `other`, and never i
     { domain: 'tracker.example.org', count: 25 }, { domain: 'api.tiktok.com', count: 20 }, { domain: 'hidden', count: 99 }], map);
   assert.deepEqual(top, [{ app: 'youtube', count: 50 }, { app: 'tiktok', count: 20 }, { app: null, count: 55 }],
     'apps biggest first, then everything else together; hidden domains are skipped');
-  assert.deepEqual(C.topByApp([{ domain: 'a.com', count: 5 }], map, 0), []);
+  assert.deepEqual(C.topByApp([{ domain: 'a.com', count: 5 }], map, 0), [{ app: null, count: 5 }], 'the limit cuts apps, never the "everything else" row');
   assert.deepEqual(C.topByApp(undefined, map), []);
   assert.equal(C.topByApp([{ domain: 'www.youtube.com', count: 1 }, { domain: 'api.tiktok.com', count: 2 }], map, 1).length, 1);
+});
+
+test('topByApp credits only the apps blocked for children: a tracker on an allowed app\'s domain is "other"', () => {
+  const map = { 'youtube.com': 'youtube', 'netflix.com': 'netflix' };
+  const rows = [{ domain: 'www.youtube.com', count: 7 }, { domain: 'logs.netflix.com', count: 30 }];
+  assert.deepEqual(C.topByApp(rows, map, 5, ['youtube']), [{ app: 'youtube', count: 7 }, { app: null, count: 30 }]);
+  assert.deepEqual(C.topByApp(rows, map, 5, []), [{ app: null, count: 37 }], 'no app blocked: nothing is credited to an app');
+  assert.equal(C.topByApp(rows, map, 5).length, 2, 'without a filter every app counts (the old behaviour)');
+});
+
+test('Feed: a row stamped later than the box clock cannot pin `from` in the future', () => {
+  const feed = new C.Feed();
+  feed.ingest({ queries: [{ id: 1, time: 1000, status: 'FORWARDED', domain: 'a.com', client: { ip: '1.1.1.1' } }] }, 1001);   // primes
+  feed.ingest({ queries: [{ id: 2, time: 1000 + 3600, status: 'FORWARDED', domain: 'b.com', client: { ip: '1.1.1.1' } }] }, 1005);
+  assert.ok(feed.from <= 1005, 'from is capped by the box clock (' + feed.from + ')');
+  const evs = feed.ingest({ queries: [{ id: 3, time: 1006, status: 'FORWARDED', domain: 'c.com', client: { ip: '1.1.1.1' } }] }, 1007);
+  assert.equal(evs.length, 1, 'and the next real query still arrives');
 });
 
 test('hourly: 144 ten-minute slots become 24 hourly buckets counted back from the newest slot', () => {

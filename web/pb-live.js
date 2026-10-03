@@ -54,8 +54,9 @@
     this._onResize = function () { self.layout(); };
     root.addEventListener('resize', this._onResize);
     if (root.ResizeObserver) { this.ro = new root.ResizeObserver(function () { self.layout(); }); this.ro.observe(host); }
-    var mq = root.matchMedia && root.matchMedia('(prefers-reduced-motion: reduce)');
-    if (mq && mq.addEventListener) mq.addEventListener('change', function () { self.reduced = reducedMotion(); if (self.reduced) self.clear(); });
+    this._mq = root.matchMedia && root.matchMedia('(prefers-reduced-motion: reduce)');
+    this._onMq = function () { self.reduced = reducedMotion(); if (self.reduced) self.clear(); };
+    if (this._mq && this._mq.addEventListener) this._mq.addEventListener('change', this._onMq);
   }
 
   Stage.prototype._buildWire = function (def) {
@@ -229,18 +230,22 @@
     this.timers = [];
     root.removeEventListener('resize', this._onResize);
     if (this.ro) this.ro.disconnect();
+    if (this._mq && this._mq.removeEventListener) this._mq.removeEventListener('change', this._onMq);
+    // take the drawing with us: the next Stage on the same host (after signing out and in) must start from empty layers
+    this.svg.textContent = ''; this.layer.textContent = '';
+    this.wires = {}; this.pool = [];
   };
 
   // ====================================================================== number tickers
   /** Count a number up or down to `to` over `ms`; with reduced motion it just sets it. */
   function tickNumber(node, from, to, ms, format) {
     if (node._tick) { root.cancelAnimationFrame(node._tick); node._tick = 0; }
-    if (reducedMotion() || from === to || document.hidden) { node.textContent = format(to); return; }
+    if (reducedMotion() || from === to || document.hidden || !ms) { node.textContent = format(to); return; }
     var t0 = null;
     var step = function (now) {
       if (t0 === null) t0 = now;
       var e = Math.min(1, (now - t0) / ms);
-      node.textContent = format(Math.round(C.lerp(from, to, C.easeInOut(e))));
+      node.textContent = format(e >= 1 ? to : Math.round(C.lerp(from, to, C.easeInOut(e))));      // the last frame is the exact value
       node._tick = e < 1 ? root.requestAnimationFrame(step) : 0;
     };
     node._tick = root.requestAnimationFrame(step);

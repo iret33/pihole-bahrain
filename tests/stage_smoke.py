@@ -100,6 +100,20 @@ with sync_playwright() as p:
     expect(moved is False and page.evaluate("() => window.log.join(',')") == "0,1,d", "while paused nothing animates but the callbacks run")
     page.evaluate("() => window.stage.resume()")
 
+    # destroy takes the drawing with it: after signing out and in, a new Stage on the same host starts clean
+    out = page.evaluate("""() => {
+      const host = document.getElementById('host');
+      window.stage.destroy();
+      const after = [host.querySelectorAll('g.wire').length, host.querySelectorAll('.pk').length];
+      const s2 = new PBLive.Stage(host, { wires: [{ id: 'ab', from: 'a', to: 'b' }], poolSize: 2 });
+      s2.layout();
+      const n = document.createElement('span'); PBLive.tickNumber(n, 1, 5.3, 0, x => x.toFixed(1));
+      return { after, again: [host.querySelectorAll('g.wire').length, host.querySelectorAll('.pk').length], exact: n.textContent };
+    }""")
+    expect(out["after"] == [0, 0], "destroy() removes the wires and packets it drew (%s)" % out["after"])
+    expect(out["again"] == [1, 2], "and a new Stage on the same host starts from empty layers (%s)" % out["again"])
+    expect(out["exact"] == "5.3", "a number with no animation time shows its exact value")
+
     # reduced motion: same, from the media query
     page.emulate_media(reduced_motion="reduce")
     page.reload()

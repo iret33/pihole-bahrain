@@ -222,7 +222,7 @@ class Handler(BaseHTTPRequestHandler):
         blocked_only = (query.get("blocked") or ["false"])[0] == "true"
         count = int((query.get("count") or [10])[0])
         total, blocked = len(qs), sum(q["status"] in BLOCKED for q in qs)
-        if self.store.privacy >= 2:
+        if self.store.privacy >= 1:                    # FTL: get_top_domains() answers {-1} from PRIVACY_HIDE_DOMAINS (level 1) up
             return self.send(200, {"domains": [], "total_queries": -1, "blocked_queries": -1})
         tally = {}
         for q in qs:

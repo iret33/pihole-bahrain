@@ -7,7 +7,9 @@
  * Data (all through the page's own signed-in `call`): /api/stats/summary every 15 s, /api/queries every 3.5 s (a few rows,
  * only newer than the last poll), and, only while the detail sheet is open, /api/history and /api/stats/top_domains.
  * Honesty rules: the numbers say "whole home, last 24 hours"; example packets (the tour) are labelled "Example" and never
- * touch a counter; an unknown domain is never named, only "a website"; nothing here ever shows a raw domain name.
+ * touch a counter; an unknown domain is never named ("a website", or "an unwanted site" when it was stopped); a stop is only
+ * credited to an app when that app is blocked for the child (a tracker on an allowed app's domain is not "blocking Netflix");
+ * a device is named for a stop only; nothing here ever shows a raw domain name.
  *
  * Everything shown is set with textContent: names and domains come from the network.
  * Depends on pb-core.js and pb-live.js. ES5 on purpose, like the rest of the page.
@@ -27,10 +29,14 @@
   var slots = [];              // what is drawn in the device row: [{ id, kind: 'kid'|'more'|'rest'|'add', kids: [...] }]
   var slotKey = '';
   var ipSlot = {};             // ip -> slot id ('dev-0'...)
+  var kidByIp = {};            // ip -> the child's device it belongs to
   var kidState = {};           // kid key -> state name from deviceState
-  var lastSeen = {};           // slot id -> ms of the last real query we saw from it
+  var lastSeen = {};           // ip -> phone-clock ms of the last real query we saw from it (by the query's own time on the box)
   var summary = null, delta = { total: 0, blocked: 0 }, shown = { total: 0, blocked: 0, share: 0 };
-  var failing = 0;             // consecutive failed polls: shows "not updating"
+  var fails = { summary: 0, queries: 0 };   // consecutive failed polls per task: two in a row shows "not updating"
+  var summaryAt = 0;           // the box clock (s) when the last summary arrived: queries after it are not in it yet
+  var blockingOff = false;     // Pi-hole's blocking is switched off: every rule is ignored
+  var lastStale = false, lastRecentSig = '';
   var clientsHidden = false;   // privacy level 2+: clients are not named in the log
   var domainsHidden = false;   // privacy level 1+
   var queriesHidden = false;   // privacy level 3
@@ -38,14 +44,15 @@
   var wireUntil = {};          // wire id -> ms until which it looks busy
   var voice = { until: 0, last: 0, timer: 0 };
   var pumpTimer = 0, recentTimer = 0, ariaTimer = 0, recentTick = 0, wireTimer = 0, captionTimer = 0, repaintTimer = 0;
-  var captionHeld = false, wired = false, lastDirect = 0;
+  var captionHeld = false, wired = false, lastDirect = 0, sayFlip = false;
   var tour = { on: false, i: 0, timer: 0 };
   var minute = [];             // [{ at, blocked }] events of the last minute, for the screen-reader summary
   var lastAria = '';
   var detailOpen = false, detail = null;
 
-  var SLOT_MAX = 3;
-  function privacyHides() { return clientsHidden || queriesHidden; }       // privacy level 2+: who asked what is not known            // kids drawn as their own node (more are folded into "+N")
+  var SLOT_MAX = 3;            // kids drawn as their own node (more are folded into "+N")
+  function privacyHides() { return clientsHidden || queriesHidden; }       // privacy level 2+: who asked what is not known
+  function stale() { return fails.summary >= 2 || fails.queries >= 2; }
 
   function $(id) { return doc.getElementById(id); }
   function t(key, vars) { return env.t(key, vars); }
@@ -74,26 +81,51 @@
     return null;
   }
 
+  /** A hung request must turn into a failure, not a picture that silently stops: give up after `ms`. */
+  function withTimeout(promise, ms) {
+    return new Promise(function (resolve, reject) {
+      var timer = root.setTimeout(function () { reject(new Error('timeout')); }, ms);
+      promise.then(function (v) { root.clearTimeout(timer); resolve(v); }, function (e) { root.clearTimeout(timer); reject(e); });
+    });
+  }
+
   // ------------------------------------------------------------------ app names
   function appInfo(id) {
     var a = m && m.apps && m.apps[id];
     return a || null;
   }
-  function labelFor(ev) {
-    if (ev.hiddenDomain) return { text: t('lvWebsite'), badge: '', color: '' };
-    var app = ev.app && appInfo(ev.app);
-    if (app) return { text: app.name, badge: app.mono, color: app.color };
-    // never a host name: a stopped site of no known app is "an unwanted site" (this also keeps adult domains off the screen)
-    return { text: t(ev.kind === 'blocked' ? 'lvUnwanted' : 'lvWebsite'), badge: '', color: '' };
+  /**
+   * What to call a lookup, as language-free parts (resolved to words when drawn, so a language switch changes old lines too).
+   * Never a host name. A stop is credited to an app ONLY when that app is blocked for the child it came from: an ad list also
+   * stops trackers on allowed apps' domains, and "Stopped Netflix" would tell a parent Netflix is blocked. While the internet is
+   * off or the device is paused, everything is stopped, so the reason is that, not "an unwanted site".
+   */
+  function labelParts(ev) {
+    if (ev.hiddenDomain) return { key: 'lvWebsite' };
+    var kid = ev.ip ? kidByIp[ev.ip] : null;
+    if (ev.kind === 'blocked') {
+      if (kid && m.offline) return { key: 'lvWhyOff' };
+      if (kid && kid.paused) return { key: 'lvWhyPaused' };
+      if (kid && ev.app && m.blockedApps.indexOf(ev.app) >= 0 && appInfo(ev.app)) return { app: ev.app };
+      return { key: 'lvUnwanted' };           // also keeps adult domain names off the screen
+    }
+    if (ev.app && appInfo(ev.app)) return { app: ev.app };
+    return { key: 'lvWebsite' };
   }
+  function resolveLabel(p) {
+    var a = p.app && appInfo(p.app);
+    if (a) return { text: a.name, badge: a.mono, color: a.color };
+    return { text: t(p.key || 'lvWebsite'), badge: '', color: '' };
+  }
+  function labelFor(ev) { return resolveLabel(labelParts(ev)); }
 
   // ------------------------------------------------------------------ the device row
   function kidName(k) { return k.name || t('lvDevice'); }
 
   /** Which nodes the device row shows for this model, and which kid / address belongs to which node. */
-  function buildSlots() {
+  function buildSlots(real) {
     var kids = m.kids, out = [], i;
-    if (tour.on) return [{ id: 'dev-0', kind: 'example', kids: [] }, { id: 'rest', kind: 'rest', kids: [] }];   // examples never come from a real child
+    if (tour.on && !real) return [{ id: 'dev-0', kind: 'example', kids: [] }, { id: 'rest', kind: 'rest', kids: [] }];   // examples never come from a real child
     if (!kids.length) {
       out.push({ id: 'dev-0', kind: 'add', kids: [] });
     } else if (kids.length <= SLOT_MAX) {
@@ -108,7 +140,7 @@
 
   function stateOf(k) {
     var recentIp = false, i;
-    for (i = 0; i < k.ips.length; i++) if (ipSlot[k.ips[i]] && lastSeen[ipSlot[k.ips[i]]] && now() - lastSeen[ipSlot[k.ips[i]]] < 300000) recentIp = true;
+    for (i = 0; i < k.ips.length; i++) if (lastSeen[k.ips[i]] && now() - lastSeen[k.ips[i]] < 300000) recentIp = true;     // per device, never per drawn node
     return C.deviceState({ shadowed: k.shadowed, lastQuery: k.lastQuery, serverNow: m.serverNow, recent: recentIp, offline: m.offline, paused: k.paused,
       unknown: !m.activityKnown || (privacyHides() && !k.lastQuery) });
   }
@@ -126,9 +158,9 @@
 
   function renderSlots() {
     var host = el.devices, key = '', i, s, b;
-    ipSlot = {};
-    slots = buildSlots();
-    slots.forEach(function (sl) { sl.kids.forEach(function (k) { k.ips.forEach(function (ip) { ipSlot[ip] = sl.id; }); }); });
+    ipSlot = {}; kidByIp = {};
+    slots = buildSlots(false);
+    buildSlots(true).forEach(function (sl) { sl.kids.forEach(function (k) { k.ips.forEach(function (ip) { ipSlot[ip] = sl.id; kidByIp[ip] = k; }); }); });
     m.kids.forEach(function (k) { kidState[k.key] = stateOf(k); });
     for (i = 0; i < slots.length; i++) {
       s = slots[i];
@@ -186,6 +218,7 @@
   function wireOf(slotId) { return slotId === 'rest' ? 'w-rest' : 'w-' + slotId; }
 
   function paintWires() {
+    if (!stage) return;
     var n = now();
     slots.forEach(function (s) {
       var cls = '', st = slotState(s), id = wireOf(s.id);
@@ -207,29 +240,32 @@
   function busy(id, ms) { wireUntil[id] = now() + ms; }
 
   // ------------------------------------------------------------------ the verdict (headline)
+  function silentFor(k) { return k.lastQuery ? Math.max(0, m.serverNow - k.lastQuery) : 0; }    // seconds since it last asked the box
   function verdict() {
-    var kids = m.kids, names, bad = [], i, st, apps = m.blockedApps.length;
-    if (!kids.length) return { tone: 'none', title: t('lvNoKids'), sub: t('lvNoKidsSub') };
-    if (m.timer && m.timerMode === 'free') return { tone: 'good', title: t('lvFree'), sub: t('lvFreeSub') };
-    for (i = 0; i < kids.length; i++) {
+    var kids = m.kids, bad = [], over = 0, i, st, apps = m.blockedApps.length, n = kids.length, long = false;
+    // Pi-hole's blocking switched off beats everything: no rule is applied, whatever the rest of the card knows.
+    if (blockingOff) return { tone: 'warn', title: t('lvBlockOff'), sub: t('lvBlockOffSub') };
+    if (!n) return { tone: 'none', title: t('lvNoKids'), sub: t('lvNoKidsSub') };
+    for (i = 0; i < n; i++) {
       st = kidState[kids[i].key];
+      if (st === 'overridden') over++;
       if (st === 'overridden' || st === 'unreachable') bad.push({ k: kids[i], st: st });
+      if (st === 'quiet' && silentFor(kids[i]) > 7200) long = true;
     }
+    if (m.timer && m.timerMode === 'free' && !over) return { tone: 'good', title: t('lvFree'), sub: t('lvFreeSub') };    // an overridden device is never "fine"
     if (bad.length) {
       if (bad.length === 1) return { tone: 'warn', title: t(bad[0].st === 'overridden' ? 'lvCheckOver' : 'lvCheckAway', { n: kidName(bad[0].k) }),
         sub: t(bad[0].st === 'overridden' ? 'lvCheckOverSub' : 'lvCheckAwaySub') };
       return { tone: 'warn', title: t('lvCheckMany', { n: bad.length }), sub: t('lvCheckManySub') };
     }
     if (m.offline) return { tone: 'off', title: t('lvOff'), sub: t('lvOffSub') };
-    if (kids.every(function (k) { return kidState[k.key] === 'quiet' || kidState[k.key] === 'unknown'; })) return {   // nobody is using the internet now, or the box cannot tell
-      tone: 'good', title: kids.length === 1 ? t('lvSetOne', { n: kidName(kids[0]) }) : t('lvSetAll', { n: kids.length }),
-      sub: apps ? t('lvBlockedApps', { n: apps }) : t('lvNoBlockedApps') };
-    if (kids.every(function (k) { return k.paused; })) return { tone: 'off', title: kids.length === 1 ? t('lvPausedOne', { n: kidName(kids[0]) }) : t('lvPausedAll'), sub: t('lvPausedSub') };
-    return {
-      tone: 'good',
-      title: kids.length === 1 ? t('lvWorkingOne', { n: kidName(kids[0]) }) : t('lvWorkingAll', { n: kids.length }),
-      sub: apps ? t('lvBlockedApps', { n: apps }) : t('lvNoBlockedApps')
-    };
+    var sub = apps ? t('lvBlockedApps', { n: apps }) : t('lvNoBlockedApps');
+    // "Working" only when a device was seen lately. Nobody online, the box cannot tell, or a device quiet for hours: the rules are set,
+    // which is all that is known (a phone that left home Wi-Fi looks exactly like that).
+    if (long || kids.every(function (k) { return kidState[k.key] === 'quiet' || kidState[k.key] === 'unknown'; })) return {
+      tone: 'good', title: n === 1 ? t('lvSetOne', { n: kidName(kids[0]) }) : n === 2 ? t('lvSetTwo') : t('lvSetAll', { n: n }), sub: sub };
+    if (kids.every(function (k) { return k.paused; })) return { tone: 'off', title: n === 1 ? t('lvPausedOne', { n: kidName(kids[0]) }) : t('lvPausedAll'), sub: t('lvPausedSub') };
+    return { tone: 'good', title: n === 1 ? t('lvWorkingOne', { n: kidName(kids[0]) }) : n === 2 ? t('lvWorkingTwo') : t('lvWorkingAll', { n: n }), sub: sub };
   }
   function renderHead() {
     var v = verdict();
@@ -240,14 +276,17 @@
     var pill = 'live', text = t('lvLive');
     if (queriesHidden) { pill = 'hidden'; text = t('lvTotalsOnly'); }
     else if (tour.on) { pill = 'example'; text = t('lvExample'); }
-    else if (failing >= 2) { pill = 'stale'; text = t('lvStale'); }
+    else if (stale()) { pill = 'stale'; text = t('lvStale'); }
     else if (!active()) { pill = 'paused'; text = t('lvPausedPill'); }
     el.pill.className = 'live-pill is-' + pill;
     el.pillText.textContent = text;
+    el.pill.hidden = collapsed;                              // a folded card has nothing to be "live" about
+    if ((pill === 'stale') !== lastStale) { lastStale = pill === 'stale'; ariaSummary(); }    // a stall is announced, not only drawn
   }
 
   // ------------------------------------------------------------------ the box's voice
   function idleVoice() {
+    if (blockingOff) return t('lvBoxBlockOff');
     if (m.offline) return t('lvBoxOff');
     if (m.blockedApps.length) return t('lvBoxBlocking', { n: m.blockedApps.length });
     return t('lvBoxOpen');
@@ -263,11 +302,11 @@
   }
 
   // ------------------------------------------------------------------ the numbers
-  function setStat(id, key, to, format) {
+  function setStat(id, key, to, format, still) {
     var n = el[id];
     var from = shown[key];
     shown[key] = to;
-    L.tickNumber(n, from, to, 700, format);
+    L.tickNumber(n, from, to, still ? 0 : 700, format);          // the share is shown exactly, never counted up through whole numbers
   }
   function renderStats() {
     var total, blocked, share;
@@ -280,7 +319,7 @@
     share = C.percent(blocked, total);
     setStat('statChecked', 'total', total, fmtTile);
     setStat('statStopped', 'blocked', blocked, fmtTile);
-    setStat('statShare', 'share', share, function (n) { return n.toLocaleString(env.locale) + '%'; });
+    setStat('statShare', 'share', share, function (n) { return n.toLocaleString(env.locale) + '%'; }, true);
   }
   function renderStaticText() {
     el.statCheckedLabel.textContent = t('lvChecked');
@@ -301,11 +340,13 @@
 
   // ------------------------------------------------------------------ caption (what the picture means, or what was tapped)
   function defaultCaption() { return queriesHidden ? t('lvCaptionHidden') : t('lvCaption'); }
-  function setCaption(text, hold) {
-    el.caption.textContent = text;
+  function setText(node, text) { if (node.textContent !== text) node.textContent = text; }      // never rewrite the same words: live regions would repeat them
+  function setCaption(text, hold, say) {
+    setText(el.caption, text);
+    if (say) { sayFlip = !sayFlip; el.say.textContent = text + (sayFlip ? '' : '\u00a0'); }      // announced for screen readers, even when tapped twice
     captionHeld = !!hold;
     root.clearTimeout(captionTimer);
-    if (hold) captionTimer = root.setTimeout(function () { captionHeld = false; el.caption.textContent = tour.on ? '' : defaultCaption(); }, hold);
+    if (hold) captionTimer = root.setTimeout(function () { captionHeld = false; setText(el.caption, tour.on ? '' : defaultCaption()); }, hold);
   }
   function explain(which) {
     var text;
@@ -320,18 +361,19 @@
       else if (s.kind === 'more') { text = t('lvExMore', { n: s.kids.length }); if (env.goDevices) env.goDevices(); }
       else text = t('lvEx_' + slotState(s), { n: kidName(s.kids[0]) });
     }
-    setCaption(text, 14000);
+    setCaption(text, 14000, true);
   }
   function explainStat(which) {
-    setCaption(t(which === 'checked' ? 'lvExChecked' : which === 'stopped' ? 'lvExStopped' : 'lvExShare'), 16000);
+    if (collapsed) setCollapsed(false, true);                  // the words appear under the picture: open it so a tap is never silent
+    setCaption(t(which === 'checked' ? 'lvExChecked' : which === 'stopped' ? 'lvExStopped' : 'lvExShare'), 16000, true);
   }
 
   // ------------------------------------------------------------------ recent events (text twin of the animation)
-  function pushRecent(ev, label, who, at) {
+  function pushRecent(ev, parts, who, at) {
     var kind = ev.kind === 'blocked' ? 'stop' : 'go';
-    var key = kind + '|' + label + '|' + who, top = recent[0];
+    var key = kind + '|' + (parts.app || parts.key) + '|' + who, top = recent[0];
     if (top && top.key === key) { top.n++; top.at = Math.max(top.at, at); }
-    else { recent.unshift({ key: key, kind: kind, label: label, who: who, at: at, n: 1 }); if (recent.length > 5) recent.pop(); }
+    else { recent.unshift({ key: key, kind: kind, parts: parts, who: who, at: at, n: 1 }); if (recent.length > 5) recent.pop(); }
   }
   function ago(ms) {
     var s = Math.max(0, Math.round((now() - ms) / 1000));
@@ -340,21 +382,30 @@
     return t('lvMins', { n: Math.round(s / 60) });
   }
   function renderRecent() {
-    var ul = el.recentList, i, r, li, line;
-    ul.textContent = '';
-    if (queriesHidden || domainsHidden) { ul.appendChild(node('li', 'recent-empty', t(queriesHidden ? 'lvPrivacyShort' : 'lvPrivacyNames'))); return; }
-    if (!recent.length) { ul.appendChild(node('li', 'recent-empty', t('lvRecentEmpty'))); return; }
-    for (i = 0; i < recent.length; i++) {
-      r = recent[i];
-      li = node('li', 'recent-item is-' + r.kind);
-      li.appendChild(icon(r.kind === 'stop' ? 'i-stop' : 'i-play'));
-      line = node('span', 'recent-text');
-      line.setAttribute('dir', 'auto');
-      line.textContent = t(r.kind === 'stop' ? 'lvRecStop' : 'lvRecGo', { a: r.label }) + (r.who ? ' · ' + r.who : '') + (r.n > 1 ? ' ×' + r.n : '');
-      li.appendChild(line);
-      li.appendChild(node('span', 'recent-when', ago(r.at)));
-      ul.appendChild(li);
+    var ul = el.recentList, i, r, li, line, rows = [], lab, text, sig;
+    if (queriesHidden || domainsHidden) rows.push({ empty: t(queriesHidden ? 'lvPrivacyShort' : 'lvPrivacyNames') });
+    else if (!recent.length) rows.push({ empty: t('lvRecentEmpty') });
+    else for (i = 0; i < recent.length; i++) {
+      r = recent[i]; lab = resolveLabel(r.parts);
+      // a reason ("Internet off") reads as it is; a name reads "Stopped YouTube"
+      text = (r.kind === 'go' ? t('lvRecGo', { a: lab.text }) : (r.parts.key === 'lvWhyOff' || r.parts.key === 'lvWhyPaused') ? lab.text : t('lvRecStop', { a: lab.text })) +
+        (r.who ? ' · ' + r.who : '') + (r.n > 1 ? ' ×' + r.n : '');
+      rows.push({ kind: r.kind, text: text, when: ago(r.at) });
     }
+    sig = JSON.stringify(rows);
+    if (sig === lastRecentSig) return;                        // unchanged: leave the nodes alone (a reader's place is not reset)
+    lastRecentSig = sig;
+    ul.textContent = '';
+    rows.forEach(function (row) {
+      if (row.empty) { ul.appendChild(node('li', 'recent-empty', row.empty)); return; }
+      li = node('li', 'recent-item is-' + row.kind);
+      li.appendChild(icon(row.kind === 'stop' ? 'i-stop' : 'i-play'));
+      line = node('span', 'recent-text', row.text);
+      line.setAttribute('dir', 'auto');
+      li.appendChild(line);
+      li.appendChild(node('span', 'recent-when', row.when));
+      ul.appendChild(li);
+    });
   }
   function scheduleRepaint() {                // device states ("online now") follow the real activity, a few times a minute at most
     if (repaintTimer || !m) return;
@@ -370,7 +421,7 @@
     var cut = now() - 60000, c = 0, b = 0, i;
     minute = minute.filter(function (x) { return x.at >= cut; });
     for (i = 0; i < minute.length; i++) { c++; if (minute[i].blocked) b++; }
-    var text = queriesHidden ? '' : t('lvAria', { c: fmt(c), b: fmt(b) });
+    var text = queriesHidden ? '' : stale() ? t('lvStale') : t('lvAria', { c: fmt(c), b: fmt(b) });
     if (text !== lastAria) { lastAria = text; el.aria.textContent = text; }
   }
 
@@ -379,15 +430,13 @@
     if (ev.hiddenClient) return 'rest';
     return ipSlot[ev.ip] || 'rest';
   }
-  function whoFor(slotId) {
-    var s = slots.filter(function (x) { return x.id === slotId; })[0];
-    if (!s || s.kind === 'rest' || s.kind === 'add' || s.kind === 'example') return '';
-    if (s.kind === 'more') return t('lvMore', { n: s.kids.length });
-    return kidName(s.kids[0]);
+  function whoFor(ev) {
+    var k = ev.ip && !ev.hiddenClient ? kidByIp[ev.ip] : null;
+    return k ? kidName(k) : '';
   }
 
   function animate(ev) {
-    var slotId = ev.slot, w = wireOf(slotId), lab = labelFor(ev), who = whoFor(slotId), route, tone;
+    var slotId = ev.slot, w = wireOf(slotId), lab = labelFor(ev), who = whoFor(ev), route, tone;
     if (!stage.wires[w] || !stage.wires[w].geom) return;
     var spoken = (ev.kind === 'blocked' && who ? who + ' · ' : '') + lab.text;      // a device is named for a stop only, never for an allowed lookup
     busy(w, 5000);
@@ -410,7 +459,9 @@
           stage.pulse('box', ev.kind === 'blocked' ? 'is-refusing' : 'is-checking', 650);
           say(t(ev.kind === 'blocked' ? 'lvSayNo' : 'lvSayYes', { a: spoken }), ev.kind === 'blocked' ? 'no' : 'yes');
         }
+        if (ev.kind === 'allowed' && i === 1) api.label(t('lvLookup'));            // the box looks the address up outside: only that goes on
         if (ev.kind === 'allowed' && i === 2) stage.pulse('net', 'is-reached', 600);
+        if (ev.kind === 'allowed' && i === 4) api.label(lab.text);
       },
       onDone: ev.kind === 'allowed' ? directLine : undefined
     });
@@ -430,7 +481,7 @@
     el.liveToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
     el.liveToggleText.textContent = t(collapsed ? 'lvShow' : 'lvHide');
     if (remember) store(collapsed ? 'closed' : 'open');
-    if (collapsed) { if (tour.on) endTour(); stage.clear(); pacer.queue.length = 0; }
+    if (collapsed) { if (tour.on) endTour(); stage.clear(); pacer.queue.length = 0; fails.queries = 0; }
     else { feed = new C.Feed({ length: 60 }); stage.layout(); wake(); }          // start again from "now": nothing old is replayed
     el.live.classList.toggle('is-paused', !active());
     if (m) renderHead();
@@ -451,16 +502,21 @@
 
   // ------------------------------------------------------------------ data
   function pollSummary() {
-    var sentAt = now();
-    return env.call('GET', '/api/stats/summary').then(function (j) {
-      var q = (j && j.queries) || {};
+    return withTimeout(Promise.all([
+      env.call('GET', '/api/stats/summary'),
+      env.call('GET', '/api/dns/blocking').catch(function () { return null; })       // missing or odd: never breaks the picture
+    ]), 10000).then(function (r) {
+      var j = r[0], q = (j && j.queries) || {}, b = r[1] && r[1].blocking;
       summary = { total: q.total || 0, blocked: q.blocked || 0, cached: q.cached || 0, forwarded: q.forwarded || 0, unique: q.unique_domains || 0,
         listSize: ((j.gravity || {}).domains_being_blocked) || 0, listAt: ((j.gravity || {}).last_update) || 0, clients: ((j.clients || {}).active) || 0 };
-      delta = { total: 0, blocked: 0 };                       // the real numbers include everything we counted ourselves
-      failing = 0;
+      summaryAt = env.serverNow ? env.serverNow() : 0;         // queries after this moment are not in the summary yet: only those are added
+      delta = { total: 0, blocked: 0 };
+      blockingOff = b === 'disabled' || b === 'failure';
+      fails.summary = 0;
       renderStats(); renderHead();
+      if (m && !tour.on) setText(el.boxSub, voice.until <= now() ? idleVoice() : el.boxSub.textContent);
       if (detailOpen) renderDetailNumbers();
-    }, function (e) { failing++; renderHead(); throw e; });
+    }, function (e) { fails.summary++; renderHead(); throw e; });
   }
 
   function serverAge(ev) {                                  // seconds since the event, by the BOX's clock
@@ -469,31 +525,36 @@
   }
   function pollQueries() {
     if (collapsed) return Promise.resolve();                 // the picture is closed: only the totals are kept up to date
-    return env.call('GET', feed.url()).then(function (j) {
-      var evs = feed.ingest(j), i, ev, wasQ = queriesHidden;
-      failing = 0;
+    return withTimeout(env.call('GET', feed.url()), 10000).then(function (j) {
+      var evs = feed.ingest(j, env.serverNow ? env.serverNow() : 0), i, ev, wasQ = queriesHidden, ts, parts;
+      fails.queries = 0;
       queriesHidden = feed.privacy;
       if (queriesHidden !== wasQ) { renderStaticText(); setCaption(defaultCaption()); renderRecent(); renderHead(); }
+      if (evs.length) {                                          // privacy is judged by the whole batch: one odd row never switches names off
+        var allC = evs.every(function (e) { return e.hiddenClient; }), allD = evs.every(function (e) { return e.hiddenDomain; });
+        if (allC !== clientsHidden) { clientsHidden = allC; renderSlots(); }
+        if (allD !== domainsHidden) { domainsHidden = allD; renderRecent(); }
+      }
       var fresh = [];
       for (i = 0; i < evs.length; i++) {
         ev = evs[i];
-        if (ev.hiddenClient && !clientsHidden) { clientsHidden = true; renderSlots(); }
-        if (ev.hiddenDomain) domainsHidden = true;
         ev.app = ev.hiddenDomain ? null : C.appFor(ev.domain, env.domains);
         ev.slot = slotFor(ev);
         ev.child = ev.slot !== 'rest';
-        lastSeen[ev.slot] = now();
-        delta.total++; if (ev.kind === 'blocked') delta.blocked++;
-        minute.push({ at: now(), blocked: ev.kind === 'blocked' });
-        var lab = labelFor(ev), late = serverAge(ev);                         // a gap (tab was hidden): old events are listed, not replayed
-        if (ev.kind === 'blocked' || ev.app) pushRecent(ev, lab.text, ev.kind === 'blocked' ? whoFor(ev.slot) : '', now() - late * 1000);
+        var late = serverAge(ev);                                              // after a gap (tab was hidden) old events are listed, not replayed
+        ts = now() - late * 1000;
+        if (ev.ip && !ev.hiddenClient && (!lastSeen[ev.ip] || ts > lastSeen[ev.ip])) lastSeen[ev.ip] = ts;       // per device, on the event's own time
+        if (!summaryAt || ev.time > summaryAt) { delta.total++; if (ev.kind === 'blocked') delta.blocked++; }   // the summary already holds the older ones
+        minute.push({ at: ts, blocked: ev.kind === 'blocked' });
+        parts = labelParts(ev);
+        if (ev.kind === 'blocked' || ev.app) pushRecent(ev, parts, ev.kind === 'blocked' ? whoFor(ev) : '', ts);
         if (late <= 20) fresh.push(ev);
       }
       if (fresh.length) {
         if (!tour.on && active()) { pacer.push(fresh); schedulePump(); }
         renderStats(); scheduleRecent(); scheduleRepaint();
       }
-    }, function (e) { failing++; renderHead(); throw e; });
+    }, function (e) { fails.queries++; renderHead(); throw e; });
   }
 
   function startPolling() {
@@ -524,19 +585,28 @@
       route = [{ wire: w, ms: 750 }, { hold: 200 }, { wire: 'w-out', ms: 800 }, { hold: 200 }, { wire: 'w-out', back: true, ms: 800 }, { wire: w, back: true, ms: 650 }]; }
     else { tone = 'is-example'; route = [{ wire: w, ms: 800 }, { hold: 400 }, { wire: w, back: true, ms: 700 }]; }
     paintWires();
-    stage.send({ label: label, tone: tone, route: route, onStep: function (i) {
+    stage.send({ label: label, tone: tone, route: route, onStep: function (i, api) {
       if (i === 0) { stage.pulse('box', kind === 'blocked' ? 'is-refusing' : 'is-checking', 700); say(t(kind === 'blocked' ? 'lvSayNoEx' : 'lvSayYesEx'), kind === 'blocked' ? 'no' : 'yes', true); }
+      if (kind === 'allowed' && i === 1) api.label(t('lvLookup'));
       if (kind === 'allowed' && i === 2) stage.pulse('net', 'is-reached', 600);
+      if (kind === 'allowed' && i === 4) api.label(label);
     }, onDone: kind === 'allowed' ? function () { if (tour.on && active()) stage.send({ tone: 'is-direct', route: [{ wire: 'w-direct', ms: 1100 }] }); } : undefined });
+  }
+  function tourTexts() {                                      // also called when the language changes mid-tour
+    setText(el.tourStep, t(TOUR[tour.i]));
+    setText(el.tourCount, t('lvStep', { i: tour.i + 1, n: TOUR.length }));
+    setText(el.tourNext, t(tour.i === TOUR.length - 1 ? 'lvDone' : 'lvNext'));
+    setText(el.tourBack, t('lvBack'));
+    setText(el.tourEnd, t('lvEndTour'));
+    if (tour.i === 0 && doc.activeElement === el.tourBack) el.tourNext.focus({ preventScroll: true });   // Back disappears: focus moves, never falls to the page
+    el.tourBack.style.visibility = tour.i === 0 ? 'hidden' : '';        // keeps its place, so a double tap on Next never lands on Back
+    el.tourBack.disabled = tour.i === 0;
   }
   function tourStep(i) {
     root.clearTimeout(tour.timer);
     tour.i = Math.max(0, Math.min(TOUR.length - 1, i));
     stage.clear();
-    el.tourStep.textContent = t(TOUR[tour.i]);
-    el.tourCount.textContent = t('lvStep', { i: tour.i + 1, n: TOUR.length });
-    el.tourBack.hidden = tour.i === 0;
-    el.tourNext.textContent = t(tour.i === TOUR.length - 1 ? 'lvDone' : 'lvNext');
+    tourTexts();
     var kinds = [null, 'plain', 'allowed', 'blocked', null];
     var foci = [['dev-0', 'rest'], ['dev-0', 'box'], ['dev-0', 'box', 'net'], ['dev-0', 'box'], ['box']];
     focusNodes(foci[tour.i]);
@@ -612,6 +682,14 @@
     sec.appendChild(hoursTitle);
     var bars = node('div', 'hours'); bars.id = 'detailHours'; bars.setAttribute('role', 'img'); bars.setAttribute('aria-label', t('lvHours'));
     sec.appendChild(bars);
+    var axis = node('div', 'hours-axis');                    // what the bars mean: two colours, and which end is "now"
+    axis.appendChild(node('span', '', t('lvEarlier')));
+    var key = node('span', 'hours-key');
+    key.appendChild(node('i', 'key key-total')); key.appendChild(node('span', '', t('lvChecked')));
+    key.appendChild(node('i', 'key key-blocked')); key.appendChild(node('span', '', t('lvStopped')));
+    axis.appendChild(key);
+    axis.appendChild(node('span', '', t('lvNowShort')));
+    sec.appendChild(axis);
     var topTitle = node('h4', '', t('lvTopTitle'));
     sec.appendChild(topTitle);
     var top = node('ul', 'toplist'); top.id = 'detailTop';
@@ -640,7 +718,9 @@
       env.call('GET', '/api/stats/top_domains?blocked=true&count=60').catch(function () { return null; })
     ]).then(function (r) {
       if (!detailOpen) return;
-      detail = { hours: r[0] ? C.hourly(r[0]) : null, top: r[1] ? C.topByApp(r[1].domains || [], env.domains, 5) : null };
+      var topHidden = !!r[1] && (r[1].total_queries === -1 || domainsHidden || queriesHidden);     // FTL answers with -1 from privacy level 1 up
+      detail = { hours: r[0] ? C.hourly(r[0]) : null,
+        top: topHidden ? 'hidden' : r[1] ? C.topByApp(r[1].domains || [], env.domains, 5, m.blockedApps) : null };
       renderDetailNumbers();
     });
     env.openSheet();
@@ -680,8 +760,10 @@
         b.appendChild(bb); col.appendChild(b); hours.appendChild(col);
       }
     } else hours.appendChild(node('span', 'muted small', t('lvUnavailable')));
-    if (detail.top && detail.top.length) {
-      var peak = detail.top[0].count || 1;
+    if (detail.top === 'hidden') top.appendChild(node('li', 'muted small', t('lvPrivacyNames')));
+    else if (detail.top && detail.top.length) {
+      var peak = 1;
+      detail.top.forEach(function (x) { peak = Math.max(peak, x.count); });
       detail.top.forEach(function (r) {
         var a = r.app && appInfo(r.app), li = node('li', 'top-item');
         var badge = node('span', 'top-badge' + (a ? '' : ' is-other'), a ? a.mono : '·');
@@ -720,10 +802,10 @@
     ['live', 'liveIcon', 'liveTitle', 'liveSub', 'livePill', 'livePillText', 'stage', 'stageDevices', 'nodeBox', 'boxName', 'boxSub', 'nodeNet', 'netName',
       'liveCaption', 'liveTour', 'tourStep', 'tourCount', 'tourBack', 'tourNext', 'tourEnd', 'statChecked', 'statCheckedLabel', 'statStopped', 'statStoppedLabel',
       'statShare', 'statShareLabel', 'liveScope', 'liveNote', 'liveRecent', 'liveRecentTitle', 'liveRecentList', 'liveAria', 'tourBtn', 'detailBtn',
-      'sheetTitle', 'sheetBody', 'liveSheet', 'liveToggle', 'liveToggleText'].forEach(function (id) { el[id] = $(id); });
+      'sheetTitle', 'sheetBody', 'liveSheet', 'liveToggle', 'liveToggleText', 'liveSay'].forEach(function (id) { el[id] = $(id); });
     el.devices = el.stageDevices; el.title = el.liveTitle; el.sub = el.liveSub; el.icon = el.liveIcon; el.pill = el.livePill; el.pillText = el.livePillText;
     el.box = el.nodeBox; el.caption = el.liveCaption; el.tour = el.liveTour; el.scope = el.liveScope; el.note = el.liveNote;
-    el.recentTitle = el.liveRecentTitle; el.recentList = el.liveRecentList; el.aria = el.liveAria;
+    el.recentTitle = el.liveRecentTitle; el.recentList = el.liveRecentList; el.aria = el.liveAria; el.say = el.liveSay;
   }
 
   function wake() { if (poller) poller.wake(); }
@@ -770,17 +852,19 @@
   /** The page hands over its view-model after every render (and on language change). Cheap: rebuilds nodes only when they change. */
   function update(model) {
     if (!started) return;
+    var langChanged = !!m && m.lang !== model.lang;
     m = model;
     if (model.locale) env.locale = model.locale;
+    if (langChanged) { captionHeld = false; root.clearTimeout(captionTimer); }       // a held explanation would stay in the old language
     renderSlots();
     renderStaticText();
     renderHead();
-    if (!tour.on) { if (voice.until <= now()) el.boxSub.textContent = idleVoice(); if (!captionHeld) el.caption.textContent = defaultCaption(); }
+    if (!tour.on) { if (voice.until <= now()) setText(el.boxSub, idleVoice()); if (!captionHeld) setText(el.caption, defaultCaption()); }
     renderRecent();
     renderStats();
     paintWires();
     stage.layout();
-    if (tour.on) { el.tourStep.textContent = t(TOUR[tour.i]); el.tourCount.textContent = t('lvStep', { i: tour.i + 1, n: TOUR.length }); }
+    if (tour.on) tourTexts();
     startPolling();
   }
   function stop() {
@@ -794,9 +878,11 @@
     if (io) { io.disconnect(); io = null; }
     root.clearInterval(ariaTimer); root.clearInterval(recentTick);
     root.clearTimeout(repaintTimer); repaintTimer = 0; root.clearTimeout(recentTimer); recentTimer = 0;
+    root.clearTimeout(wireTimer); wireTimer = 0; root.clearTimeout(voice.timer); root.clearTimeout(captionTimer); captionHeld = false;
     if (stage) { stage.destroy(); stage = null; }
     summary = null; recent = []; lastSeen = {}; slotKey = ''; wireUntil = {}; queriesHidden = false; clientsHidden = false; domainsHidden = false;
-    shown = { total: 0, blocked: 0, share: 0 }; delta = { total: 0, blocked: 0 }; failing = 0; minute = []; lastAria = '';
+    shown = { total: 0, blocked: 0, share: 0 }; delta = { total: 0, blocked: 0 }; fails = { summary: 0, queries: 0 }; minute = []; lastAria = '';
+    summaryAt = 0; blockingOff = false; lastStale = false; lastRecentSig = ''; kidByIp = {}; ipSlot = {}; m = null; el.say.textContent = ''; el.aria.textContent = '';
   }
 
   root.PBPicture = { init: init, update: update, stop: stop, wake: wake };

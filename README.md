@@ -158,9 +158,16 @@ The picture never changes a rule.
 
 - **Names.** An app is named only when its domain is in `pb/domains.json` (made at install time from the
   block lists, `pihole-bahrain domain-map`); anything else is "A website". Raw domain names are never shown.
-- **Each child's wire** shows what is true: *Online now*, *Not active*, *Paused*, *Internet off*, *Rules may
-  not apply* (another Pi-hole client row overrides the child's, see above) and *Not seen in 24 hours*
-  (the device is probably not using the box). The headline says "the rules are working" only when nothing needs a look.
+  A *stop* is credited to an app only when that app is blocked for the child it came from: an ad list also
+  stops trackers on an allowed app's domain, and that reads "An unwanted site", never "Stopped Netflix". While the
+  internet is off or a device is paused, a stop says that instead. A device is named for a stop only, never for an allowed lookup.
+- **Each child's wire** shows what is true: *Online now*, *Quiet*, *Paused*, *Internet off*, *Rules may
+  not apply* (another Pi-hole client row overrides the child's, see above), *Not seen in 24 hours*
+  (the device is probably not using the box) and *Rules set* (the box cannot tell when it was last online, for
+  example at a privacy level that hides devices: never a guess like "not seen"). The headline says "the rules are working"
+  only when nothing needs a look and a device was seen lately; if every device is quiet, or one has been quiet for
+  hours (a phone that left Wi-Fi looks exactly like that), it says "the rules are set". If Pi-hole's blocking is switched off
+  (`/api/dns/blocking`), the card says so in amber instead of anything green.
 - **Privacy levels.** At level 1 packets are drawn without app names, at level 2 clients are folded into
   "Whole home", at level 3 only the totals are shown, with a note saying why.
 - **Reduced motion.** Nothing moves; the "What just happened" list opens by default and a short summary is

@@ -117,13 +117,13 @@ with sync_playwright() as p:
     reqs = []
     ctx, page = open_page(browser, url)
     page.on("request", lambda r: reqs.append(r.url) if "/api/" in r.url else None)
-    expect("rules are working on all 2 devices" in page.inner_text("#liveTitle"), "headline says the rules are working: %r" % page.inner_text("#liveTitle"))
+    expect("rules are working on both devices" in page.inner_text("#liveTitle"), "headline says the rules are working: %r" % page.inner_text("#liveTitle"))
     expect("Apps blocked for children: 2" in page.inner_text("#liveSub"), "and how many apps are blocked: %r" % page.inner_text("#liveSub"))
     names = page.locator(".node-dev .node-name").all_inner_texts()
     expect(names == ["Sara's iPad", "Ali's phone", "Everyone else"], "two children and the rest of the home are drawn: %s" % names)
     expect(page.locator("path.wire-base").count() == 6, "six wires exist (3 device slots, rest of home, box to internet, the direct line)")
     states = page.locator(".node-dev .node-state-text").all_inner_texts()
-    expect(states[0] == "Online now" and states[1] == "Not active", "Sara's iPad is online and Ali's phone idle: %s" % states)
+    expect(states[0] == "Online now" and states[1] == "Quiet", "Sara's iPad is online and Ali's phone idle: %s" % states)
 
     time.sleep(5)
     want_total = sum(1 for q in store.query_log if q["time"] >= time.time() - 86400)
@@ -352,7 +352,151 @@ with sync_playwright() as p:
     states = page.locator(".node-dev .node-state-text").all_inner_texts()
     expect(states[:2] == ["Rules set", "Rules set"], "without device activity the nodes say 'Rules set': %s" % states)
     expect("not seen" not in page.inner_text("#stage").lower() and "need a look" not in page.inner_text("#liveTitle"), "and nothing claims a device was not seen")
-    expect("rules are set for all 2 devices" in page.inner_text("#liveTitle"), "the headline says the rules are set: %r" % page.inner_text("#liveTitle"))
+    expect("rules are set for both devices" in page.inner_text("#liveTitle"), "the headline says the rules are set: %r" % page.inner_text("#liveTitle"))
+    ctx.close()
+
+
+    # ------------------------------------------------------------------ H: labels tell the truth (reasons, not guesses)
+    url, store = make_site(live=False, blocked=("youtube",))
+    ctx, page = open_page(browser, url)
+    time.sleep(4.5)
+    store.add_query("hidden", "FORWARDED", KID1, "Sara-iPad")                      # one odd row must not switch the names off for good
+    store.add_query("logs.netflix.com", "GRAVITY", KID1, "Sara-iPad")                # an ad list stops a tracker on an ALLOWED app's domain
+    store.add_query("pixel.facebook.com", "GRAVITY", KID1, "Sara-iPad")
+    store.add_query("www.youtube.com", "GRAVITY", KID1, "Sara-iPad")                 # YouTube really is blocked
+    store.add_query("www.youtube.com", "GRAVITY", KID1, "Sara-iPad", when=time.time() + 3600)   # a row from the future (the box clock stepped back)
+    time.sleep(6)
+    page.click("#liveRecentTitle")
+    recent = page.locator("#liveRecentList .recent-item").all_inner_texts()
+    expect(any("Stopped YouTube" in r for r in recent), "a stop is credited to YouTube, which is blocked: %s" % recent)
+    expect(any("Stopped An unwanted site" in r and "\u00d72" in r for r in recent), "trackers on Netflix and Facebook (allowed) are 'an unwanted site': %s" % recent)
+    expect(not any("Stopped Netflix" in r or "Stopped Facebook" in r for r in recent), "never 'Stopped Netflix' while Netflix is allowed")
+    expect("privacy" not in page.inner_text("#liveRecentList").lower(), "one row with a hidden name does not switch the list to the privacy note")
+    store.add_query("www.youtube.com", "GRAVITY", KID1, "Sara-iPad")
+    pk = wait_until(lambda: [k for k in packets(page) if "is-blocked" in k["cls"]], 9)
+    expect(bool(pk), "a row stamped in the future does not freeze the picture: later queries still arrive")
+    # bedtime / internet off: everything is stopped, and that is the reason shown
+    apiw = pb.Api(url.rstrip("/"), password=mock_pihole.PASSWORD)
+    apiw.login()
+    apiw.put_group("pb-offline", "", True)
+    apiw.logout()
+    page.reload()
+    page.locator("#live:not([hidden])").wait_for()
+    time.sleep(4.5)
+    store.add_query("time.android.com", "REGEX", KID1, "Sara-iPad")
+    time.sleep(6)
+    page.click("#liveRecentTitle") if not page.evaluate("() => document.getElementById('liveRecent').open") else None
+    recent = page.locator("#liveRecentList .recent-item").all_inner_texts()
+    expect(any(r.startswith("Internet off") and "Sara's iPad" in r for r in recent), "while the internet is off, a stop says so (not 'an unwanted site'): %s" % recent)
+    expect("Internet is off for children" in page.inner_text("#liveTitle"), "and the headline says it: %r" % page.inner_text("#liveTitle"))
+    ctx.close()
+
+    # ------------------------------------------------------------------ I: Pi-hole's blocking is switched off
+    url, store = make_site(live=False)
+    store.blocking = "disabled"
+    ctx, page = open_page(browser, url)
+    time.sleep(1.5)
+    expect("Blocking is switched off" in page.inner_text("#liveTitle"), "a green headline is never shown while blocking is off: %r" % page.inner_text("#liveTitle"))
+    expect(page.locator(".live-icon.tone-warn").count() == 1 and "Advanced settings" in page.inner_text("#liveSub"), "it is amber and says where to fix it")
+    expect("blocking is off" in page.inner_text("#boxSub"), "and the box says so too: %r" % page.inner_text("#boxSub"))
+    store.blocking = "enabled"
+    time.sleep(17)
+    expect("rules are working" in page.inner_text("#liveTitle"), "it recovers by itself: %r" % page.inner_text("#liveTitle"))
+    ctx.close()
+
+    # ------------------------------------------------------------------ J: quiet for hours is not "working"
+    url, store = make_site(live=False)
+    store.devices[1]["lastQuery"] = int(time.time()) - 20 * 3600
+    ctx, page = open_page(browser, url)
+    expect("set for both devices" in page.inner_text("#liveTitle"), "one device silent for 20 hours: the headline only says the rules are set: %r" % page.inner_text("#liveTitle"))
+    page.locator(".node-dev").nth(1).click()
+    expect("cannot apply" in page.inner_text("#liveCaption"), "and its explanation does not claim it is connected: %r" % page.inner_text("#liveCaption"))
+    expect(page.inner_text("#liveSay").strip() != "", "a tapped explanation is also announced to screen readers")
+    ctx.close()
+
+    # ------------------------------------------------------------------ K: four children: "online" belongs to one device, not to the folded node
+    url, store = make_site(live=False)
+    apik = pb.Api(url.rstrip("/"), password=mock_pihole.PASSWORD)
+    apik.login()
+    gid = {g["name"]: g["id"] for g in apik.groups()}
+    for mac, name in (("AA:BB:CC:00:00:03", "Noor"), ("AA:BB:CC:00:00:04", "Omar")):
+        apik.request("POST", "/api/clients", {"client": mac, "comment": name, "groups": pb.kid_groups(gid, CATALOG)})
+    apik.logout()
+    store.devices.append({"id": 10, "hwaddr": "aa:bb:cc:00:00:03", "macVendor": "", "lastQuery": int(time.time()) - 3 * 86400, "numQueries": 5, "ips": [{"ip": "192.168.1.23", "name": "noor"}]})
+    store.devices.append({"id": 11, "hwaddr": "aa:bb:cc:00:00:04", "macVendor": "", "lastQuery": int(time.time()) - 20, "numQueries": 5, "ips": [{"ip": "192.168.1.24", "name": "omar"}]})
+    ctx, page = open_page(browser, url)
+    time.sleep(4.5)
+    names = page.locator(".node-dev .node-name").all_inner_texts()
+    expect(names == ["Sara's iPad", "Ali's phone", "2 more", "Everyone else"], "four children: two nodes and '2 more': %s" % names)
+    expect("Noor is not using the box" in page.inner_text("#liveTitle"), "the one that has not been seen is named: %r" % page.inner_text("#liveTitle"))
+    store.add_query("www.apple.com", "FORWARDED", "192.168.1.24", "omar")           # Omar is online; Noor is not
+    time.sleep(6)
+    expect("Noor is not using the box" in page.inner_text("#liveTitle"), "another device's traffic does not hide Noor's warning: %r" % page.inner_text("#liveTitle"))
+    expect(page.locator(".node-dev").nth(2).inner_text().count("Not seen in 24 hours") == 1, "the folded node still shows the worst state")
+    shot(page, "live-four.png")
+    ctx.close()
+
+    # ------------------------------------------------------------------ L: privacy level 1 and the detail sheet
+    url, store = make_site(live=False, privacy=1)
+    ctx, page = open_page(browser, url)
+    page.click("[data-act=detail]")
+    page.locator("#liveSheet[open]").wait_for()
+    page.locator(".hours .hour").first.wait_for()
+    time.sleep(0.5)
+    top = page.inner_text("#detailTop")
+    expect("Nothing has been stopped yet" not in top and "privacy" in top.lower(), "at privacy level 1 the sheet says why there is no list, not 'nothing stopped': %r" % top)
+    ctx.close()
+
+    # ------------------------------------------------------------------ M: sign out and in again: a clean stage, no ghosts
+    url, store = make_site(live=False)
+    ctx, page = open_page(browser, url)
+    time.sleep(2)
+    page.click(".topbar [data-act=logout]")
+    page.locator("#login:not([hidden])").wait_for()
+    errors_before = len(errors)
+    page.fill("#pw", "test")
+    page.press("#pw", "Enter")
+    page.wait_for_selector(".tile")
+    page.locator("#live:not([hidden])").wait_for()
+    time.sleep(1.5)
+    expect(page.locator("g.wire").count() == 6 and page.locator(".pk").count() == 8, "after signing out and in there is one set of wires and packets (%d wires, %d packets)" % (page.locator("g.wire").count(), page.locator(".pk").count()))
+    expect(len(errors) == errors_before, "and no errors from the old stage's timers")
+    ctx.close()
+
+    # ------------------------------------------------------------------ N: keyboard and touch in the tour, folding
+    url, store = make_site(live=False)
+    ctx, page = open_page(browser, url)
+    page.click("[data-act=tour]")
+    page.locator("#liveTour:not([hidden])").wait_for()
+    page.click("#tourNext")
+    page.focus("#tourBack")
+    page.keyboard.press("Enter")
+    expect("Step 1 of 5" in page.inner_text("#tourCount"), "Back returns to step 1")
+    expect(page.evaluate("() => document.activeElement && document.activeElement.id") == "tourNext", "and focus moves to Next instead of falling to the page")
+    page.dblclick("#tourNext")
+    time.sleep(0.3)
+    expect("Step 3 of 5" in page.inner_text("#tourCount"), "a double tap on Next goes two steps forward: %r" % page.inner_text("#tourCount"))
+    page.locator(".node-box").click()
+    expect("family box is a small computer" in page.inner_text("#liveCaption"), "tapping a node during the tour explains it: %r" % page.inner_text("#liveCaption"))
+    page.click("#tourEnd")
+    page.click("#liveToggle")
+    expect(page.locator("#livePill").is_hidden(), "a folded card shows no 'live' pill")
+    page.click("[data-act=stat][data-which=checked]")
+    expect(page.locator("#stage").is_visible() and "asked the box" in page.inner_text("#liveCaption"), "tapping a number while folded opens the card and explains it")
+    ctx.close()
+
+    # ------------------------------------------------------------------ O: the feed stops: the pill and the screen-reader line say so
+    url, store = make_site(live=False)
+    ctx, page = open_page(browser, url)
+    time.sleep(1)
+    page.route("**/api/queries*", lambda route: route.abort())
+    got = wait_until(lambda: "Not updating" in page.inner_text("#livePillText"), 30)
+    expect(bool(got), "when the query log cannot be read the pill says 'Not updating'")
+    expect("Not updating" in page.inner_text("#liveAria"), "and so does the screen-reader line: %r" % page.inner_text("#liveAria"))
+    page.unroute("**/api/queries*")
+    got = wait_until(lambda: "Live" in page.inner_text("#livePillText"), 45)
+    expect(bool(got), "it recovers by itself")
+    errors[:] = [e for e in errors if "ERR_FAILED" not in e]            # the requests this scenario aborted on purpose
     ctx.close()
 
     # no children yet

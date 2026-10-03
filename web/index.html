@@ -86,11 +86,13 @@
           <h2 id="liveTitle"></h2>
           <p class="live-sub" id="liveSub"></p>
         </div>
-        <button type="button" class="icon-btn live-toggle" id="liveToggle" data-act="liveToggle" aria-expanded="true" aria-controls="stage">
-          <svg aria-hidden="true"><use href="#i-chevron"/></svg><span class="sr-only" id="liveToggleText"></span>
+      </div>
+      <div class="live-pillrow">
+        <span class="live-pill" id="livePill"><i class="dot"></i><span id="livePillText"></span></span>
+        <button type="button" class="live-toggle" id="liveToggle" data-act="liveToggle" aria-expanded="true" aria-controls="stage">
+          <span class="live-toggle-text" id="liveToggleText"></span><svg aria-hidden="true"><use href="#i-chevron"/></svg>
         </button>
       </div>
-      <div class="live-pillrow"><span class="live-pill" id="livePill"><i class="dot"></i><span id="livePillText"></span></span></div>
 
       <div class="stage" id="stage">
         <i class="rail-end rail-a" data-node="rail-a" aria-hidden="true"></i><i class="rail-end rail-b" data-node="rail-b" aria-hidden="true"></i>
@@ -110,7 +112,7 @@
       <p class="live-caption" id="liveCaption"></p>
       <div class="live-tour" id="liveTour" hidden>
         <p class="live-tour-count" id="tourCount"></p>
-        <div class="live-tour-step" id="tourStep"></div>
+        <div class="live-tour-step" id="tourStep" aria-live="polite"></div>
         <div class="live-tour-btns">
           <button type="button" class="btn" data-act="tourBack" id="tourBack"></button>
           <button type="button" class="btn btn-primary" data-act="tourNext" id="tourNext"></button>
@@ -131,6 +133,7 @@
         <ul id="liveRecentList"></ul>
       </details>
       <p class="sr-only" id="liveAria" role="status"></p>
+      <p class="sr-only" id="liveSay" role="status"></p>
 
       <div class="live-actions">
         <button type="button" class="btn btn-primary" data-act="tour" id="tourBtn"></button>

@@ -87,6 +87,7 @@ class MockStatsTests(unittest.TestCase):
         rows = self.get("/api/queries")["queries"]
         self.assertEqual({r["domain"] for r in rows}, {"hidden"})
         self.assertNotEqual(rows[0]["client"]["ip"], "0.0.0.0")
+        self.assertEqual(self.get("/api/stats/top_domains")["total_queries"], -1, "FTL hides the top lists from level 1 up")
         self.store.privacy = 2
         self.assertEqual({r["client"]["ip"] for r in self.get("/api/queries")["queries"]}, {"0.0.0.0"})
         self.assertEqual(self.get("/api/stats/top_domains")["domains"], [])
