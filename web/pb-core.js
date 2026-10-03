@@ -233,6 +233,8 @@
   /**
    * What the picture shows for one child's device, in this order of importance:
    *   overridden  another Pi-hole rule overrides this child's rules (NOT protected)
+   *   unknown     the box cannot tell when devices were last online (privacy setting, or the device list failed): "rules set",
+   *               never "not seen" (a guess that would worry a parent for nothing). Pause and internet-off are still known.
    *   unreachable it has not asked the box anything for 24 h, or the box has never seen it (probably not using the box)
    *   offline     the internet is switched off (the big button, bedtime or an offline break)
    *   paused      this device was paused
@@ -242,6 +244,7 @@
    */
   function deviceState(d) {
     if (d.shadowed) return 'overridden';
+    if (d.unknown) return d.offline ? 'offline' : d.paused ? 'paused' : d.recent ? 'active' : 'unknown';
     if (!d.lastQuery || d.serverNow - d.lastQuery > 24 * 3600) return d.recent ? 'active' : 'unreachable';
     if (d.offline) return 'offline';
     if (d.paused) return 'paused';

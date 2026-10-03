@@ -266,4 +266,10 @@ test('deviceState: protection problems outrank everything, then what the box is 
   assert.equal(st({ lastQuery: 0 }), 'unreachable', 'never seen');
   assert.equal(st({ lastQuery: 0, recent: true }), 'active', 'but a query we just watched proves it reaches the box');
   assert.equal(st({ lastQuery: undefined }), 'unreachable');
+  // the box cannot tell (privacy level, or the device list failed): never claim "not seen"
+  assert.equal(st({ unknown: true, lastQuery: 0 }), 'unknown');
+  assert.equal(st({ unknown: true, lastQuery: 0, recent: true }), 'active', 'a query we watched is still proof');
+  assert.equal(st({ unknown: true, lastQuery: 0, paused: true }), 'paused', 'what the page itself set is still known');
+  assert.equal(st({ unknown: true, lastQuery: 0, offline: true }), 'offline');
+  assert.equal(st({ unknown: true, lastQuery: 0, shadowed: true }), 'overridden', 'and a rule that overrides is still the worst news');
 });

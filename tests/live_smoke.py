@@ -208,7 +208,8 @@ with sync_playwright() as p:
     store.query_log[-1]["status"] = "FORWARDED"          # the in-progress query finishes
     time.sleep(5)
     recent = page.locator("#liveRecentList .recent-item").all_inner_texts()
-    expect(any("Allowed TikTok" in r and "Ali's phone" in r for r in recent), "it shows up once, when it is final: %s" % recent)
+    expect(any("Allowed TikTok" in r for r in recent), "it shows up once, when it is final: %s" % recent)
+    expect(not any("Allowed" in r and "Ali's phone" in r for r in recent), "a device is named for stops only, never for allowed lookups: %s" % recent)
     expect(number(page.inner_text("#statChecked")) == base + 5, "and is counted once")
 
     # tour: examples never change a number
@@ -342,6 +343,16 @@ with sync_playwright() as p:
     shot(page, "live-warn.png")
     page.locator(".node-dev.st-overridden").first.click()
     expect("overrides" in page.inner_text("#liveCaption"), "tapping it explains why in plain words: %r" % page.inner_text("#liveCaption"))
+    ctx.close()
+
+    # the box cannot tell when devices were online (privacy level, or the device list failed): say "rules set", never "not seen"
+    url, store = make_site(live=False)
+    store.devices = []
+    ctx, page = open_page(browser, url)
+    states = page.locator(".node-dev .node-state-text").all_inner_texts()
+    expect(states[:2] == ["Rules set", "Rules set"], "without device activity the nodes say 'Rules set': %s" % states)
+    expect("not seen" not in page.inner_text("#stage").lower() and "need a look" not in page.inner_text("#liveTitle"), "and nothing claims a device was not seen")
+    expect("rules are set for all 2 devices" in page.inner_text("#liveTitle"), "the headline says the rules are set: %r" % page.inner_text("#liveTitle"))
     ctx.close()
 
     # no children yet

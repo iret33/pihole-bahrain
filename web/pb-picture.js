@@ -44,7 +44,8 @@
   var lastAria = '';
   var detailOpen = false, detail = null;
 
-  var SLOT_MAX = 3;            // kids drawn as their own node (more are folded into "+N")
+  var SLOT_MAX = 3;
+  function privacyHides() { return clientsHidden || queriesHidden; }       // privacy level 2+: who asked what is not known            // kids drawn as their own node (more are folded into "+N")
 
   function $(id) { return doc.getElementById(id); }
   function t(key, vars) { return env.t(key, vars); }
@@ -82,7 +83,8 @@
     if (ev.hiddenDomain) return { text: t('lvWebsite'), badge: '', color: '' };
     var app = ev.app && appInfo(ev.app);
     if (app) return { text: app.name, badge: app.mono, color: app.color };
-    return { text: t('lvWebsite'), badge: '', color: '' };
+    // never a host name: a stopped site of no known app is "an unwanted site" (this also keeps adult domains off the screen)
+    return { text: t(ev.kind === 'blocked' ? 'lvUnwanted' : 'lvWebsite'), badge: '', color: '' };
   }
 
   // ------------------------------------------------------------------ the device row
@@ -107,9 +109,10 @@
   function stateOf(k) {
     var recentIp = false, i;
     for (i = 0; i < k.ips.length; i++) if (ipSlot[k.ips[i]] && lastSeen[ipSlot[k.ips[i]]] && now() - lastSeen[ipSlot[k.ips[i]]] < 300000) recentIp = true;
-    return C.deviceState({ shadowed: k.shadowed, lastQuery: k.lastQuery, serverNow: m.serverNow, recent: recentIp, offline: m.offline, paused: k.paused });
+    return C.deviceState({ shadowed: k.shadowed, lastQuery: k.lastQuery, serverNow: m.serverNow, recent: recentIp, offline: m.offline, paused: k.paused,
+      unknown: !m.activityKnown || (privacyHides() && !k.lastQuery) });
   }
-  var WORST = ['overridden', 'unreachable', 'offline', 'paused', 'quiet', 'active'];
+  var WORST = ['overridden', 'unreachable', 'offline', 'paused', 'unknown', 'quiet', 'active'];
   function worst(states) {
     var best = 'active', i;
     for (i = 0; i < states.length; i++) if (WORST.indexOf(states[i]) < WORST.indexOf(best)) best = states[i];
@@ -119,7 +122,7 @@
     if (s.kind === 'rest' || s.kind === 'add' || s.kind === 'example') return null;
     return worst(s.kids.map(function (k) { return kidState[k.key]; }));
   }
-  var STATE_TEXT = { active: 'lvActive', quiet: 'lvQuiet', paused: 'lvPaused', offline: 'lvOffline', overridden: 'lvOverridden', unreachable: 'lvUnreachable' };
+  var STATE_TEXT = { active: 'lvActive', unknown: 'lvUnknown', quiet: 'lvQuiet', paused: 'lvPaused', offline: 'lvOffline', overridden: 'lvOverridden', unreachable: 'lvUnreachable' };
 
   function renderSlots() {
     var host = el.devices, key = '', i, s, b;
@@ -218,7 +221,7 @@
       return { tone: 'warn', title: t('lvCheckMany', { n: bad.length }), sub: t('lvCheckManySub') };
     }
     if (m.offline) return { tone: 'off', title: t('lvOff'), sub: t('lvOffSub') };
-    if (kids.every(function (k) { return kidState[k.key] === 'quiet'; })) return {   // reachable in the last 24 h, but nobody is using the internet now
+    if (kids.every(function (k) { return kidState[k.key] === 'quiet' || kidState[k.key] === 'unknown'; })) return {   // nobody is using the internet now, or the box cannot tell
       tone: 'good', title: kids.length === 1 ? t('lvSetOne', { n: kidName(kids[0]) }) : t('lvSetAll', { n: kids.length }),
       sub: apps ? t('lvBlockedApps', { n: apps }) : t('lvNoBlockedApps') };
     if (kids.every(function (k) { return k.paused; })) return { tone: 'off', title: kids.length === 1 ? t('lvPausedOne', { n: kidName(kids[0]) }) : t('lvPausedAll'), sub: t('lvPausedSub') };
@@ -324,11 +327,11 @@
   }
 
   // ------------------------------------------------------------------ recent events (text twin of the animation)
-  function pushRecent(ev, label, who) {
+  function pushRecent(ev, label, who, at) {
     var kind = ev.kind === 'blocked' ? 'stop' : 'go';
     var key = kind + '|' + label + '|' + who, top = recent[0];
-    if (top && top.key === key) { top.n++; top.at = now(); }
-    else { recent.unshift({ key: key, kind: kind, label: label, who: who, at: now(), n: 1 }); if (recent.length > 5) recent.pop(); }
+    if (top && top.key === key) { top.n++; top.at = Math.max(top.at, at); }
+    else { recent.unshift({ key: key, kind: kind, label: label, who: who, at: at, n: 1 }); if (recent.length > 5) recent.pop(); }
   }
   function ago(ms) {
     var s = Math.max(0, Math.round((now() - ms) / 1000));
@@ -386,7 +389,7 @@
   function animate(ev) {
     var slotId = ev.slot, w = wireOf(slotId), lab = labelFor(ev), who = whoFor(slotId), route, tone;
     if (!stage.wires[w] || !stage.wires[w].geom) return;
-    var spoken = (who ? who + ' · ' : '') + lab.text;
+    var spoken = (ev.kind === 'blocked' && who ? who + ' · ' : '') + lab.text;      // a device is named for a stop only, never for an allowed lookup
     busy(w, 5000);
     if (ev.kind === 'blocked') {
       tone = 'is-blocked';
@@ -460,6 +463,10 @@
     }, function (e) { failing++; renderHead(); throw e; });
   }
 
+  function serverAge(ev) {                                  // seconds since the event, by the BOX's clock
+    var n = env.serverNow ? env.serverNow() : 0;
+    return n && ev.time ? Math.max(0, n - ev.time) : 0;
+  }
   function pollQueries() {
     if (collapsed) return Promise.resolve();                 // the picture is closed: only the totals are kept up to date
     return env.call('GET', feed.url()).then(function (j) {
@@ -478,9 +485,9 @@
         lastSeen[ev.slot] = now();
         delta.total++; if (ev.kind === 'blocked') delta.blocked++;
         minute.push({ at: now(), blocked: ev.kind === 'blocked' });
-        var lab = labelFor(ev);
-        if (ev.kind === 'blocked' || ev.app) pushRecent(ev, lab.text, whoFor(ev.slot));
-        fresh.push(ev);
+        var lab = labelFor(ev), late = serverAge(ev);                         // a gap (tab was hidden): old events are listed, not replayed
+        if (ev.kind === 'blocked' || ev.app) pushRecent(ev, lab.text, ev.kind === 'blocked' ? whoFor(ev.slot) : '', now() - late * 1000);
+        if (late <= 20) fresh.push(ev);
       }
       if (fresh.length) {
         if (!tour.on && active()) { pacer.push(fresh); schedulePump(); }

@@ -25,7 +25,7 @@
       appName: 'Family Internet', loginHint: 'Sign in with the parent password chosen during setup.', password: 'Password',
       totp: '6-digit code from your authenticator app', signIn: 'Sign in', signOut: 'Sign out',
       wrongPassword: 'That password is not right. Try again.', wrongTotp: 'Enter the password and the 6-digit code.',
-      noConnection: 'Cannot reach the Family Internet box. Check that it is switched on and connected.',
+      noConnection: 'Cannot reach the family box. Check that it is switched on and connected.',
       tooMany: 'Too many open sessions. Sign out on another device or wait 30 minutes.',
       modes: 'Quick modes', homework: 'Homework', homeworkDesc: 'Games, video and social media blocked',
       freeTime: 'Free time', freeTimeDesc: 'Everything allowed for a while',
@@ -77,7 +77,7 @@
       appName: 'إنترنت العائلة', loginHint: 'سجّل الدخول بكلمة مرور الوالدين التي اخترتها أثناء الإعداد.', password: 'كلمة المرور',
       totp: 'الرمز المكوّن من 6 أرقام من تطبيق المصادقة', signIn: 'تسجيل الدخول', signOut: 'تسجيل الخروج',
       wrongPassword: 'كلمة المرور غير صحيحة. حاول مرة أخرى.', wrongTotp: 'أدخل كلمة المرور والرمز المكوّن من 6 أرقام.',
-      noConnection: 'تعذّر الوصول إلى جهاز إنترنت العائلة. تأكد أنه يعمل ومتصل بالشبكة.',
+      noConnection: 'تعذّر الوصول إلى صندوق العائلة. تأكد أنه يعمل ومتصل بالشبكة.',
       tooMany: 'عدد الجلسات المفتوحة كبير. سجّل الخروج من جهاز آخر أو انتظر 30 دقيقة.',
       modes: 'أوضاع سريعة', homework: 'وقت الدراسة', homeworkDesc: 'حظر الألعاب والفيديو ومواقع التواصل',
       freeTime: 'وقت حر', freeTimeDesc: 'السماح بكل شيء لفترة محددة',
@@ -131,7 +131,7 @@
   var LIVE_STR = {
     en: {
       lvWebsite: 'A website', lvDevice: 'Device', lvActive: 'Online now', lvQuiet: 'Not active', lvPaused: 'Paused', lvOffline: 'Internet off',
-      lvOverridden: 'Rules may not apply', lvUnreachable: 'Not seen in 24 hours', lvMore: '{n} more', lvAddDevice: 'Add a device', lvAddHint: 'Tap to start',
+      lvOverridden: 'Rules may not apply', lvUnreachable: 'Not seen in 24 hours', lvUnknown: 'Rules set', lvUnwanted: 'An unwanted site', lvMore: '{n} more', lvAddDevice: 'Add a device', lvAddHint: 'Tap to start',
       lvAllHome: 'Whole home', lvAllHomeSt: 'Names are hidden', lvRest: 'Everyone else', lvRestSt: 'Basic filtering',
       lvNoKids: 'No children’s devices yet', lvNoKidsSub: 'Add a phone or tablet so the rules apply to it. Below, you can still watch the whole home.',
       lvFree: 'Free time is on', lvFreeSub: 'Apps are open until the timer ends. The safety lists stay on.',
@@ -150,7 +150,7 @@
       lvBoxOff: 'On duty · internet off for children', lvBoxBlocking: 'On duty · apps blocked: {n}', lvBoxOpen: 'On duty · nothing blocked',
       lvSayNo: 'No · {a}', lvSayYes: 'Yes · {a}', lvSayNoEx: 'Example · No', lvSayYesEx: 'Example · Yes',
       lvChecked: 'Checked', lvStopped: 'Stopped', lvShare: 'Share stopped', lvScope: 'Whole home · last 24 hours',
-      lvNote: 'Works on your home Wi‑Fi only. A phone on mobile data or a VPN skips the box.',
+      lvNote: 'Works on your home Wi‑Fi only. A phone on mobile data or a VPN skips the box. The picture shows a few of the checks, a few seconds late; every check is counted.',
       lvPrivacy: 'Live activity is hidden by a privacy setting. You still see the totals.',
       lvRecentTitle: 'What just happened', lvTour: 'Show me how it works', lvDetail: 'More detail',
       lvBack: 'Back', lvNext: 'Next', lvDone: 'Done', lvEndTour: 'Close', lvStep: 'Step {i} of {n}',
@@ -161,11 +161,12 @@
       lvExRest: 'Everyone else at home: your phone, the TV, the computer. They use the box too, with basic filtering only (ads and unsafe sites).',
       lvExAllHome: 'Your privacy setting hides which device asked, so all activity is drawn together.',
       lvExMore: '{n} more devices. See them all under “Children’s devices” below.',
+      lvEx_unknown: 'The rules are set for {n}. The box cannot tell when it was last online.',
       lvEx_active: '{n} used the internet in the last few minutes. The rules apply.',
       lvEx_quiet: '{n} is connected to the box but not using the internet right now. The rules apply.',
-      lvEx_paused: '{n} is paused. Every request is stopped until you resume it.',
+      lvEx_paused: '{n} is paused. Everything it asks for is stopped until you resume it.',
       lvEx_offline: 'The internet is off for children, so {n} cannot open anything.',
-      lvEx_overridden: 'Another rule on the box overrides the rules for {n}, so it may not be protected. See the device below to fix it.',
+      lvEx_overridden: 'Another rule on the box overrides the rules for {n}, so it may not follow the rules. See the device below to fix it.',
       lvEx_unreachable: '{n} has not asked the box anything in 24 hours. It may be on mobile data, a VPN or another Wi‑Fi, where the rules cannot work.',
       lvExChecked: 'Every time a phone, tablet, TV or computer at home asked the box where to find an app or website, over the last 24 hours. Your own devices count too.',
       lvExStopped: 'How many of those were stopped: blocked apps, bedtime, paused devices, and ads or unsafe sites from the box’s block lists.',
@@ -175,7 +176,7 @@
       lvNow: 'just now', lvSecs: '{n} s ago', lvMins: '{n} min ago',
       lvAria: 'In the last minute: {c} checked, {b} stopped.', lvExampleApp: 'Example',
       lvTour1: 'Every phone and tablet at home asks the family box first, before any app or website opens.',
-      lvTour2: 'The box checks your rules: the apps you blocked, bedtime, and a long list of unsafe places. Here is a request on its way.',
+      lvTour2: 'The box checks your rules: the apps you blocked, bedtime, and a long list of unsafe places. Here is one on its way.',
       lvTour3: 'If it is allowed, the box shows the way and the app opens straight from the device.',
       lvTour4: 'If it is blocked, the app reaches a dead end and cannot open.',
       lvTour5: 'The box only sees the names of places, never your messages, photos or videos. It works on your home Wi‑Fi only.',
@@ -202,7 +203,7 @@
     },
     ar: {
       lvWebsite: 'موقع', lvDevice: 'جهاز', lvActive: 'متصل الآن', lvQuiet: 'غير نشط', lvPaused: 'متوقف مؤقتًا', lvOffline: 'الإنترنت متوقف',
-      lvOverridden: 'قد لا تُطبَّق القواعد', lvUnreachable: 'لم يتصل منذ 24 ساعة', lvMore: 'أجهزة أخرى: {n}', lvAddDevice: 'إضافة جهاز', lvAddHint: 'اضغط للبدء',
+      lvOverridden: 'قد لا تُطبَّق القواعد', lvUnreachable: 'لم يتصل منذ 24 ساعة', lvUnknown: 'القواعد مضبوطة', lvUnwanted: 'موقع غير مرغوب', lvMore: 'أجهزة أخرى: {n}', lvAddDevice: 'إضافة جهاز', lvAddHint: 'اضغط للبدء',
       lvAllHome: 'كل البيت', lvAllHomeSt: 'الأسماء مخفية', lvRest: 'باقي البيت', lvRestSt: 'تصفية أساسية',
       lvNoKids: 'لا توجد أجهزة أطفال بعد', lvNoKidsSub: 'أضف هاتفًا أو جهازًا لوحيًا لتُطبَّق عليه القواعد. يمكنك في الأسفل متابعة كل البيت.',
       lvFree: 'الوقت الحر مفعّل', lvFreeSub: 'التطبيقات مفتوحة حتى ينتهي المؤقت، وتبقى قوائم الأمان فعّالة.',
@@ -221,7 +222,7 @@
       lvBoxOff: 'يعمل · الإنترنت متوقف عن الأطفال', lvBoxBlocking: 'يعمل · التطبيقات المحظورة: {n}', lvBoxOpen: 'يعمل · لا شيء محظور',
       lvSayNo: 'لا · {a}', lvSayYes: 'نعم · {a}', lvSayNoEx: 'مثال · لا', lvSayYesEx: 'مثال · نعم',
       lvChecked: 'تم فحصه', lvStopped: 'تم إيقافه', lvShare: 'نسبة المحظور', lvScope: 'كل البيت · آخر 24 ساعة',
-      lvNote: 'يعمل على شبكة Wi‑Fi المنزل فقط. الهاتف الذي يستخدم بيانات الجوال أو VPN لا يمرّ عبر الصندوق.',
+      lvNote: 'يعمل على شبكة Wi‑Fi المنزل فقط. الهاتف الذي يستخدم بيانات الجوال أو VPN لا يمرّ عبر الصندوق. يعرض الرسم بعض عمليات الفحص بتأخر بضع ثوانٍ، وكلها تُحسب.',
       lvPrivacy: 'النشاط المباشر مخفي بسبب إعداد الخصوصية. ما زلت ترى الأرقام الإجمالية.',
       lvRecentTitle: 'ما حدث للتو', lvTour: 'اشرح لي كيف يعمل', lvDetail: 'تفاصيل أكثر',
       lvBack: 'السابق', lvNext: 'التالي', lvDone: 'تم', lvEndTour: 'إغلاق', lvStep: 'الخطوة {i} من {n}',
@@ -232,11 +233,12 @@
       lvExRest: 'باقي من في البيت: هاتفك والتلفزيون والحاسوب. يستخدمون الصندوق أيضًا، مع تصفية أساسية فقط للإعلانات والمواقع غير الآمنة.',
       lvExAllHome: 'إعداد الخصوصية يخفي أي جهاز سأل، لذلك يُرسم كل النشاط معًا.',
       lvExMore: 'أجهزة أخرى: {n}. شاهدها كلها تحت «أجهزة الأطفال» في الأسفل.',
+      lvEx_unknown: 'القواعد مضبوطة على {n}. لا يستطيع الصندوق معرفة آخر وقت اتصل فيه.',
       lvEx_active: 'استخدم {n} الإنترنت خلال الدقائق الماضية. القواعد مطبّقة.',
       lvEx_quiet: '{n} متصل بصندوق العائلة لكنه لا يستخدم الإنترنت الآن. القواعد مطبّقة.',
       lvEx_paused: '{n} متوقف مؤقتًا. يُمنع كل شيء حتى تستأنفه.',
       lvEx_offline: 'الإنترنت متوقف عن الأطفال، لذلك لا يستطيع {n} فتح أي شيء.',
-      lvEx_overridden: 'توجد قاعدة أخرى في الصندوق تتجاوز قواعد {n}، لذلك قد لا يكون محميًا. راجع الجهاز في الأسفل لمعرفة الحل.',
+      lvEx_overridden: 'توجد قاعدة أخرى في الصندوق تتجاوز قواعد {n}، لذلك قد لا يلتزم بالقواعد. راجع الجهاز في الأسفل لمعرفة الحل.',
       lvEx_unreachable: 'لم يسأل {n} صندوق العائلة عن شيء منذ 24 ساعة. ربما يستخدم بيانات الجوال أو VPN أو شبكة Wi‑Fi أخرى، حيث لا تعمل القواعد.',
       lvExChecked: 'كل مرة سأل فيها هاتف أو جهاز لوحي أو تلفزيون أو حاسوب في البيت صندوق العائلة عن مكان تطبيق أو موقع، خلال آخر 24 ساعة. وتُحسب أجهزتك أيضًا.',
       lvExStopped: 'كم منها تم إيقافه: التطبيقات المحظورة ووقت النوم والأجهزة المتوقفة مؤقتًا، والإعلانات والمواقع غير الآمنة الموجودة في قوائم الحظر.',
@@ -848,6 +850,8 @@
     catalog.services.forEach(function (s) { apps[s.id] = { name: svcName(s), mono: monogram(s.name), color: s.color || '#667' }; });
     return {
       lang: lang, dir: lang === 'ar' ? 'rtl' : 'ltr', locale: locale(), serverNow: serverNowSec(),
+      // Without any device activity (privacy level, failed list) "not seen in 24 hours" would be a guess: say "rules set" instead.
+      activityKnown: M.devices.some(function (d) { return d.lastQuery > 0; }),
       offline: M.offline, timer: !!M.state.timer, timerMode: M.state.timer ? M.state.timer.mode : '',
       kids: M.kids.map(function (k) {
         var ips = k.dev ? deviceIps(k.dev) : [];
@@ -863,7 +867,7 @@
     if (!picInited) {
       picInited = true;
       PBPicture.init({
-        call: call, t: t, locale: locale(), domains: domainMap || {},
+        call: call, t: t, locale: locale(), domains: domainMap || {}, serverNow: serverNowSec,
         openSheet: function () { openDialog('liveSheet'); },
         goDevices: function () {
           var d = $('devices');
