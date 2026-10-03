@@ -170,6 +170,19 @@ grep -q 'older than v6' "$WORK/v5.out" || { cat "$WORK/v5.out"; fail "no v5 mess
 [[ ! -e "$ROOT/etc/pihole/pihole.toml" ]] || fail "v6 settings written over a v5 install"
 mv "$WORK/toml.bak" "$ROOT/etc/pihole/pihole.toml"
 
+echo "--- the one-liner path: install.sh arrives on stdin, clones PB_REPO and runs itself again"
+THROW="$WORK/throwaway"; mkdir -p "$THROW"
+git -C "$REPO" ls-files -z | tar -C "$REPO" --null -T - -cf - | tar -x -C "$THROW"
+git -C "$THROW" init -q -b master && git -C "$THROW" add -A && git -C "$THROW" -c user.name=t -c user.email=t@t commit -qm test
+LOG="$ROOT/var/log/pihole-bahrain-install.log"
+rm -rf "$ROOT/opt/pihole-bahrain/src"
+PB_REPO="file://$THROW" bash <"$REPO/install.sh" >"$WORK/piped.out" 2>&1 || { cat "$WORK/piped.out"; fail "piped install.sh failed"; }
+grep -q "Starting the installer from the downloaded version" "$WORK/piped.out" || fail "the piped run did not start the downloaded installer"
+grep -q "Installing version $(cat "$REPO/VERSION") from $ROOT/opt/pihole-bahrain/src" "$WORK/piped.out" || fail "the downloaded copy was not the one installed"
+grep -q "Family Internet is ready" "$WORK/piped.out" || fail "the piped run did not finish"
+grep -q "Starting the installer from the downloaded version" "$LOG" || fail "the install log lost the start of the piped run"
+grep -q "Installing version" "$LOG" || fail "the install log lost the rest of the piped run (re-exec lost the log copy)"
+
 echo "--- a generated parent password never reaches the install log"
 set_auth() { curl -s -X POST "http://127.0.0.1:$PORT/__mock__/require_auth" -d "{\"value\": $1}" >/dev/null; }
 LOG="$ROOT/var/log/pihole-bahrain-install.log"
