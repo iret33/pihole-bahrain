@@ -239,6 +239,26 @@ with sync_playwright() as p:
     settle(page)
     expect("fd00::5" in [c["client"] for c in store.clients], "confirming adds the device")
 
+    # --- the phone's clock is wrong by two hours: timers must still follow the BOX's clock
+    skew = browser.new_page(viewport={"width": 390, "height": 844})
+    skew.clock.set_fixed_time(int(time.time()) + 2 * 3600)
+    skew.goto(args.url)
+    skew.fill("#pw", "test")
+    skew.press("#pw", "Enter")
+    skew.wait_for_selector(".tile")
+    skew.click("[data-act=timer][data-mode=free]")
+    skew.click("#timerChips .chip >> nth=1")
+    skew.click("[data-act=startTimer]")
+    skew.locator("#heroClock:not([hidden])").wait_for()
+    import json as _json
+    state = next(g for g in store.groups if g["name"] == "pb-state")
+    until = _json.loads(state["comment"])["timer"]["until"]
+    expect(abs(until - (time.time() + 3600)) < 30, "a timer started on a phone with a wrong clock ends an hour from now on the box (off by %ds)" % (until - time.time() - 3600))
+    clock = skew.inner_text("#heroClock")
+    expect(clock.startswith("59:") or clock.startswith("1:00:"), "and its countdown shows about an hour, not three (%s)" % clock)
+    skew.click("#heroBtn")
+    skew.close()
+
     dark = browser.new_page(viewport={"width": 1280, "height": 900}, color_scheme="dark")
     dark.goto(args.url)
     dark.fill("#pw", "test")

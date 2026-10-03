@@ -188,6 +188,66 @@
     return { x: a * w.p0.x + b * w.p1.x + c * w.p2.x + d * w.p3.x, y: a * w.p0.y + b * w.p1.y + c * w.p2.y + d * w.p3.y };
   }
 
+  // ------------------------------------------------------------------ the numbers
+  /**
+   * The most stopped things, by app: domains from /api/stats/top_domains?blocked=true are grouped by the app they belong to
+   * (googlevideo.com and youtube.com are both "youtube"); domains of no known app are counted together as `other`, never
+   * guessed to be "ads" and never shown as raw hostnames. Returns [{ app, count }] biggest first (`other` has app: null).
+   */
+  function topByApp(domains, map, limit) {
+    var tally = {}, other = 0, i, d, app, out = [];
+    for (i = 0; i < (domains || []).length; i++) {
+      d = domains[i];
+      if (!d || isHiddenDomain(d.domain)) continue;
+      app = appFor(d.domain, map);
+      if (app) tally[app] = (tally[app] || 0) + (d.count || 0); else other += d.count || 0;
+    }
+    Object.keys(tally).forEach(function (k) { out.push({ app: k, count: tally[k] }); });
+    out.sort(function (a, b) { return b.count - a.count; });
+    if (other) out.push({ app: null, count: other });
+    return typeof limit === 'number' ? out.slice(0, limit) : out;
+  }
+
+  /**
+   * /api/history (144 slots of 10 minutes) as 24 hourly buckets, oldest first: [{ t, total, blocked }].
+   * Buckets count back from the newest slot, so the phone's clock and time zone do not matter.
+   */
+  function hourly(history) {
+    var slots = history && history.history instanceof Array ? history.history : [];
+    var out = [], i, k, b;
+    for (i = 0; i < 24; i++) out.push({ t: 0, total: 0, blocked: 0 });
+    if (!slots.length) return out;
+    var last = slots[slots.length - 1].timestamp;
+    for (i = 0; i < slots.length; i++) {
+      k = 23 - Math.floor((last - slots[i].timestamp) / 3600);
+      if (k < 0 || k > 23) continue;
+      b = out[k];
+      if (!b.t || slots[i].timestamp < b.t) b.t = slots[i].timestamp;
+      b.total += slots[i].total || 0;
+      b.blocked += slots[i].blocked || 0;
+    }
+    return out;
+  }
+
+  // ------------------------------------------------------------------ is each child's device protected?
+  /**
+   * What the picture shows for one child's device, in this order of importance:
+   *   overridden  another Pi-hole rule overrides this child's rules (NOT protected)
+   *   unreachable it has not asked the box anything for 24 h, or the box has never seen it (probably not using the box)
+   *   offline     the internet is switched off (the big button, bedtime or an offline break)
+   *   paused      this device was paused
+   *   active      it asked something in the last 5 minutes
+   *   quiet       nothing right now
+   * `serverNow` and `lastQuery` are seconds on the BOX's clock; lastQuery 0/undefined means never.
+   */
+  function deviceState(d) {
+    if (d.shadowed) return 'overridden';
+    if (!d.lastQuery || d.serverNow - d.lastQuery > 24 * 3600) return d.recent ? 'active' : 'unreachable';
+    if (d.offline) return 'offline';
+    if (d.paused) return 'paused';
+    return d.recent || d.serverNow - d.lastQuery < 300 ? 'active' : 'quiet';
+  }
+
   // ------------------------------------------------------------------ polling
   /**
    * Runs named tasks on their own schedules: each starts right away (staggered a little), then repeats `every` ms
@@ -259,7 +319,7 @@
 
   var api = {
     classify: classify, isHiddenDomain: isHiddenDomain, isHiddenClient: isHiddenClient, baseDomain: baseDomain, appFor: appFor,
-    formatCount: formatCount, percent: percent, Feed: Feed, priority: priority, Pacer: Pacer, Poller: Poller,
+    formatCount: formatCount, percent: percent, topByApp: topByApp, hourly: hourly, deviceState: deviceState, Feed: Feed, priority: priority, Pacer: Pacer, Poller: Poller,
     lerp: lerp, easeInOut: easeInOut, clamp01: clamp01, wire: wire, pointAt: pointAt,
   };
   root.PBCore = api;

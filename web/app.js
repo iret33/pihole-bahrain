@@ -135,6 +135,7 @@
   var busy = false;
   var pollTimer = null, tickTimer = null;
   var timerMode = 'free', timerMinutes = 0, pickedDevice = null;
+  var serverOffsetMs = 0;            // box clock minus this device's clock, from the Date header of every API answer
 
   function $(id) { return document.getElementById(id); }
   function safeGet(store, key) { try { return store.getItem(key); } catch (e) { return null; } }
@@ -161,6 +162,8 @@
     var use = document.createElementNS(ns, 'use'); use.setAttribute('href', '#' + id);
     svg.appendChild(use); return svg;
   }
+  // Timers and "last online" are compared by the box with ITS clock, so the page must use the box's time, not the phone's.
+  function serverNowSec() { return (Date.now() + serverOffsetMs) / 1000; }
   function locale() { return lang === 'ar' ? 'ar-BH-u-nu-latn' : 'en-GB'; }
   function fmtTime(date) { return date.toLocaleTimeString(locale(), { hour: 'numeric', minute: '2-digit' }); }
   function fmtHHMM(hhmm) { var d = new Date(); d.setHours(+hhmm.slice(0, 2), +hhmm.slice(3), 0, 0); return fmtTime(d); }
@@ -172,7 +175,7 @@
   }
   function fmtAgo(epoch) {
     if (!epoch) return t('neverSeen');
-    var diff = Math.round((epoch * 1000 - Date.now()) / 60000);
+    var diff = Math.round((epoch - serverNowSec()) / 60);
     var rtf = window.Intl && Intl.RelativeTimeFormat ? new Intl.RelativeTimeFormat(locale(), { numeric: 'auto' }) : null;
     var txt;
     if (!rtf) txt = new Date(epoch * 1000).toLocaleString(locale());
@@ -199,6 +202,8 @@
       body: body === undefined ? undefined : JSON.stringify(body) })
       .catch(function () { throw new ApiError(0, t('noConnection')); })
       .then(function (r) {
+        var boxTime = Date.parse(r.headers.get('Date') || '');
+        if (!isNaN(boxTime)) serverOffsetMs = boxTime - Date.now();
         return r.text().then(function (txt) {
           var j = {}; try { j = txt ? JSON.parse(txt) : {}; } catch (e) { j = {}; }
           if (r.status === 401) { endSession(); throw new ApiError(401, t('sessionEnded')); }
@@ -519,7 +524,7 @@
         var rules = mode === 'free' ? applyRules({}, false) : applyRules(snap.services, true);
         return rules.then(function () {
           return writeState(function (st) {
-            st.timer = { mode: mode, until: Math.round(Date.now() / 1000) + minutes * 60, snapshot: snap };
+            st.timer = { mode: mode, until: Math.round(serverNowSec()) + minutes * 60, snapshot: snap };
           });
         });
       });
@@ -591,7 +596,7 @@
     M.clients.forEach(function (c) {
       if (c.groups.indexOf(M.groups[G.kids].id) >= 0) taken[c.client.toLowerCase()] = true;
     });
-    var now = Date.now() / 1000;
+    var now = serverNowSec();
     var devices = M.devices.filter(function (d) {
       var addr = deviceAddr(d).toLowerCase();
       if (!addr || taken[addr]) return false;
@@ -675,7 +680,7 @@
     renderDevices();
     renderBedtime(false);
     var tm = M.state.timer;
-    banner(tm && tm.until * 1000 < Date.now() - 90000 ? t('schedulerDown') : '');
+    banner(tm && tm.until < serverNowSec() - 90 ? t('schedulerDown') : '');
     Array.prototype.forEach.call(document.querySelectorAll('.mode'), function (b) {
       var m = b.getAttribute('data-mode');
       b.classList.toggle('mode-on', !!(tm && m === tm.mode));
@@ -722,7 +727,7 @@
     var tm = M && M.state.timer;
     if (!tm) return;
     var upd = function () {
-      var left = tm.until - Date.now() / 1000;
+      var left = tm.until - serverNowSec();
       $('heroClock').textContent = fmtClock(left);
       if (left <= 0) { clearInterval(tickTimer); setTimeout(function () { load().catch(function () {}); }, 20000); }
     };

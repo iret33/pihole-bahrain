@@ -224,3 +224,46 @@ test('poller: a task that throws synchronously is treated as a failure, not a cr
   await clk.advance(100);
   assert.deepEqual(errors, ['boom']);
 });
+
+// ------------------------------------------------------------------ numbers and device states
+test('topByApp groups domains by app, pools unknown ones as `other`, and never invents a label', () => {
+  const map = { 'youtube.com': 'youtube', 'googlevideo.com': 'youtube', 'tiktok.com': 'tiktok' };
+  const top = C.topByApp([
+    { domain: 'r1.googlevideo.com', count: 40 }, { domain: 'www.youtube.com', count: 10 }, { domain: 'ads.example.net', count: 30 },
+    { domain: 'tracker.example.org', count: 25 }, { domain: 'api.tiktok.com', count: 20 }, { domain: 'hidden', count: 99 }], map);
+  assert.deepEqual(top, [{ app: 'youtube', count: 50 }, { app: 'tiktok', count: 20 }, { app: null, count: 55 }],
+    'apps biggest first, then everything else together; hidden domains are skipped');
+  assert.deepEqual(C.topByApp([{ domain: 'a.com', count: 5 }], map, 0), []);
+  assert.deepEqual(C.topByApp(undefined, map), []);
+  assert.equal(C.topByApp([{ domain: 'www.youtube.com', count: 1 }, { domain: 'api.tiktok.com', count: 2 }], map, 1).length, 1);
+});
+
+test('hourly: 144 ten-minute slots become 24 hourly buckets counted back from the newest slot', () => {
+  const slots = [];
+  for (let i = 0; i < 144; i++) slots.push({ timestamp: 1000000 + i * 600, total: 10, blocked: i < 6 ? 5 : 0 });
+  const h = C.hourly({ history: slots });
+  assert.equal(h.length, 24);
+  assert.ok(h.every(b => b.total === 60), 'six slots of 10 per hour');
+  assert.equal(h[0].blocked, 30, 'the oldest hour holds the first six blocked slots');
+  assert.equal(h[23].blocked, 0);
+  assert.ok(h[0].t < h[1].t && h[1].t < h[23].t, 'oldest first');
+  const sparse = C.hourly({ history: [{ timestamp: 5000, total: 3, blocked: 1 }] });
+  assert.equal(sparse[23].total, 3);
+  assert.equal(sparse.reduce((a, b) => a + b.total, 0), 3);
+  assert.equal(C.hourly(null).length, 24);
+  assert.ok(C.hourly({ history: [] }).every(b => b.total === 0));
+});
+
+test('deviceState: protection problems outrank everything, then what the box is doing', () => {
+  const base = { serverNow: 100000, lastQuery: 99900, paused: false, offline: false, shadowed: false, recent: false };
+  const st = o => C.deviceState(Object.assign({}, base, o));
+  assert.equal(st({}), 'active', 'asked something 100 s ago');
+  assert.equal(st({ lastQuery: 99000 }), 'quiet');
+  assert.equal(st({ paused: true }), 'paused');
+  assert.equal(st({ offline: true, paused: true }), 'offline', 'the internet being off is the bigger fact');
+  assert.equal(st({ shadowed: true, paused: true, offline: true }), 'overridden', 'not protected beats everything');
+  assert.equal(st({ lastQuery: 100000 - 90000 }), 'unreachable', 'silent for more than 24 hours');
+  assert.equal(st({ lastQuery: 0 }), 'unreachable', 'never seen');
+  assert.equal(st({ lastQuery: 0, recent: true }), 'active', 'but a query we just watched proves it reaches the box');
+  assert.equal(st({ lastQuery: undefined }), 'unreachable');
+});
