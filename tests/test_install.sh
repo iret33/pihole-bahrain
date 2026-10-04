@@ -129,6 +129,7 @@ mv "$WORK/toml.bak" "$ROOT/etc/pihole/pihole.toml"
 echo "--- the one-liner path: install.sh arrives on stdin, clones SINKO_REPO and runs itself again"
 THROW="$WORK/throwaway"; mkdir -p "$THROW"
 git -C "$REPO" ls-files -z --cached --others --exclude-standard | tar -C "$REPO" --null -T - -cf - | tar -x -C "$THROW"
+mkdir -p "$THROW/tools"; printf '#!/bin/sh\n' >"$THROW/tools/build-release.sh"    # a development tool: it must not end up on a box
 git -C "$THROW" init -q -b master && git -C "$THROW" add -A && git -C "$THROW" -c user.name=t -c user.email=t@t commit -qm test
 LOG="$ROOT/var/log/sinko-install.log"
 rm -rf "$ROOT/opt/sinko/src"
@@ -136,6 +137,9 @@ SINKO_REPO="file://$THROW" SINKO_REF=master bash <"$REPO/install.sh" >"$WORK/pip
 grep -q "Starting the installer from the downloaded version" "$WORK/piped.out" || fail "the piped run did not start the downloaded installer"
 grep -q "Installing version $(cat "$REPO/VERSION") from $ROOT/opt/sinko/src" "$WORK/piped.out" || fail "the downloaded copy was not the one installed"
 grep -q "Sinko is ready" "$WORK/piped.out" || fail "the piped run did not finish"
+[[ -x "$ROOT/opt/sinko/tools/seal.sh" && -x "$ROOT/opt/sinko/tools/firstboot.sh" ]] || fail "the image tools were not installed from the developer path"
+[[ ! -e "$ROOT/opt/sinko/tools/build-release.sh" ]] || fail "a development tool was installed on the box"
+[[ -f "$ROOT/etc/systemd/system/sinko-firstboot.service" && ! -e "$WORK/units/sinko-firstboot.service.enabled" ]] || fail "the first-start unit must be installed and not enabled"
 grep -q "Starting the installer from the downloaded version" "$LOG" || fail "the install log lost the start of the piped run"
 grep -q "Installing version" "$LOG" || fail "the install log lost the rest of the piped run (re-exec lost the log copy)"
 

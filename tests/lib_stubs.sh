@@ -126,17 +126,23 @@ conf = json.load(open(db)) if os.path.exists(db) else {
     "files.log.ftl": work + "/FTL.log", "files.database": root + "/etc/pihole/pihole-FTL.db"}
 args = [a for a in sys.argv[1:] if a != "-q"]
 assert args[0] == "--config", args
+if os.path.exists(work + "/ftl-fail"):
+    sys.exit(1)
 if len(args) == 2:
     print(conf.get(args[1], ""))
     # Like FTL: with -q, a true/false setting is also the exit status.
     sys.exit(1 if "-q" in sys.argv and conf.get(args[1]) == "false" else 0)
 val = args[2]
-if args[1] == "webserver.api.password":
+if args[1] in ("webserver.api.password", "webserver.api.pwhash"):
+    # $WORK/password-stuck: nothing removes the password. $WORK/password-needs-pwhash: only clearing the hash does.
     with open(work + "/calls.log", "a") as log:
-        log.write("pihole-FTL --config webserver.api.password <%s>\n" % ("empty" if not val else "set"))
-    req = urllib.request.Request("http://127.0.0.1:%s/__mock__/require_auth" % os.environ["PORT"],
-                                 data=json.dumps({"value": bool(val)}).encode(), method="POST")
-    urllib.request.urlopen(req).read()
+        log.write("pihole-FTL --config %s <%s>\n" % (args[1], "empty" if not val else "set"))
+    works = not os.path.exists(work + "/password-stuck") and (
+        args[1] == "webserver.api.pwhash" or not os.path.exists(work + "/password-needs-pwhash"))
+    if works:
+        req = urllib.request.Request("http://127.0.0.1:%s/__mock__/require_auth" % os.environ["PORT"],
+                                     data=json.dumps({"value": bool(val)}).encode(), method="POST")
+        urllib.request.urlopen(req).read()
     sys.exit(0)
 if args[1] == "dns.hosts":
     items = json.loads(val)
@@ -173,6 +179,7 @@ EOF
   cat >"$STUBS/ssh-keygen" <<'EOF'
 #!/usr/bin/env bash
 echo "ssh-keygen $*" >>"$WORK/calls.log"
+[[ -e "$WORK/keygen-fail" ]] && exit 1
 [[ "$1" == -A ]] || exit 0
 prefix=""; [[ "$2" == -f ]] && prefix="$3"
 mkdir -p "$prefix/etc/ssh"
@@ -186,7 +193,7 @@ EOF
 echo "sshd $*" >>"$WORK/calls.log"
 case "$1" in
   -t) exit 0 ;;
-  -T) if grep -qsi '^PasswordAuthentication no' "$ROOT"/etc/ssh/sshd_config.d/*.conf; then echo "passwordauthentication no"; else echo "passwordauthentication yes"; fi ;;
+  -T) if [[ ! -e "$WORK/sshd-open" ]] && grep -qsi '^PasswordAuthentication no' "$ROOT"/etc/ssh/sshd_config.d/*.conf; then echo "passwordauthentication no"; else echo "passwordauthentication yes"; fi ;;
 esac
 EOF
   cat >"$STUBS/journalctl" <<'EOF'
@@ -272,7 +279,8 @@ make_release() {
 # Starts over with an empty fake root and a fresh mock API (a second scenario in the same test).
 fresh_start() {
   if [[ -n "${MOCK_PID:-}" ]]; then { kill "$MOCK_PID" 2>/dev/null || true; wait "$MOCK_PID" 2>/dev/null || true; }; fi
-  rm -rf "$ROOT" "$WORK/units" "$WORK/ftl.json" "$WORK/tz" "$WORK/ipaddr" "$WORK/net-down" "$WORK/offline" "$WORK/apt-fail"
+  rm -rf "$ROOT" "$WORK/units" "$WORK/ftl.json" "$WORK/tz" "$WORK/ipaddr" "$WORK/net-down" "$WORK/offline" "$WORK/apt-fail" \
+    "$WORK/ftl-fail" "$WORK/password-stuck" "$WORK/password-needs-pwhash" "$WORK/keygen-fail" "$WORK/sshd-open"
   mkdir -p "$ROOT/etc/pihole" "$ROOT/etc/ssh" "$ROOT/var/www/html" "$ROOT/var/log" "$WORK/units"
   touch "$ROOT/etc/pihole/pihole.toml" "$WORK/units/pihole-FTL.service.active"
   : >"$WORK/calls.log"
