@@ -4,12 +4,15 @@
 Commands
   setup        Create/refresh the Pi-hole groups, lists and rules this add-on uses.
   configure    Apply the Pi-hole settings the add-on needs (web root, local name).
-  run          Background scheduler (timers + bedtime). Run by systemd.
+  run          Background scheduler (timers, bedtime, updates, requests from the page). Run by systemd.
   status       Print the current state.
   doctor       Check the installation and print anything that needs fixing.
   diagnose     Read-only report on why a service is still reachable after it was blocked.
   watch        Follow the DNS log to see whether a device's queries reach the box.
-  update       Update the add-on to the latest version from GitHub.
+  update       Update to the newest release (--check, --yes, --ref REF, --force); rolls back by itself if it fails.
+  rollback     Go back to the previous version stored on this box.
+  selfcheck    Quick check that the installation works (run after every update).
+  telemetry    The optional anonymous counter: on, off, status, payload (what would be sent), reset-id.
   use-mac      Re-register children that were added by IP address under their MAC address.
   remove       Delete everything this add-on created inside Pi-hole.
 
@@ -20,9 +23,11 @@ How it works
   by disabling it. Kid devices are members of every pb-* group. Toggling a group
   takes effect immediately (FTL reloads on every API write) — no DNS restart.
 
-  Shared state (timer, bedtime schedule) is stored as JSON in the description of
-  the disabled group "pb-state", so the web page and this daemon share it through
-  the Pi-hole API without any extra port or database.
+  Shared state (timer, bedtime schedule, update status, the parent's requests) is
+  stored as JSON in the description of the disabled group "pb-state", so the web
+  page and this daemon share it through the Pi-hole API without any extra port or
+  database. The page only asks (a request marker); the daemon acts once and clears
+  the marker. Runtime data of the daemon itself lives in /var/lib/sinko (root only).
 
 Only the Python 3 standard library is used.
 """
@@ -1960,7 +1965,10 @@ def start_update_runner() -> bool:
     """Start `sinko update --yes --from-panel` so that it outlives the restart of this service, which the installer
     causes: as its own transient systemd unit, and if systemd refuses, as a detached process."""
     argv = [sys.executable, os.path.abspath(__file__), "update", "--yes", "--from-panel"]
-    setenv = ["--setenv=%s=%s" % (k, v) for k, v in sorted(os.environ.items()) if k.startswith("SINKO_")]
+    # systemd-run does not pass the environment on. Forward the SINKO_* settings (test hooks, overrides), but never
+    # anything that could be a secret: the command line of a unit is visible to every user and is logged.
+    setenv = ["--setenv=%s=%s" % (k, v) for k, v in sorted(os.environ.items())
+              if k.startswith("SINKO_") and not re.search(r"PASS|SECRET|TOKEN|KEY", k)]
     cmd = ["systemd-run", "--unit", "sinko-update", "--collect", "--quiet", "--description=Sinko update"] + setenv + ["--"] + argv
     try:
         done = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)

@@ -968,6 +968,16 @@ class RunnerStartTests(unittest.TestCase):
         self.assertTrue(cmd[cmd.index("--") + 2].endswith("sinko"), "python, then the program")
         self.assertLessEqual(run.call_args[1]["timeout"], 15)
 
+    def test_nothing_that_looks_like_a_secret_is_put_on_the_command_line(self):
+        with mock.patch.dict(os.environ, {"SINKO_PASSWORD": "hunter2", "SINKO_API_TOKEN": "t0k3n", "SINKO_SECRET_X": "s",
+                                          "SINKO_SSH_KEY": "k", "SINKO_STATE_DIR": "/var/lib/sinko"}):
+            with mock.patch.object(pb.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
+                pb.start_update_runner()
+        text = " ".join(run.call_args[0][0])
+        for secret in ("hunter2", "t0k3n", "SINKO_SECRET_X", "SINKO_SSH_KEY"):
+            self.assertNotIn(secret, text)
+        self.assertIn("--setenv=SINKO_STATE_DIR=/var/lib/sinko", text)
+
     def test_when_systemd_run_fails_it_falls_back_to_a_detached_process(self):
         with mock.patch.object(pb.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "no bus")), \
                 mock.patch.object(pb, "unit_active", return_value=False), \
