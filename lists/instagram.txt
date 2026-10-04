@@ -2,9 +2,8 @@
 ! Format: Adblock-style, one ||domain^ per line
 ||cdninstagram.com^
 ||api.facebook.com^
-||dgw-ig.c10r.facebook.com^
-||mqtt.c10r.facebook.com^
-||star.c10r.facebook.com^
+||c10r.facebook.com^
+||gateway.facebook.com^
 ||ig.me^
 ||igcdn.com^
 ||igsonar.com^
