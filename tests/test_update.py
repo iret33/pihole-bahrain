@@ -33,6 +33,10 @@ loader.exec_module(pb)
 ENV_TO_CLEAR = ("SINKO_RELEASE_BASE", "SINKO_RELEASE_API", "SINKO_REF", "SINKO_REPO", "SINKO_REPO_SLUG",
                 "SINKO_WEBROOT", "SINKO_API_URL")
 
+# A start page like the real one: it loads its own files from /pb/ (and links to Pi-hole's admin, which is not ours).
+PAGE = ('<!doctype html><link rel="stylesheet" href="/pb/style.css"><script src="/pb/pb-core.js" defer></script>'
+        '<script src="/pb/app.js" defer></script><a href="/admin/">advanced</a>')
+
 
 class Box(unittest.TestCase):
     """A box in a temp folder: state dir, app dir with the 3.0.0 fake program installed, and a fake GitHub."""
@@ -997,8 +1001,11 @@ class CommandTests(Box):
         out, err = io.StringIO(), io.StringIO()
         stdin = mock.Mock()
         stdin.isatty.return_value = stdin_tty
+        # main() refuses to run for anyone but root unless SINKO_API_URL is set (the test hook): CI runs the tests as an
+        # ordinary user, so these commands get that hook too. Nothing in them talks to Pi-hole at that address.
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), mock.patch.object(sys, "stdin", stdin), \
-                mock.patch.dict(os.environ, {"SINKO_RELEASE_BASE": self.site.base, "SINKO_RELEASE_API": self.site.api}):
+                mock.patch.dict(os.environ, {"SINKO_RELEASE_BASE": self.site.base, "SINKO_RELEASE_API": self.site.api,
+                                             "SINKO_API_URL": "http://127.0.0.1:1"}):
             code = pb.main(list(args))
         return code, out.getvalue(), err.getvalue()
 
@@ -1160,9 +1167,11 @@ class SelfcheckTests(unittest.TestCase):
         pb.Controller(api, self.catalog, "https://lists.example/l").setup(run_gravity=False)
         self.web = os.path.join(self.tmp, "www")
         os.makedirs(os.path.join(self.web, "pb"))
-        for name, text in (("index.html", "x"), ("pb/app.js", "x"), ("pb/version.txt", pb.VERSION + "\n")):
+        for name, text in (("index.html", PAGE), ("pb/app.js", "x"), ("pb/pb-core.js", "x"), ("pb/style.css", "x"),
+                           ("pb/services.json", "{}"), ("pb/version.txt", pb.VERSION + "\n")):
             with open(os.path.join(self.web, name), "w") as fh:
                 fh.write(text)
+        self.scheduler = ("ok", "the scheduler service has run for 300 s and keeps finishing its passes")
         with open(os.path.join(self.tmp, "pw"), "w") as fh:
             fh.write(mock_pihole.PASSWORD)
         env = mock.patch.dict(os.environ, {"SINKO_API_URL": "http://127.0.0.1:%d" % self.httpd.server_port,
@@ -1170,7 +1179,8 @@ class SelfcheckTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         for patch in (mock.patch.object(pb, "CLI_PW_FILE", os.path.join(self.tmp, "pw")),
-                      mock.patch.object(pb, "unit_active", return_value=True)):
+                      mock.patch.object(pb, "scheduler_status", lambda *a, **k: self.scheduler),
+                      mock.patch.object(pb, "APP_DIR", os.path.join(self.tmp, "no-app"))):
             patch.start()
             self.addCleanup(patch.stop)
 
@@ -1198,10 +1208,10 @@ class SelfcheckTests(unittest.TestCase):
         self.assertTrue(any("every list registered (missing: guard)" in l and l.startswith("  FAIL") for l in lines), lines)
 
     def test_the_scheduler_not_running_fails(self):
-        with mock.patch.object(pb, "unit_active", return_value=False):
-            code, lines = self.run_check()
+        self.scheduler = ("stopped", "the scheduler service is not running")
+        code, lines = self.run_check()
         self.assertEqual(code, 1)
-        self.assertTrue(any(l.startswith("  FAIL  scheduler service") for l in lines), lines)
+        self.assertTrue(any(l.startswith("  FAIL  the scheduler service is not running") for l in lines), lines)
 
     def test_missing_page_files_and_a_stale_page_fail(self):
         os.unlink(os.path.join(self.web, "pb", "app.js"))
@@ -1215,6 +1225,19 @@ class SelfcheckTests(unittest.TestCase):
         code, lines = self.run_check()
         self.assertEqual(code, 1)
         self.assertTrue(any("same version (page: 2.2.0, program: %s)" % pb.VERSION in l and l.startswith("  FAIL") for l in lines), lines)
+
+    def test_a_page_that_lacks_a_script_it_loads_fails(self):
+        # A release packed without pb-core.js used to pass: the page then throws at load and shows nothing.
+        os.unlink(os.path.join(self.web, "pb", "pb-core.js"))
+        code, lines = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertTrue(any("page files installed" in l and "pb/pb-core.js" in l and l.startswith("  FAIL") for l in lines), lines)
+
+    def test_a_scheduler_that_is_only_starting_does_not_pass(self):
+        self.scheduler = ("starting", "the scheduler service started 2 s ago")
+        code, lines = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertTrue(any(l.startswith("  FAIL  the scheduler service started 2 s ago") for l in lines), lines)
 
     def test_an_unreachable_pihole_fails_every_check_that_needs_it(self):
         self.httpd.shutdown()
@@ -1232,17 +1255,17 @@ class SelfcheckTests(unittest.TestCase):
         self.assertTrue(lines[0].startswith("  FAIL  Pi-hole API reachable"), lines)
 
     def test_waiting_repeats_a_failing_round_until_it_passes(self):
-        answers = iter([False, False, True])
+        answers = iter([("starting", "started 1 s ago"), ("idle", "no pass yet"), self.scheduler])
         sleeps = []
-        with mock.patch.object(pb, "unit_active", side_effect=lambda name: next(answers)):
+        with mock.patch.object(pb, "scheduler_status", side_effect=lambda *a, **k: next(answers)):
             code, lines = self.run_check(wait=60, sleep=sleeps.append, clock=iter([0, 1, 2, 3, 4, 5]).__next__)
         self.assertEqual(code, 0, lines)
         self.assertEqual(sleeps, [3, 3])
 
     def test_waiting_gives_up_when_the_time_is_up(self):
         sleeps = []
-        with mock.patch.object(pb, "unit_active", return_value=False):
-            code, _ = self.run_check(wait=10, sleep=sleeps.append, clock=iter([0, 4, 8, 12, 16]).__next__)
+        self.scheduler = ("stopped", "the scheduler service is not running")
+        code, _ = self.run_check(wait=10, sleep=sleeps.append, clock=iter([0, 4, 8, 12, 16]).__next__)
         self.assertEqual(code, 1)
         self.assertEqual(sleeps, [3, 3])
 
@@ -1257,7 +1280,9 @@ class SelfcheckTests(unittest.TestCase):
         os.makedirs(os.path.join(app, "bin"))
         shutil.copy(os.path.join(ROOT, "bin", "sinko"), os.path.join(app, "bin", "sinko"))
         os.symlink(LISTS, os.path.join(app, "lists"))
-        with mock.patch.object(pb, "APP_DIR", app):
+        run = os.path.join(self.tmp, "run")
+        with mock.patch.object(pb, "APP_DIR", app), mock.patch.dict(os.environ, {"SINKO_RUN_DIR": run}):
+            pb.write_heartbeat(5, pid=4242)                          # what the running scheduler leaves in /run/sinko
             env = dict(os.environ, SINKO_APP_DIR=app, PATH=self.fake_systemctl() + os.pathsep + os.environ["PATH"],
                        SINKO_CLI_PW_FILE=os.path.join(self.tmp, "pw"))
             done = subprocess.run([sys.executable, os.path.join(app, "bin", "sinko"), "selfcheck"], env=env,
@@ -1265,11 +1290,14 @@ class SelfcheckTests(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertEqual(done.stdout.count("  ok    "), 6, done.stdout)
 
-    def fake_systemctl(self):
+    def fake_systemctl(self, pid=4242, up_seconds=100):
+        """A systemctl that answers `show` for a scheduler that has been up for `up_seconds`, as pid `pid`."""
         folder = os.path.join(self.tmp, "fakebin")
         os.makedirs(folder, exist_ok=True)
+        entered = int((time.monotonic() - up_seconds) * 1e6)
         with open(os.path.join(folder, "systemctl"), "w") as fh:
-            fh.write("#!/bin/sh\nexit 0\n")
+            fh.write("#!/bin/sh\nif [ \"$1\" = show ]; then\n  echo ActiveState=active\n"
+                     "  echo ActiveEnterTimestampMonotonic=%d\n  echo MainPID=%d\n  echo NRestarts=0\nfi\nexit 0\n" % (entered, pid))
         os.chmod(os.path.join(folder, "systemctl"), 0o755)
         return folder
 
@@ -1287,6 +1315,217 @@ class SelfcheckTests(unittest.TestCase):
             with open(os.path.join(app, "bin", "sinko"), "w") as fh:
                 fh.write("pass\n")
             self.assertEqual(pb.run_installed_selfcheck(), (True, ""))
+
+
+class SchedulerStatusTests(unittest.TestCase):
+    """What "the scheduler works" means for the self-check and the doctor: a process that has stayed up longer than
+    one crash cycle and has finished passes. systemd is replaced by what `systemctl show` would print."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.run_dir = os.path.join(tmp.name, "run")
+        env = mock.patch.dict(os.environ, {"SINKO_RUN_DIR": self.run_dir})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def show(self, state="active", entered=None, pid=4242, restarts=0, code=0):
+        lines = ["ActiveState=" + state, "ActiveEnterTimestampMonotonic=%d" % (0 if entered is None else entered * 1e6),
+                 "MainPID=%d" % pid, "NRestarts=%d" % restarts]
+        return mock.patch.object(pb.subprocess, "run", return_value=subprocess.CompletedProcess([], code, "\n".join(lines) + "\n", ""))
+
+    def test_the_unit_state_is_read_from_systemctl_show_on_the_machines_monotonic_clock(self):
+        with self.show(entered=900.0, pid=77, restarts=3) as run:
+            info = pb.unit_state("sinko", mono=lambda: 1000.0)
+        self.assertEqual(info, {"active": True, "age": 100.0, "pid": 77, "restarts": 3})
+        command = run.call_args[0][0]
+        self.assertEqual(command[:2], ["systemctl", "show"])
+        self.assertEqual(command[-1], "sinko")
+        self.assertLessEqual(run.call_args[1]["timeout"], 10)
+
+    def test_a_unit_that_is_not_active_has_no_age(self):
+        for state in ("inactive", "activating", "failed", "deactivating", ""):
+            with self.show(state=state, entered=900.0):
+                info = pb.unit_state("sinko", mono=lambda: 1000.0)
+            self.assertFalse(info["active"], state)
+            self.assertIsNone(info["age"], state)
+
+    def test_when_systemd_cannot_be_asked_there_is_no_answer(self):
+        for error in (FileNotFoundError("systemctl"), subprocess.TimeoutExpired("systemctl", 10), PermissionError()):
+            with mock.patch.object(pb.subprocess, "run", side_effect=error):
+                self.assertIsNone(pb.unit_state("sinko"))
+                self.assertEqual(pb.scheduler_status()[0], "stopped")
+                self.assertFalse(pb.unit_active_for("sinko", 1))
+        with self.show(code=1):
+            self.assertIsNone(pb.unit_state("sinko"))
+
+    def test_odd_property_values_do_not_raise(self):
+        junk = subprocess.CompletedProcess([], 0, "ActiveState=active\nActiveEnterTimestampMonotonic=soon\nMainPID=\nNRestarts=x\nnoise\n", "")
+        with mock.patch.object(pb.subprocess, "run", return_value=junk):
+            info = pb.unit_state("sinko")
+        self.assertEqual((info["active"], info["age"], info["pid"], info["restarts"]), (True, None, 0, 0))
+
+    def test_active_for_means_active_without_a_break(self):
+        with self.show(entered=990.0), mock.patch.object(pb.time, "monotonic", lambda: 1000.0):
+            self.assertFalse(pb.unit_active_for("sinko", 15))
+            self.assertTrue(pb.unit_active_for("sinko", 10))
+        with self.show(state="activating", entered=100.0), mock.patch.object(pb.time, "monotonic", lambda: 1000.0):
+            self.assertFalse(pb.unit_active_for("sinko", 1))
+
+    def status(self, now, beat=None, **kw):
+        info = {"active": True, "age": 100.0, "pid": 4242, "restarts": 0}
+        info.update(kw)
+        with mock.patch.object(pb, "unit_state", return_value=info), mock.patch.object(pb, "read_heartbeat", return_value=beat):
+            return pb.scheduler_status(mono=lambda: now)
+
+    def test_a_scheduler_that_stays_up_and_keeps_finishing_passes_is_ok(self):
+        beat = {"pid": 4242, "version": pb.VERSION, "ticks": 7, "mono": 995.0}
+        self.assertEqual(self.status(1000.0, beat)[0], "ok")
+
+    def test_not_active_is_stopped(self):
+        self.assertEqual(self.status(1000.0, None, active=False, age=None)[0], "stopped")
+
+    def test_a_scheduler_that_has_just_started_is_starting_not_ok(self):
+        self.assertEqual(self.status(1000.0, None, age=3.0)[0], "starting")
+
+    def test_a_scheduler_that_restarts_again_and_again_is_crashing_even_in_its_active_second(self):
+        beat = {"pid": 4242, "version": pb.VERSION, "ticks": 9, "mono": 999.0}
+        self.assertEqual(self.status(1000.0, beat, age=30.0, restarts=5)[0], "crashing")
+        self.assertEqual(self.status(1000.0, beat, age=300.0, restarts=5)[0], "ok", "long ago: it has been stable since")
+
+    def test_up_but_no_finished_pass_of_this_process_is_idle(self):
+        fresh = {"pid": 4242, "version": pb.VERSION, "ticks": 7, "mono": 995.0}
+        for beat, why in ((None, "no heartbeat"), (dict(fresh, pid=1), "another process"),
+                          (dict(fresh, version="2.9.0"), "another version"), (dict(fresh, ticks=1), "one pass only"),
+                          (dict(fresh, mono=900.0), "stale"), (dict(fresh, mono=1100.0), "from the future")):
+            state, text = self.status(1000.0, beat)
+            self.assertEqual(state, "idle", why)
+            self.assertTrue(text)
+
+    def test_a_crash_loop_is_never_ok_however_the_check_lands(self):
+        """The model from the review: active for 1.5 s of every 12 s (RestartSec 10 plus the run), started at any phase."""
+        for phase in range(24):
+            verdicts = set()
+            for step in range(0, 91, 3):                          # a round every 3 s for 90 s, as `selfcheck --wait 90`
+                t = phase * 0.5 + step
+                cycle, into = divmod(t, 12.0)
+                active = into < 1.5
+                info = {"active": active, "age": into if active else None, "pid": 1000 + int(cycle), "restarts": int(cycle)}
+                beat = {"pid": info["pid"], "version": pb.VERSION, "ticks": 1, "mono": t - into + 1.0}
+                with mock.patch.object(pb, "unit_state", return_value=info), mock.patch.object(pb, "read_heartbeat", return_value=beat):
+                    verdicts.add(pb.scheduler_status(mono=lambda: t)[0])
+            self.assertNotIn("ok", verdicts, "phase %s" % phase)
+
+    def test_a_healthy_scheduler_that_was_restarted_a_moment_ago_passes_within_about_twenty_seconds(self):
+        for age_at_start in (0, 3, 10, 60):
+            passed_at = None
+            for step in range(0, 91, 3):
+                age = age_at_start + step
+                beat = {"pid": 4242, "version": pb.VERSION, "ticks": 1 + int(age // 15), "mono": 1000.0 + step - (age % 15)}
+                state, _ = self.status(1000.0 + step, beat, age=float(age))
+                if state == "ok":
+                    passed_at = step
+                    break
+            self.assertIsNotNone(passed_at, age_at_start)
+            self.assertLessEqual(passed_at, 21, age_at_start)
+
+    def test_the_heartbeat_round_trips_and_is_private(self):
+        pb.write_heartbeat(3, pid=4242)
+        beat = pb.read_heartbeat()
+        self.assertEqual((beat["pid"], beat["version"], beat["ticks"]), (4242, pb.VERSION, 3))
+        self.assertLess(abs(beat["mono"] - time.monotonic()), 5)
+        self.assertEqual(stat.S_IMODE(os.stat(self.run_dir).st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.run_dir, "heartbeat.json")).st_mode), 0o600)
+
+    def test_a_missing_or_garbled_heartbeat_is_none(self):
+        self.assertIsNone(pb.read_heartbeat())
+        os.makedirs(self.run_dir)
+        path = os.path.join(self.run_dir, "heartbeat.json")
+        for text in ("", "{", "[]", "null", json.dumps({"pid": "x", "ticks": 1, "mono": 1.0, "version": "3.0.0"}),
+                     json.dumps({"pid": 5, "ticks": -1, "mono": 1.0, "version": "3.0.0"}),
+                     json.dumps({"pid": 5, "ticks": 1, "mono": True, "version": "3.0.0"}),
+                     json.dumps({"pid": 5, "ticks": 1, "mono": 1.0, "version": 3}),
+                     json.dumps({"pid": True, "ticks": 1, "mono": 1.0, "version": "3.0.0"})):
+            with open(path, "w") as fh:
+                fh.write(text)
+            self.assertIsNone(pb.read_heartbeat(), text)
+
+    def test_a_heartbeat_that_cannot_be_written_raises_oserror_for_the_loop_to_log(self):
+        with mock.patch.dict(os.environ, {"SINKO_RUN_DIR": "/proc/sinko-cannot-exist"}):
+            with self.assertRaises(OSError):
+                pb.write_heartbeat(1)
+
+
+class PageFilesTests(unittest.TestCase):
+    """The start page is a set of files that must all be there: one missing script means a page that shows nothing."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = os.path.join(tmp.name, "www")
+        os.makedirs(os.path.join(self.root, "pb"))
+
+    def put(self, name, text="x"):
+        path = os.path.join(self.root, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(text)
+
+    def complete(self):
+        self.put("index.html", PAGE)
+        for name in ("app.js", "pb-core.js", "style.css", "version.txt", "services.json"):
+            self.put("pb/" + name)
+
+    def test_the_references_in_index_html_are_found(self):
+        html = ('<link rel="icon" href="/pb/icon.svg"><script src="/pb/pb-core.js" defer></script><script src=\'/pb/app.js\'></script>'
+                '<a href="/admin/">x</a><img src="/pb/fonts/a.woff2?v=3"><script src="/pb/../etc/passwd"></script>'
+                '<link href = "/pb/style.css#x"><script src="https://cdn.example/pb/evil.js"></script>')
+        self.assertEqual(pb.referenced_page_files(html), ["icon.svg", "pb-core.js", "app.js", "fonts/a.woff2", "style.css"])
+
+    def test_a_complete_page_has_no_problems(self):
+        self.complete()
+        self.assertEqual(pb.page_file_problems(self.root), [])
+
+    def test_a_file_that_index_html_loads_but_the_box_lacks_is_a_problem(self):
+        self.complete()
+        os.unlink(os.path.join(self.root, "pb", "pb-core.js"))
+        self.assertEqual(pb.page_file_problems(self.root), ["pb/pb-core.js"])
+
+    def test_the_files_the_page_cannot_start_without_are_always_required(self):
+        self.put("index.html", "<html></html>")
+        self.assertEqual(pb.page_file_problems(self.root), ["pb/app.js", "pb/version.txt", "pb/services.json"])
+        self.assertEqual(pb.page_file_problems(os.path.join(self.root, "nowhere")),
+                         ["index.html", "pb/app.js", "pb/version.txt", "pb/services.json"])
+
+    def test_an_empty_file_is_a_problem_too(self):
+        self.complete()
+        self.put("pb/app.js", "")
+        self.assertEqual(pb.page_file_problems(self.root), ["pb/app.js (empty)"])
+
+    def test_every_file_of_the_installed_releases_web_folder_must_be_installed(self):
+        self.complete()
+        src = os.path.join(os.path.dirname(self.root), "src-web")
+        for name in ("index.html", "app.js", "pb-core.js", "links.json", "fonts/a.woff2"):
+            path = os.path.join(src, name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write("x")
+        self.assertEqual(pb.page_file_problems(self.root, src), ["pb/links.json", "pb/fonts/a.woff2"])
+        self.put("pb/links.json")
+        self.put("pb/fonts/a.woff2")
+        self.assertEqual(pb.page_file_problems(self.root, src), [])
+
+    def test_the_source_tree_counts_only_when_it_is_the_installed_version(self):
+        app = os.path.join(os.path.dirname(self.root), "app")
+        os.makedirs(os.path.join(app, "src", "web"))
+        with mock.patch.object(pb, "APP_DIR", app):
+            self.assertIsNone(pb.installed_source_web(), "no VERSION file")
+            with open(os.path.join(app, "src", "VERSION"), "w") as fh:
+                fh.write("2.9.0\n")
+            self.assertIsNone(pb.installed_source_web(), "another version's tree")
+            with open(os.path.join(app, "src", "VERSION"), "w") as fh:
+                fh.write(pb.VERSION + "\n")
+            self.assertEqual(pb.installed_source_web(), os.path.join(app, "src", "web"))
 
 
 if __name__ == "__main__":

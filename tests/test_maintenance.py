@@ -72,7 +72,10 @@ class Fixture(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.tmp = tmp.name
         self.state_dir = os.path.join(self.tmp, "state")
-        env = mock.patch.dict(os.environ, {"SINKO_STATE_DIR": self.state_dir})
+        self.run_dir = os.path.join(self.tmp, "run")
+        self.webroot = os.path.join(self.tmp, "www")
+        env = mock.patch.dict(os.environ, {"SINKO_STATE_DIR": self.state_dir, "SINKO_RUN_DIR": self.run_dir,
+                                           "SINKO_WEBROOT": self.webroot})
         env.start()
         self.addCleanup(env.stop)
         for key in ("SINKO_RELEASE_BASE", "SINKO_RELEASE_API", "SINKO_REF", "SINKO_REPO", "SINKO_REPO_SLUG",
