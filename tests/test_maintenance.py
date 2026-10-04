@@ -81,7 +81,8 @@ class Fixture(unittest.TestCase):
                     "SINKO_TELEMETRY_URL"):
             os.environ.pop(key, None)
         self.reached = []
-        for name in ("run_power", "start_update_runner", "apply_new_address", "default_route_ipv4", "check_for_update"):
+        for name in ("run_power", "start_update_runner", "apply_new_address", "default_route_ipv4", "check_for_update",
+                     "send_ping", "telemetry_body"):
             patch = mock.patch.object(pb, name, side_effect=lambda *a, _n=name, **k: self.reached.append(_n))
             patch.start()
             self.addCleanup(patch.stop)
@@ -100,11 +101,15 @@ class Fixture(unittest.TestCase):
         self.ip = "192.168.1.5"
         self.address_calls = []
         self.clock_trusted = True
+        self.ping_calls = []
+        self.ping_answer = {"online": 5, "total": 20}
+        self.jitter_calls = []
         self.seen_at_call = {}
         self.m = pb.Maintenance(self.api, config_path=self.config_path, monotonic=lambda: self.mono,
                                 job_factory=InlineJob, clock_ok=lambda: self.clock_trusted,
                                 check=self.fake_check, start_runner=self.fake_runner, power=self.fake_power,
-                                default_ip=lambda: self.ip, apply_address=self.fake_apply)
+                                default_ip=lambda: self.ip, apply_address=self.fake_apply, ping=self.fake_ping,
+                                body=lambda: "BODY", jitter=self.fake_jitter)
 
     # ----- fakes -----
     def fake_check(self, conf):
@@ -125,6 +130,16 @@ class Fixture(unittest.TestCase):
         self.seen_at_call["power"] = (self.state(), pb.load_handled())
         if getattr(self, "power_error", None):
             raise self.power_error
+
+    def fake_ping(self, url, body):
+        self.ping_calls.append((url, body))
+        if isinstance(self.ping_answer, Exception):
+            raise self.ping_answer
+        return self.ping_answer
+
+    def fake_jitter(self, low, high):
+        self.jitter_calls.append((low, high))
+        return 0
 
     def fake_apply(self, ip, conf, path):
         self.address_calls.append((ip, dict(conf), path))

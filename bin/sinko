@@ -38,6 +38,7 @@ import ipaddress
 import json
 import logging
 import os
+import random
 import re
 import secrets
 import shutil
@@ -64,6 +65,7 @@ LISTS_DIR = os.path.join(APP_DIR, "lists")
 CONFIG_FILE = os.environ.get("SINKO_CONFIG_FILE", "/etc/sinko/config")
 DEFAULT_LISTS_BASE = "https://raw.githubusercontent.com/iret33/sinko/master/lists"
 DEFAULT_STATE_DIR = "/var/lib/sinko"
+TELEMETRY_URL = ""          # the anonymous counter's address; empty = not configured, and then nothing is ever sent
 CLI_PW_FILE = os.environ.get("SINKO_CLI_PW_FILE", "/etc/pihole/cli_pw")
 
 G_KIDS = "pb-kids"          # marker: membership == "this is a kid device"
@@ -1918,6 +1920,88 @@ def run_power(action: str) -> None:
     subprocess.run(["systemctl", "--no-block", action], check=True, capture_output=True, timeout=30)
 
 
+# --------------------------------------------------------------------------- #
+# Optional anonymous counter ("boxes online"): architecture.md, "Optional anonymous counter"
+# --------------------------------------------------------------------------- #
+PING_TIMEOUT = 10
+PING_RESPONSE_MAX = 4096
+MAX_COUNT = 10_000_000
+
+
+class TelemetryError(Exception):
+    pass
+
+
+def telemetry_url(conf=None) -> str:
+    """The counter's address (environment, then settings, then TELEMETRY_URL); "" when there is none or it is not
+    acceptable: the id travels in the request, so it must be https (plain http only to this machine, for tests)."""
+    conf = read_config() if conf is None else conf
+    url = (os.environ.get("SINKO_TELEMETRY_URL") or conf.get("SINKO_TELEMETRY_URL") or TELEMETRY_URL).strip()
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host, _ = parts.hostname, parts.port
+    except ValueError:
+        return ""
+    if not url or not host or parts.username or parts.password or parts.query or parts.fragment:
+        return ""
+    if parts.scheme == "https" or (parts.scheme == "http" and host in ("127.0.0.1", "localhost", "::1")):
+        return url.rstrip("/")
+    return ""
+
+
+def hardware_kind(model_file=None, machine=None) -> str:
+    """"orangepi-zero3", "raspberrypi", "x86" or "other": the only thing about the machine that is ever sent."""
+    path = model_file or os.environ.get("SINKO_DT_MODEL") or "/proc/device-tree/model"
+    try:
+        with open(path, "rb") as fh:
+            model = fh.read(200).decode("ascii", "ignore")             # the device tree's text ends in a NUL byte
+    except OSError:
+        model = ""
+    squashed = re.sub(r"[^a-z0-9]", "", model.lower())
+    if "orangepizero3" in squashed:
+        return "orangepi-zero3"
+    if "raspberrypi" in squashed:
+        return "raspberrypi"
+    if (machine or os.uname().machine).lower() in ("x86_64", "amd64", "i386", "i686", "x86"):
+        return "x86"
+    return "other"
+
+
+def telemetry_body() -> str:
+    """Exactly what the counter would be sent. Nothing else leaves the box: no domain, device, address, child, rule,
+    language or time zone."""
+    body = json.dumps({"id": install_id(), "v": VERSION, "hw": hardware_kind()}, separators=(",", ":"))
+    if len(body.encode("utf-8")) > 512:
+        raise TelemetryError("the payload is larger than allowed")
+    return body
+
+
+def send_ping(url: str, body: str, timeout: float = PING_TIMEOUT):
+    """POST `body` to {url}/v1/ping. Returns {"online", "total"} from the answer, or None when the answer holds
+    numbers that make no sense. Raises TelemetryError when the counter cannot be reached."""
+    request = urllib.request.Request(url + "/v1/ping", data=body.encode("utf-8"), method="POST",
+                                     headers={"Content-Type": "application/json", "User-Agent": "sinko/" + VERSION})
+    try:
+        with urllib.request.build_opener(_SafeRedirect).open(request, timeout=timeout) as resp:
+            raw = resp.read(PING_RESPONSE_MAX + 1)
+    except urllib.error.HTTPError as err:
+        err.close()
+        raise TelemetryError("the counter answered HTTP %s" % err.code)
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as err:
+        raise TelemetryError("the counter could not be reached (%s)" % short_text(getattr(err, "reason", None) or err, 80))
+    try:
+        data = json.loads(raw[:PING_RESPONSE_MAX].decode("utf-8")) if len(raw) <= PING_RESPONSE_MAX else None
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    online, total = data.get("online"), data.get("total")
+    for value in (online, total):
+        if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= MAX_COUNT:
+            return None
+    return {"online": online, "total": total} if online <= total else None
+
+
 class BackgroundJob:
     """One function at a time on a daemon thread. The scheduler's tick only starts jobs and collects what they
     returned, so a slow network can never delay bedtime."""
@@ -1975,9 +2059,14 @@ class Maintenance:
     FAILED_BLOCKS_AUTO = 7 * 24 * 3600
     AUTO_WINDOW = (3, 5)              # box time, hours: 03:00 up to 05:00
     COMPLAIN_EVERY = 1800
+    PING_FIRST = 300
+    PING_EVERY = 6 * 3600
+    PING_JITTER = 1800                # +-, so the boxes do not all call in at the same minute
+    PING_RETRY = 1800
 
     def __init__(self, api=None, config_path=None, monotonic=time.monotonic, job_factory=BackgroundJob, clock_ok=None,
-                 check=None, start_runner=None, power=None, default_ip=None, apply_address=None):
+                 check=None, start_runner=None, power=None, default_ip=None, apply_address=None, ping=None, body=None,
+                 jitter=None):
         self.api = api
         self.config_path = config_path or CONFIG_FILE
         self.mono = monotonic
@@ -1988,9 +2077,13 @@ class Maintenance:
         self.power = power or run_power
         self.default_ip = default_ip or default_route_ipv4
         self.apply_address = apply_address or apply_new_address
+        self.ping = ping or send_ping
+        self.body = body or telemetry_body
+        self.jitter = jitter or random.uniform
         started = monotonic()
         self._next_check = started + self.CHECK_FIRST
         self._next_address = started + self.ADDRESS_FIRST
+        self._next_ping = started + self.PING_FIRST
         self._check_forced = False
         self._force_check = False
         self._jobs = {}
@@ -2016,7 +2109,8 @@ class Maintenance:
             self._complain("state", err)
             return []
         for name, step in (("jobs", self._collect), ("reconcile", self._reconcile), ("check", self._check),
-                           ("update", self._update), ("power", self._power), ("address", self._address)):
+                           ("update", self._update), ("power", self._power), ("address", self._address),
+                           ("telemetry", self._telemetry)):
             try:
                 step(now, epoch)
             except Exception as err:
@@ -2293,6 +2387,35 @@ class Maintenance:
     def _address_done(self, outcome, epoch) -> None:
         if outcome[0] == "error":
             self._complain("address change", outcome[1])       # retried at the next address check
+
+    # ----- anonymous counter -----
+    def _telemetry(self, now, epoch) -> None:
+        """Nothing is sent unless the parent said yes (the state is the only authority) AND a counter address is
+        configured."""
+        st = self._cur()
+        if st["telemetry"]["on"] is not True:
+            if st["community"] is not None:
+                self._change(lambda state: state.update(community=None))      # an old number must not outlive the "no"
+            return
+        url = telemetry_url(self.conf())
+        if not url or self.mono() < self._next_ping or not self.clock_ok():
+            return
+        self._next_ping = self.mono() + self.PING_EVERY + self.jitter(-self.PING_JITTER, self.PING_JITTER)
+        self._spawn("ping", lambda: self.ping(url, self.body()), self._ping_done)
+
+    def _ping_done(self, outcome, epoch) -> None:
+        status, value = outcome
+        if status == "error":
+            self._complain("anonymous counter", value)
+            self._next_ping = self.mono() + self.PING_RETRY
+            return
+        if value is None:
+            return                                              # an answer with numbers that make no sense: show none
+
+        def store(state):
+            if state["telemetry"]["on"] is True:                # not if the parent switched it off while the ping was away
+                state["community"] = {"online": value["online"], "at": epoch}
+        self._change(store)
 
 
 # --------------------------------------------------------------------------- #

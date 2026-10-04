@@ -92,6 +92,7 @@ class Site:
     def __init__(self):
         self.routes = {}                  # path -> (status, body, headers) or a callable(handler)
         self.requests = []
+        self.posts = []                   # (path, headers, body) of every POST
         self.lock = threading.Lock()
         self.base = self.api = None
 
@@ -132,6 +133,12 @@ def serve():
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            with site.lock:
+                site.posts.append((self.path, dict(self.headers), body))
+            self.do_GET()
 
         def do_GET(self):
             with site.lock:
