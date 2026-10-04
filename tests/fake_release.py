@@ -160,3 +160,14 @@ def serve():
     site.base = origin + "/releases"
     site.api = origin + "/api/latest"
     return httpd, site
+
+
+def serve_pihole():
+    """tests/mock_pihole.py's server, started with a short poll interval: its serve() waits up to half a second
+    when it is shut down, which adds up over a hundred tests. Same classes, same behaviour."""
+    import mock_pihole
+    store = mock_pihole.Store()
+    handler = type("H", (mock_pihole.Handler,), {"store": store, "web_dir": None})
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
+    return httpd, store

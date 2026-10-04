@@ -1809,6 +1809,493 @@ class Controller:
 
 
 # --------------------------------------------------------------------------- #
+# Maintenance: what the scheduler does besides bedtime and timers
+# --------------------------------------------------------------------------- #
+def apply_pihole_settings(conf: dict, hostname=None, ip=None, remove_hostname=False, disable_web=False) -> None:
+    """What `sinko configure` does (also used when the box's address changes)."""
+    ftl_set_config("webserver.serve_all", "true")
+    ftl_set_config("webserver.api.cli_pw", "true")
+    # The config file still holds the name added by the previous run (install.sh
+    # rewrites it afterwards), so a renamed or removed name does not linger.
+    old = conf.get("SINKO_HOSTNAME", "")
+    hostname = hostname if hostname is not None else old
+    ours = {n for n in (old, hostname) if n}
+    hosts = parse_cli_array(ftl_config("dns.hosts"))
+    new = hosts
+    if remove_hostname or ip:
+        new = [h for h in hosts if not ours & set(h.split()[1:])]
+        if hostname and ip and not remove_hostname:
+            new = merged_hosts(new, ip, hostname)
+    if new != hosts:
+        ftl_set_config("dns.hosts", json.dumps(new))
+    if disable_web:
+        ftl_set_config("webserver.serve_all", "false")
+
+
+def write_config_value(key: str, value: str, path=None) -> None:
+    """Change one KEY=value line of the settings file (adding it if there is none). Every other line, and the file's
+    rights, stay as they are."""
+    if not re.match(r"^[A-Za-z0-9._:-]+\Z", value):
+        raise ValueError("not a plain value: %r" % value)
+    path = path or CONFIG_FILE
+    with open(path, encoding="utf-8") as fh:
+        lines = fh.read().splitlines()
+    out, done = [], False
+    for line in lines:
+        name = line.split("=", 1)[0].strip()
+        if "=" in line and not line.lstrip().startswith("#") and name == key:
+            if not done:
+                out.append("%s=%s" % (key, value))
+            done = True                       # a repeated key would shadow the new value, so only one is kept
+        else:
+            out.append(line)
+    if not done:
+        out.append("%s=%s" % (key, value))
+    atomic_write(path, "\n".join(out) + "\n", stat.S_IMODE(os.stat(path).st_mode))
+
+
+def valid_lan_ip(text) -> bool:
+    ip = parse_ip(text)
+    return ip is not None and ip.version == 4 and not (ip.is_loopback or ip.is_link_local or ip.is_unspecified
+                                                       or ip.is_multicast or ip.is_reserved)
+
+
+def default_route_ipv4():
+    """The IPv4 address this box uses towards its router, or None. Connecting a UDP socket sends nothing: it only
+    makes the kernel choose the source address, so this is instant and needs no subprocess."""
+    gateway = SystemProbe().default_gateway()
+    if not gateway:
+        return None
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.settimeout(1)
+        sock.connect((gateway, 9))
+        ip = sock.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        sock.close()
+    return ip if valid_lan_ip(ip) else None
+
+
+def apply_new_address(ip: str, conf: dict, config_path=None) -> None:
+    """The box got another address: point the local name at it (what `sinko configure --ip` does), then remember it."""
+    apply_pihole_settings(conf, hostname=conf.get("SINKO_HOSTNAME", ""), ip=ip)
+    write_config_value("SINKO_IP", ip, config_path)
+
+
+def start_update_runner() -> bool:
+    """Start `sinko update --yes --from-panel` so that it outlives the restart of this service, which the installer
+    causes: as its own transient systemd unit, and if systemd refuses, as a detached process."""
+    argv = [sys.executable, os.path.abspath(__file__), "update", "--yes", "--from-panel"]
+    setenv = ["--setenv=%s=%s" % (k, v) for k, v in sorted(os.environ.items()) if k.startswith("SINKO_")]
+    cmd = ["systemd-run", "--unit", "sinko-update", "--collect", "--quiet", "--description=Sinko update"] + setenv + ["--"] + argv
+    try:
+        done = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
+        if done.returncode == 0:
+            return True
+        why = done.stderr.strip()
+    except (OSError, subprocess.SubprocessError) as err:
+        why = str(err)
+    if unit_active("sinko-update"):
+        return True                           # a runner from an earlier attempt is still going; it owns the result
+    log.warning("systemd-run could not start the update (%s); starting it directly", short_text(why, 100))
+    ensure_state_dir()
+    fd = os.open(state_path("update.log"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        # A detached process stays in this service's control group, so a restart of the service may still end it;
+        # the scheduler then marks the update as not finished. systemd-run is the dependable way.
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=fd, stderr=fd, start_new_session=True, close_fds=True)
+    finally:
+        os.close(fd)
+    threading.Thread(target=proc.wait, daemon=True).start()          # reaps it when it ends
+    return True
+
+
+def run_power(action: str) -> None:
+    if action not in POWER_ACTIONS:
+        raise ValueError("unknown power action %r" % (action,))
+    subprocess.run(["systemctl", "--no-block", action], check=True, capture_output=True, timeout=30)
+
+
+class BackgroundJob:
+    """One function at a time on a daemon thread. The scheduler's tick only starts jobs and collects what they
+    returned, so a slow network can never delay bedtime."""
+
+    def __init__(self, name: str):
+        self.name = name
+        self._lock = threading.Lock()
+        self._busy = False
+        self._outcome = None
+
+    def busy(self) -> bool:
+        with self._lock:
+            return self._busy
+
+    def start(self, fn) -> bool:
+        with self._lock:
+            if self._busy:
+                return False
+            self._busy = True
+            self._outcome = None
+        threading.Thread(target=self._run, args=(fn,), name="sinko-" + self.name, daemon=True).start()
+        return True
+
+    def _run(self, fn) -> None:
+        try:
+            outcome = ("ok", fn())
+        except Exception as err:
+            outcome = ("error", err)
+        with self._lock:
+            self._outcome = outcome
+
+    def take(self):
+        """("ok", value) or ("error", exception) of a finished run, once; None while it still runs or nothing ran."""
+        with self._lock:
+            outcome, self._outcome = self._outcome, None
+            if outcome is not None:
+                self._busy = False
+        return outcome
+
+
+class Maintenance:
+    """The scheduler's side jobs: update check and install, power requests, address watch, anonymous counter.
+
+    `Controller.tick` stays the only code that changes rules. These jobs only touch the keys of the shared state that
+    belong to the scheduler (update.*, community, and clearing request markers), and every one of them is wrapped:
+    a failing job is logged (not every 15 seconds) and never stops the tick or the other jobs. Anything slow (network,
+    systemd, pihole-FTL) runs in a BackgroundJob; the tick thread only reads files and talks to Pi-hole's API.
+    """
+    CHECK_FIRST = 120                 # seconds after start, then every day (or when the page asks)
+    CHECK_EVERY = 24 * 3600
+    ADDRESS_FIRST = 30
+    ADDRESS_EVERY = 300
+    MIN_RUN_GAP = 300                 # between two update runs
+    STUCK_AFTER = 20 * 60             # a run with no sign of life for this long did not finish
+    FAILED_BLOCKS_AUTO = 7 * 24 * 3600
+    AUTO_WINDOW = (3, 5)              # box time, hours: 03:00 up to 05:00
+    COMPLAIN_EVERY = 1800
+
+    def __init__(self, api=None, config_path=None, monotonic=time.monotonic, job_factory=BackgroundJob, clock_ok=None,
+                 check=None, start_runner=None, power=None, default_ip=None, apply_address=None):
+        self.api = api
+        self.config_path = config_path or CONFIG_FILE
+        self.mono = monotonic
+        self._job_factory = job_factory
+        self.clock_ok = clock_ok or (lambda: True)
+        self.check = check or check_for_update
+        self.start_runner = start_runner or start_update_runner
+        self.power = power or run_power
+        self.default_ip = default_ip or default_route_ipv4
+        self.apply_address = apply_address or apply_new_address
+        started = monotonic()
+        self._next_check = started + self.CHECK_FIRST
+        self._next_address = started + self.ADDRESS_FIRST
+        self._check_forced = False
+        self._force_check = False
+        self._jobs = {}
+        self._callbacks = {}
+        self._state = None
+        self._last_logged = {}
+        self._actions = []
+
+    # ----- plumbing -----
+    def conf(self) -> dict:
+        return read_config(self.config_path)
+
+    def run(self, now: dt.datetime) -> list:
+        """One pass of every side job. Never raises. Returns what it did, as text."""
+        self._actions = []
+        epoch = now.timestamp()
+        self._state = None
+        try:
+            self._cur()
+        except LookupError:
+            return []                         # `sinko setup` has not made the shared state yet
+        except Exception as err:
+            self._complain("state", err)
+            return []
+        for name, step in (("jobs", self._collect), ("reconcile", self._reconcile), ("check", self._check),
+                           ("update", self._update), ("power", self._power), ("address", self._address)):
+            try:
+                step(now, epoch)
+            except Exception as err:
+                self._complain(name, err)
+                self._state = None
+        for line in self._actions:
+            log.info(line)
+        return self._actions
+
+    def _complain(self, name: str, err) -> None:
+        """Log a failure of a side job at most once every 30 minutes per job (a network that is down would otherwise
+        fill the log with a line every 15 seconds)."""
+        log.debug("maintenance job %s failed", name, exc_info=err if isinstance(err, BaseException) else None)
+        now = self.mono()
+        last = self._last_logged.get(name)
+        if last is None or now - last >= self.COMPLAIN_EVERY:
+            self._last_logged[name] = now
+            log.warning("%s: %s (shown at most every %d minutes)", name, short_text(err, 160), self.COMPLAIN_EVERY // 60)
+
+    def _read(self) -> dict:
+        groups = self.api.group_map()
+        if G_STATE not in groups:
+            raise LookupError("the shared state does not exist yet")
+        return parse_state(groups[G_STATE].get("comment"))
+
+    def _cur(self):
+        if self._state is None:
+            self._state = self._read()
+        return self._state
+
+    def _change(self, mutate) -> bool:
+        """Apply `mutate` to the state as it is right now (re-read, so what the page wrote a moment ago is kept) and
+        write it only if something changed: every write makes Pi-hole reload."""
+        self._state = None
+        return patch_state(self.api, mutate)
+
+    def _spawn(self, name: str, fn, callback) -> bool:
+        job = self._jobs.get(name)
+        if job is None:
+            job = self._jobs[name] = self._job_factory(name)
+        if job.busy():
+            return False
+        self._callbacks[name] = callback
+        return job.start(fn)
+
+    def _collect(self, now, epoch) -> None:
+        for name, job in list(self._jobs.items()):
+            outcome = job.take()
+            if outcome is None:
+                continue
+            try:
+                self._callbacks.pop(name)(outcome, epoch)
+            except Exception as err:
+                self._complain(name, err)
+                self._state = None
+
+    @staticmethod
+    def _slot(state: dict, kind: str):
+        return {"update": (state["update"], "request"), "check": (state["update"], "checkRequest"),
+                "power": (state["power"], "request")}[kind]
+
+    def _take_marker(self, kind: str, marker, extra=None):
+        """The request protocol: store the marker as handled, clear it in the state, and only then may the caller act.
+
+        Returns what was seen in the state (a dict: {"action": ...} for power), or None when the caller must not act:
+        the page wrote another request in between (that one is picked up on the next tick). If the state cannot be
+        written the marker is forgotten again, so a request is never lost.
+        """
+        previous = load_handled().get(kind)
+        set_handled(kind, marker)
+        seen = {}
+
+        def clear(state):
+            node, key = self._slot(state, kind)
+            if node[key] != marker:
+                seen["aborted"] = True
+                return
+            node[key] = None
+            if kind == "power":
+                seen["action"], node["action"] = node["action"], None
+            if extra:
+                extra(state)
+        try:
+            self._change(clear)
+        except BaseException:
+            set_handled(kind, previous)
+            raise
+        if seen.pop("aborted", False):
+            set_handled(kind, previous)
+            return None
+        return seen
+
+    def _clear_stale(self, kind: str, marker) -> None:
+        """A request this box already acted on is still in the state (it was cut off before the clearing, or the page
+        was slow): remove it, and do not act again."""
+        def clear(state):
+            node, key = self._slot(state, kind)
+            if node[key] == marker:
+                node[key] = None
+                if kind == "power":
+                    node["action"] = None
+        self._change(clear)
+
+    # ----- the update's result -----
+    def _reconcile(self, now, epoch) -> None:
+        u = self._cur()["update"]
+        stale_latest = bool(u["latest"]) and not is_newer(u["latest"], VERSION)
+        if not stale_latest and u["status"] != "running":
+            return
+        result = read_update_result() if u["status"] == "running" else None
+        seen = {}
+
+        def mutate(state):
+            up = state["update"]
+            if up["latest"] and not is_newer(up["latest"], VERSION):
+                up["latest"] = up["notes"] = None                       # that release is installed now
+            if up["status"] != "running":
+                return
+            if result is not None and result["at"] >= up["at"] - 5:
+                up["status"] = result["status"]
+                up["from"] = result["from"] or up["from"]
+                up["to"] = result["to"] or up["to"]
+                up["error"] = result["error"] if result["status"] == "failed" else None
+                up["at"] = result["at"]
+                if result["status"] == "ok" and up["latest"] and result["to"] and not is_newer(up["latest"], result["to"]):
+                    up["latest"] = up["notes"] = None
+                seen["result"] = result["status"]
+            elif abs(epoch - up["at"]) > self.STUCK_AFTER and not RunLock.is_held():
+                up["status"], up["error"], up["at"] = "failed", "The update did not finish.", epoch
+                seen["stuck"] = True
+        self._change(mutate)
+        if "result" in seen:
+            clear_update_result()                                       # only after the state holds it
+            self._actions.append("update %s" % ("finished" if seen["result"] == "ok" else "failed"))
+        elif seen.get("stuck"):
+            self._actions.append("update did not finish")
+
+    # ----- update check -----
+    def _check_enabled(self) -> bool:
+        try:
+            return classify_ref(release_settings(self.conf())["ref"])[0] != "branch"      # a developer box is never offered a release
+        except UpdateError:
+            return False
+
+    def _check(self, now, epoch) -> None:
+        u = self._cur()["update"]
+        forced = False
+        marker = u["checkRequest"]
+        if marker is not None:
+            if load_handled().get("check") == marker:
+                self._clear_stale("check", marker)
+            elif self._take_marker("check", marker) is not None:
+                forced = True
+                self._actions.append("check requested by the page")
+        if not self._check_enabled():
+            return
+        forced = forced or self._force_check
+        if not (forced or (self.mono() >= self._next_check and self.clock_ok())):
+            return
+        conf = self.conf()
+        if self._spawn("check", lambda: self.check(conf), self._check_done):
+            self._next_check = self.mono() + self.CHECK_EVERY
+            self._check_forced, self._force_check = forced, False
+        elif forced:
+            self._force_check = True           # a check is running already: ask again when it is done
+
+    def _check_done(self, outcome, epoch) -> None:
+        status, value = outcome
+        if status == "error":
+            self._complain("update check", value)      # offline or rate limited: the old answer stays
+            return
+        latest = value["version"] if value else None
+        notes = value["notes"] if value else None
+        forced = self._check_forced
+
+        def mutate(state):
+            u = state["update"]
+            if u["latest"] != latest or u["notes"] != notes or forced or not 0 <= epoch - u["checked"] < 86400:
+                u["latest"], u["notes"], u["checked"] = latest, notes, epoch
+        self._change(mutate)
+        if latest:
+            self._actions.append("update %s is available" % latest)
+
+    # ----- update run -----
+    def _update(self, now, epoch) -> None:
+        st = self._cur()
+        u = st["update"]
+        marker = u["request"]
+        if marker is not None and load_handled().get("update") == marker:
+            self._clear_stale("update", marker)
+            return
+        too_soon = u["status"] in ("ok", "failed") and 0 <= epoch - u["at"] < self.MIN_RUN_GAP
+        if marker is not None:
+            if u["status"] == "running":
+                if self._take_marker("update", marker) is not None:
+                    self._actions.append("update request ignored: an update is already running")
+                return
+            if too_soon:
+                return                         # keep the request; it is acted on when the gap is over
+            self._begin_update(epoch, marker, "update requested by the page")
+            return
+        if (u["auto"] and u["latest"] and is_newer(u["latest"], VERSION) and u["status"] != "running" and not too_soon
+                and self.AUTO_WINDOW[0] <= now.hour < self.AUTO_WINDOW[1] and self.clock_ok()
+                and not (u["status"] == "failed" and u["to"] == u["latest"] and epoch - u["at"] < self.FAILED_BLOCKS_AUTO)):
+            self._begin_update(epoch, None, "automatic update to %s" % u["latest"])
+
+    def _begin_update(self, epoch: float, marker, why: str) -> None:
+        def running(state):
+            up = state["update"]
+            up["status"], up["at"], up["error"] = "running", epoch, None
+            up["from"], up["to"] = VERSION, up["latest"]
+        if marker is not None:
+            if self._take_marker("update", marker, running) is None:
+                return
+        else:
+            self._change(running)
+        clear_update_result()                  # the runner's result is the only one the next reconcile may see
+        self._actions.append(why)
+        if not self._spawn("runner", self.start_runner, self._runner_started):
+            self._runner_started(("ok", False), epoch)
+
+    def _runner_started(self, outcome, epoch) -> None:
+        status, value = outcome
+        if status == "ok" and value:
+            return
+        if status == "error":
+            self._complain("update runner", value)
+        else:
+            self._complain("update runner", "it could not be started")
+
+        def failed(state):
+            up = state["update"]
+            if up["status"] == "running" and not RunLock.is_held():
+                up["status"], up["error"], up["at"] = "failed", "The update could not be started.", epoch
+        self._change(failed)
+
+    # ----- power -----
+    def _power(self, now, epoch) -> None:
+        st = self._cur()
+        marker = st["power"]["request"]
+        if marker is None:
+            return
+        if load_handled().get("power") == marker:
+            self._clear_stale("power", marker)
+            return
+        if st["update"]["status"] == "running":
+            return                             # never cut the power in the middle of an installation
+        seen = self._take_marker("power", marker)
+        if seen is None or seen.get("action") not in POWER_ACTIONS:
+            return
+        action = seen["action"]
+        self._actions.append("power request: %s" % action)
+        self._spawn("power", lambda: self.power(action), self._power_done)
+
+    def _power_done(self, outcome, epoch) -> None:
+        if outcome[0] == "error":
+            self._complain("power request", outcome[1])
+
+    # ----- address watch -----
+    def _address(self, now, epoch) -> None:
+        if self.mono() < self._next_address:
+            return
+        self._next_address = self.mono() + self.ADDRESS_EVERY
+        conf = self.conf()
+        known = conf.get("SINKO_IP")
+        if not known:
+            return                             # not a box this program installed
+        current = self.default_ip()
+        if not current or current == known or not valid_lan_ip(current):
+            return
+        self._actions.append("address changed from %s to %s" % (known, current))
+        self._spawn("address", lambda: self.apply_address(current, conf, self.config_path), self._address_done)
+
+    def _address_done(self, outcome, epoch) -> None:
+        if outcome[0] == "error":
+            self._complain("address change", outcome[1])       # retried at the next address check
+
+
+# --------------------------------------------------------------------------- #
 # Commands
 # --------------------------------------------------------------------------- #
 def cmd_setup(args) -> int:
@@ -1836,6 +2323,11 @@ def cmd_run(args) -> int:
     signal.signal(signal.SIGINT, _stop)
 
     catalog = load_catalog()
+    try:
+        ensure_state_dir("cache")
+    except OSError as err:
+        log.error("cannot create %s: %s (updates and requests from the page will not work)", state_dir(), err)
+    maintenance = Maintenance()
     api = None
     backoff = 5
     log.info("scheduler %s started", VERSION)
@@ -1847,6 +2339,8 @@ def cmd_run(args) -> int:
             Controller(api, catalog).tick()
             backoff = 5
             wait = TICK_SECONDS
+            maintenance.api = api
+            maintenance.run(dt.datetime.now())          # never raises; a failing job is logged and skipped
         except (ApiError, OSError, ValueError, KeyError, http.client.HTTPException) as err:
             # FTL restarting, cli_pw rotated, network hiccup… retry with backoff.
             log.warning("scheduler: %s (retrying in %ss)", err, backoff)
@@ -2762,24 +3256,7 @@ def cmd_watch(args) -> int:
 
 
 def cmd_configure(args) -> int:
-    conf = read_config()
-    ftl_set_config("webserver.serve_all", "true")
-    ftl_set_config("webserver.api.cli_pw", "true")
-    # The config file still holds the name added by the previous run (install.sh
-    # rewrites it afterwards), so a renamed or removed name does not linger.
-    old = conf.get("SINKO_HOSTNAME", "")
-    hostname = args.hostname if args.hostname is not None else old
-    ours = {n for n in (old, hostname) if n}
-    hosts = parse_cli_array(ftl_config("dns.hosts"))
-    new = hosts
-    if args.remove_hostname or args.ip:
-        new = [h for h in hosts if not ours & set(h.split()[1:])]
-        if hostname and args.ip and not args.remove_hostname:
-            new = merged_hosts(new, args.ip, hostname)
-    if new != hosts:
-        ftl_set_config("dns.hosts", json.dumps(new))
-    if args.disable_web:
-        ftl_set_config("webserver.serve_all", "false")
+    apply_pihole_settings(read_config(), args.hostname, args.ip, args.remove_hostname, args.disable_web)
     print("sinko: Pi-hole settings applied")
     return 0
 

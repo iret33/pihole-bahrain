@@ -1097,7 +1097,7 @@ class RollbackNoteTests(unittest.TestCase):
     """After a rollback by hand the box must not install the same release again the next night."""
 
     def setUp(self):
-        self.httpd, self.store = mock_pihole.serve()
+        self.httpd, self.store = fake_release.serve_pihole()
         self.addCleanup(self.httpd.server_close)
         self.addCleanup(self.httpd.shutdown)
         self.api = pb.Api("http://127.0.0.1:%d" % self.httpd.server_port, password=mock_pihole.PASSWORD)
@@ -1150,7 +1150,7 @@ class RollbackNoteTests(unittest.TestCase):
 
 class SelfcheckTests(unittest.TestCase):
     def setUp(self):
-        self.httpd, self.store = mock_pihole.serve()
+        self.httpd, self.store = fake_release.serve_pihole()
         self.addCleanup(self.httpd.server_close)
         self.addCleanup(self.httpd.shutdown)
         tmp = tempfile.TemporaryDirectory()
