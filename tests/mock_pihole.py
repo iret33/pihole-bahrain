@@ -56,6 +56,7 @@ class Store:
         self.query_ids = itertools.count(1)
         self.privacy = 0                  # FTL privacy level: 1 hides domains, 2 also clients, 3 hides all queries
         self.gravity_domains = 123456
+        self.dns_restarts = 0             # POST /api/action/restartdns calls (clears the resolver's cache)
 
     def gid(self, name):
         return next((g["id"] for g in self.groups if g["name"] == name), None)
@@ -168,6 +169,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.top_clients(query)
             if parts == ["queries"]:
                 return self.queries(query)
+            if parts == ["action", "restartdns"] and method == "POST":
+                s.dns_restarts += 1
+                return self.send(200, {"status": "success"})
             if parts == ["dns", "blocking"] and method == "GET":
                 return self.send(200, {"blocking": s.blocking, "timer": None})
             if parts and parts[0] == "groups":

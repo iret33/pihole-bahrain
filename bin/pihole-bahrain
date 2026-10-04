@@ -431,6 +431,18 @@ class Api:
     def delete_group(self, name):
         self.request("DELETE", "/api/groups/" + self.q(name))
 
+    def flush_dns(self):
+        """Clear the box's DNS cache so a changed rule applies at once.
+
+        Pi-hole keeps answers it learned before a block and keeps serving them (even stale ones), so an app that was
+        just blocked can keep working for a while. A restart of the resolver is quick and empties that cache. Best
+        effort: a failure here must never stop a rule change that already happened.
+        """
+        try:
+            self.request("POST", "/api/action/restartdns")
+        except Exception as e:                        # noqa: BLE001
+            log.warning("could not clear the DNS cache: %s", e)
+
     def put_client(self, client, comment, groups):
         self.request("PUT", "/api/clients/" + self.q(client),
                      {"comment": comment, "groups": groups})
@@ -708,15 +720,20 @@ class Controller:
         self.api.put_group(G_STATE, json.dumps(state, separators=(",", ":")), False)
 
     def apply(self, blocked: dict, offline: bool, groups: dict) -> None:
+        changed = False
         for s in self.catalog["services"]:
             name = svc_group(s["id"])
             want = bool(blocked.get(s["id"], False))
             g = groups.get(name)
             if g is not None and bool(g["enabled"]) != want:
                 self.api.put_group(name, g.get("comment") or "", want)
+                changed = True
         g = groups[G_OFFLINE]
         if bool(g["enabled"]) != offline:
             self.api.put_group(G_OFFLINE, g.get("comment") or "", offline)
+            changed = True
+        if changed:
+            self.api.flush_dns()                      # timers and bedtime must take effect at once too
 
     def tick(self, now: dt.datetime | None = None) -> list:
         """One scheduler pass. Returns a list of human-readable actions taken."""
