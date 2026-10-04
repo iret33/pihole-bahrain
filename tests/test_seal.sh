@@ -2,6 +2,7 @@
 # tools/seal.sh on a fake "golden unit": a fake root with Sinko installed (by the real installer), the mock Pi-hole holding
 # a family's objects, and the files a used Armbian box has (SSH keys, history, logs, machine id). Nothing here touches the
 # real system: every system command is a stub and every path is under the fake root.
+# shellcheck disable=SC2016  # in this file a $ in single quotes is literal on purpose: password hashes, a getty line
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tests/lib_stubs.sh disable=SC1091
@@ -60,6 +61,33 @@ make_golden() {
   echo "older queries" >"$ROOT/var/log/pihole/pihole.log.1"; echo "oldest queries" >"$ROOT/var/log/pihole/pihole.log.2.gz"
   echo active >"$ROOT/var/log/journal/0123abcd/system.journal"; echo archived >"$ROOT/var/log/journal/0123abcd/system@0000000000000001-0000000000000002.journal"
   echo "install log" >"$ROOT/var/log/sinko-install.log"
+  # Pi-hole's own leftovers: its HTTPS key (generated at its first start), earlier versions of pihole.toml (one holds the
+  # seller's password hash), earlier gravity databases (with the test devices), its temporary database and installer log.
+  echo "PRIVATE KEY golden" >"$ROOT/etc/pihole/tls.pem"; echo "certificate golden" >"$ROOT/etc/pihole/tls.crt"; echo "ca golden" >"$ROOT/etc/pihole/tls_ca.crt"
+  mkdir -p "$ROOT/etc/pihole/config_backups" "$ROOT/etc/pihole/gravity_backups"
+  echo 'pwhash = "$BALLOON-SHA256$seller-hash"' >"$ROOT/etc/pihole/config_backups/pihole.toml.1"
+  echo "database old" >"$ROOT/etc/pihole/gravity_old.db"; echo "database older" >"$ROOT/etc/pihole/gravity_backups/gravity.db.2"
+  echo "database tmp" >"$ROOT/etc/pihole/pihole-tmp.db"; echo "pihole install log" >"$ROOT/etc/pihole/install.log"
+  # A two-factor secret and an application password somebody set in Pi-hole's admin page.
+  pihole-FTL --config webserver.api.totp_secret JBSWY3DPEHPK3PXP; pihole-FTL --config webserver.api.app_pwhash '$BALLOON-SHA256$app-hash'
+  # Armbian's automatic root login on the console, which its first-login wizard removes (a harmless getty drop-in stays).
+  mkdir -p "$ROOT/etc/systemd/system/getty@.service.d" "$ROOT/etc/systemd/system/serial-getty@.service.d" "$ROOT/etc/systemd/system/getty@tty1.service.d"
+  printf '[Service]\nExecStart=\nExecStart=-/sbin/agetty --noissue --autologin root %%I $TERM\n' >"$ROOT/etc/systemd/system/getty@.service.d/override.conf"
+  cp "$ROOT/etc/systemd/system/getty@.service.d/override.conf" "$ROOT/etc/systemd/system/serial-getty@.service.d/override.conf"
+  printf '[Service]\nTTYVTDisallocate=no\n' >"$ROOT/etc/systemd/system/getty@tty1.service.d/keep.conf"
+  # Wi-Fi networks (the wired setup must stay) and NetworkManager's secret key.
+  mkdir -p "$ROOT/etc/netplan" "$ROOT/etc/NetworkManager/system-connections" "$ROOT/etc/wpa_supplicant" "$ROOT/var/lib/NetworkManager"
+  printf 'network:\n  version: 2\n  ethernets:\n    all:\n      dhcp4: true\n' >"$ROOT/etc/netplan/10-dhcp-all-interfaces.yaml"
+  printf 'network:\n  version: 2\n  wifis:\n    wlan0:\n      dhcp4: true\n      access-points:\n        "HomeNet":\n          password: "seller-wifi-pass"\n' >"$ROOT/etc/netplan/30-wifis-dhcp.yaml"
+  printf '[connection]\nid=HomeNet\ntype=wifi\n[wifi-security]\npsk=seller-wifi-pass\n' >"$ROOT/etc/NetworkManager/system-connections/HomeNet.nmconnection"
+  printf '[connection]\nid=Wired\ntype=ethernet\n' >"$ROOT/etc/NetworkManager/system-connections/Wired.nmconnection"
+  printf 'ctrl_interface=/run/wpa_supplicant\nnetwork={\n  ssid="HomeNet"\n  psk="seller-wifi-pass"\n}\n' >"$ROOT/etc/wpa_supplicant/wpa_supplicant.conf"
+  echo "nm-secret-key" >"$ROOT/var/lib/NetworkManager/secret_key"
+  # Armbian keeps /var/log in memory and the card's own copy in /var/log.hdd: rotated logs only ever exist there.
+  mkdir -p "$ROOT/var/log.hdd/pihole"
+  echo "card syslog" >"$ROOT/var/log.hdd/syslog"; echo "card older" >"$ROOT/var/log.hdd/syslog.1"; echo gz >"$ROOT/var/log.hdd/auth.log.2.gz"
+  echo "card queries" >"$ROOT/var/log.hdd/pihole/pihole.log"; echo "card older queries" >"$ROOT/var/log.hdd/pihole/pihole.log.1"
+  echo "card oldest queries" >"$ROOT/var/log.hdd/pihole/pihole.log.2.gz"; echo "files" >"$ROOT/var/log.hdd/armbian-ramlog.log"
   : >"$WORK/calls.log"
 }
 
@@ -96,7 +124,10 @@ world_before="$(world_digest)"; api_before="$(api_digest)"
 bash "$SEAL" --dry-run >"$WORK/dry.out" 2>&1 || { cat "$WORK/dry.out"; fail "dry run failed"; }
 for shown in "Sara, Omar" "pihole-FTL.db" "ssh_host_ed25519_key" "$ROOT/root/.bash_history" "$ROOT/home/pi/.bash_history" \
              "$ROOT/root/.ssh/authorized_keys" "$ROOT/root/.not_logged_in_yet" "/etc/machine-id" "install-id" "initial-password" \
-             "Set the host name to sinko" "hardware watchdog" "anonymous-counter" "welcome screen" "random-seed"; do
+             "Set the host name to sinko" "hardware watchdog" "anonymous-counter" "welcome screen" "random-seed" \
+             "tls.pem" "tls_ca.crt" "config_backups" "gravity_old.db" "gravity_backups" "pihole-tmp.db" "two-factor secret" "application password" \
+             "getty@.service.d/override.conf" "serial-getty@.service.d/override.conf" "30-wifis-dhcp.yaml" "HomeNet.nmconnection" \
+             "wpa_supplicant.conf" "secret_key" "$ROOT/var/log.hdd" "Write zeros over the free space" "Lock the root password"; do
   grep -qF -- "$shown" "$WORK/dry.out" || { cat "$WORK/dry.out"; fail "the plan does not show: $shown"; }
 done
 grep -q "Dry run: nothing was changed" "$WORK/dry.out" || fail "the dry run does not say it changed nothing"
@@ -121,7 +152,9 @@ SINKO_TTY="$WORK/answer" bash "$SEAL" >"$WORK/seal.out" 2>&1 || { cat "$WORK/sea
 grep -q "Type SEAL" "$WORK/seal.out" || fail "SEAL was not asked for"
 grep -q "Sealed. Power the box off now" "$WORK/seal.out" || fail "no closing instruction"
 diff <(plan_lines "$WORK/dry.out") <(plan_lines "$WORK/seal.out") >/dev/null || { diff <(plan_lines "$WORK/dry.out") <(plan_lines "$WORK/seal.out") || true; fail "the real run did not do what the dry run announced"; }
-grep -q "hunter2\|generated-password" "$WORK/seal.out" && fail "a secret was printed"
+grep -q "hunter2\|generated-password\|seller-wifi-pass\|seller-hash\|JBSWY3DPEHPK3PXP" "$WORK/seal.out" && fail "a secret was printed"
+echo "    the plan ends with the lock-down: nothing that can still fail comes after it"
+[[ "$(plan_lines "$WORK/dry.out" | tail -n1)" == *"Lock the root password"* ]] || fail "the lock-down is not the last step of the plan"
 
 echo "    Sinko's own state is reset, the user's own Pi-hole objects are not touched"
 [[ ! -e "$WORK/units/sinko.service.active" && -e "$WORK/units/sinko.service.enabled" ]] || fail "the scheduler must be stopped but stay enabled"
@@ -141,6 +174,20 @@ grep -q 'pihole-FTL --config webserver.api.password <empty>' "$WORK/calls.log" |
 [[ ! -e "$WORK/units/pihole-FTL.service.active" ]] || fail "Pi-hole's FTL was left running"
 [[ ! -e "$ROOT/etc/pihole/pihole-FTL.db" && ! -e "$ROOT/etc/pihole/pihole-FTL.db-wal" && ! -e "$ROOT/etc/pihole/pihole-FTL.db-shm" ]] || fail "the query history is still there"
 [[ -f "$ROOT/etc/pihole/gravity.db" && -f "$ROOT/etc/pihole/pihole.toml" ]] || fail "Pi-hole's own files were removed"
+echo "    Pi-hole's HTTPS key and certificates are gone (every box makes its own), FTL was stopped before and not started again"
+for tls in tls.pem tls.crt tls_ca.crt; do [[ ! -e "$ROOT/etc/pihole/$tls" ]] || fail "$tls is still there: every box would serve HTTPS with the golden unit's private key"; done
+echo "    the seller's old settings, older gravity databases and the temporary database are gone; the folders stay"
+for residue in config_backups/pihole.toml.1 gravity_old.db gravity_backups/gravity.db.2 pihole-tmp.db install.log; do
+  [[ ! -e "$ROOT/etc/pihole/$residue" ]] || fail "$residue is still there (it holds the seller's password hash or the test devices)"
+done
+[[ -d "$ROOT/etc/pihole/config_backups" && -d "$ROOT/etc/pihole/gravity_backups" ]] || fail "a Pi-hole folder was removed (only what is in it may go)"
+echo "    no password, no two-factor secret, no application password: cleared before the web password, and read back"
+grep -q 'pihole-FTL --config webserver.api.totp_secret <empty>' "$WORK/calls.log" || fail "the two-factor secret was not cleared"
+grep -q 'pihole-FTL --config webserver.api.app_pwhash <empty>' "$WORK/calls.log" || fail "the application password was not cleared"
+[[ -z "$(pihole-FTL --config webserver.api.totp_secret)" && -z "$(pihole-FTL --config webserver.api.app_pwhash)" ]] || fail "a secret is still stored in Pi-hole's settings"
+totp_line="$(grep -n 'webserver.api.totp_secret <empty>' "$WORK/calls.log" | head -1 | cut -d: -f1)"
+password_line="$(grep -n 'webserver.api.password <empty>' "$WORK/calls.log" | head -1 | cut -d: -f1)"
+(( totp_line < password_line )) || fail "the web password was cleared first: the check that stops as soon as it is gone never looks at the other secrets"
 echo "    SSH: root locked, password logins off, the seller's keys gone, host keys gone"
 grep -q "passwd -R $ROOT -l root" "$WORK/calls.log" || fail "the root password was not locked"
 grep -q '^PasswordAuthentication no$' "$ROOT/etc/ssh/sshd_config.d/00-sinko-lockdown.conf" || fail "no sshd drop-in"
@@ -153,6 +200,11 @@ grep -q '^127.0.1.1 sinko$' "$ROOT/etc/hosts" || fail "/etc/hosts does not have 
 grep -q golden-opi "$ROOT/etc/hosts" && fail "/etc/hosts still has the old name"
 grep -q '^127.0.0.1 localhost$' "$ROOT/etc/hosts" || fail "/etc/hosts lost its localhost line"
 grep -q '^RuntimeWatchdogSec=' "$ROOT/etc/systemd/system.conf.d/90-sinko-watchdog.conf" || fail "no watchdog drop-in although /dev/watchdog exists"
+# The Allwinner watchdog (sunxi_wdt) takes 1 to 16 seconds: a longer time is refused by the driver and the watchdog stays off.
+for key in RuntimeWatchdogSec RebootWatchdogSec; do
+  secs="$(sed -n "s/^$key=\([0-9]*\)$/\1/p" "$ROOT/etc/systemd/system.conf.d/90-sinko-watchdog.conf")"
+    if [[ ! "$secs" =~ ^[0-9]+$ ]] || (( secs < 1 || secs > 16 )); then fail "$key is '$secs': the Allwinner watchdog accepts 1 to 16 seconds (a minute-based value is refused)"; fi
+done
 [[ "$(cat "$ROOT/var/lib/sinko/firstboot")" == "hostname=sinko" && "$(stat -c %a "$ROOT/var/lib/sinko/firstboot")" == 600 ]] || fail "the first-start flag is wrong"
 [[ -e "$WORK/units/sinko-firstboot.service.enabled" ]] || fail "the first-start service is not enabled"
 echo "    what is unique or private is gone; what is needed stays"
@@ -173,7 +225,30 @@ done
 [[ ! -e "$ROOT/var/log/journal/0123abcd/system@0000000000000001-0000000000000002.journal" ]] || fail "an archived journal was left"
 grep -q 'journalctl --rotate' "$WORK/calls.log" || fail "the journal was not rotated"
 grep -q 'journalctl --vacuum' "$WORK/calls.log" || fail "the journal was not vacuumed"
-grep -q 'dd if=/dev/zero' "$WORK/calls.log" && fail "zeros were written without --zerofill"
+echo "    the card's own copy of the logs (/var/log.hdd): rotated logs gone, Pi-hole's emptied, the folder itself stays"
+[[ ! -e "$ROOT/var/log.hdd/syslog.1" && ! -e "$ROOT/var/log.hdd/auth.log.2.gz" ]] || fail "rotated logs were left on the card's copy"
+for emptied in var/log.hdd/syslog var/log.hdd/pihole/pihole.log var/log.hdd/pihole/pihole.log.1 var/log.hdd/pihole/pihole.log.2.gz; do
+  [[ -f "$ROOT/$emptied" && ! -s "$ROOT/$emptied" ]] || fail "$emptied must stay as an empty file (it listed the seller's lookups)"
+done
+[[ -d "$ROOT/var/log.hdd" ]] || fail "the card's log folder (a mount point) was removed"
+echo "    the console no longer logs in without a password (the other getty settings stay); saved Wi-Fi networks and their keys are gone (the wired setup stays)"
+[[ ! -e "$ROOT/etc/systemd/system/getty@.service.d/override.conf" && ! -e "$ROOT/etc/systemd/system/serial-getty@.service.d/override.conf" ]] || fail "the automatic root login on the console is still there"
+[[ -f "$ROOT/etc/systemd/system/getty@tty1.service.d/keep.conf" ]] || fail "a getty drop-in that has no autologin was removed"
+for wifi in etc/netplan/30-wifis-dhcp.yaml etc/NetworkManager/system-connections/HomeNet.nmconnection etc/wpa_supplicant/wpa_supplicant.conf var/lib/NetworkManager/secret_key; do
+  [[ ! -e "$ROOT/$wifi" ]] || fail "$wifi is still there"
+done
+[[ -f "$ROOT/etc/netplan/10-dhcp-all-interfaces.yaml" && -f "$ROOT/etc/NetworkManager/system-connections/Wired.nmconnection" ]] || fail "the wired network setup was removed"
+grep -rq "seller-wifi-pass" "$ROOT/etc" && fail "the seller's Wi-Fi password is still in a file"
+echo "    zeros are written over the free space by default (deleting only frees blocks), after a sync, and again synced"
+dd_line="$(grep -n "^dd if=/dev/zero of=$ROOT/.sinko-zerofill " "$WORK/calls.log" | head -1 | cut -d: -f1)"
+[[ -n "$dd_line" ]] || fail "no zeros were written by default"
+sync_before="$(head -n "$((dd_line - 1))" "$WORK/calls.log" | grep -c '^sync$' || true)"
+(( sync_before >= 1 )) || fail "no sync before the zeros: blocks freed a moment ago cannot be overwritten, so the deleted data would stay"
+tail -n +"$((dd_line + 1))" "$WORK/calls.log" | grep -q '^sync$' || fail "no sync after the zeros"
+[[ ! -e "$ROOT/.sinko-zerofill" ]] || fail "the zero file was left behind"
+echo "    the root password is locked last: nothing that changes the system comes after it"
+last_change="$(grep -E '^((passwd|systemctl|journalctl|dd|apt-get|ssh-keygen|hostnamectl) .*|sync)$' "$WORK/calls.log" | tail -n1)"
+[[ "$last_change" == "passwd -R $ROOT -l root" ]] || fail "the last change is '$last_change', not the lock of the root password"
 
 echo "--- sealing again changes nothing more"
 world_after="$(world_digest)"
@@ -183,12 +258,22 @@ bash "$SEAL" --yes >"$WORK/seal2.out" 2>&1 || { cat "$WORK/seal2.out"; fail "sea
 [[ "$(mock_api GET /api/groups | json_get 'sorted(g["name"] for g in d["groups"])')" == "$(cat "$WORK/groups1.txt")" ]] || fail "a second seal changed the groups"
 [[ ! -e "$WORK/units/pihole-FTL.service.active" ]] || fail "a second seal left FTL running"
 
-echo "--- --zerofill writes zeros under the fake root only, then deletes them"
+echo "--- zeros go over the free space under the fake root only, then are deleted; --zerofill is still accepted"
 make_golden
 bash "$SEAL" --yes --zerofill >"$WORK/zero.out" 2>&1 || { cat "$WORK/zero.out"; fail "sealing with --zerofill failed"; }
 grep -q "^dd if=/dev/zero of=$ROOT/.sinko-zerofill " "$WORK/calls.log" || { cat "$WORK/calls.log"; fail "zerofill did not run on the fake root"; }
 [[ ! -e "$ROOT/.sinko-zerofill" ]] || fail "the zero file was left behind"
 grep -q "^sync" "$WORK/calls.log" || fail "no sync after the zeros"
+grep -q "WARNING" "$WORK/zero.out" && fail "a warning about the free space although it was overwritten"
+echo "--- --no-zerofill (a test unit): no zeros, and a loud warning in the plan and at the end"
+make_golden
+bash "$SEAL" --dry-run --no-zerofill >"$WORK/nozero-dry.out" 2>&1 || { cat "$WORK/nozero-dry.out"; fail "dry run with --no-zerofill failed"; }
+grep -q "WARNING: the free space is NOT overwritten" "$WORK/nozero-dry.out" || fail "the plan does not warn that deleted data stays in the image"
+grep -q "Write zeros" "$WORK/nozero-dry.out" && fail "the plan still announces zeros"
+bash "$SEAL" --yes --no-zerofill >"$WORK/nozero.out" 2>&1 || { cat "$WORK/nozero.out"; fail "sealing with --no-zerofill failed"; }
+grep -q 'dd if=/dev/zero' "$WORK/calls.log" && fail "zeros were written although --no-zerofill"
+grep -q "WARNING: the free space was NOT overwritten" "$WORK/nozero.out" || fail "no warning at the end that deleted data can be read from the image"
+diff <(plan_lines "$WORK/nozero-dry.out") <(plan_lines "$WORK/nozero.out") >/dev/null || fail "the real run did not do what the dry run announced (--no-zerofill)"
 
 echo "--- --keep-ssh-access and --hostname; no watchdog device, no watchdog setting"
 make_golden
@@ -206,7 +291,7 @@ echo "--- if the parent password cannot be removed nothing is armed and no key i
 make_golden
 touch "$WORK/password-stuck"
 if bash "$SEAL" --yes >"$WORK/stuck.out" 2>&1; then fail "sealed although the password could not be removed"; fi
-grep -q "parent password could not be removed" "$WORK/stuck.out" || { cat "$WORK/stuck.out"; fail "no message about the password"; }
+grep -q "could not be removed" "$WORK/stuck.out" || { cat "$WORK/stuck.out"; fail "no message about the password"; }
 [[ ! -e "$ROOT/var/lib/sinko/firstboot" && ! -e "$WORK/units/sinko-firstboot.service.enabled" ]] || fail "the first start was armed after a failure"
 [[ -e "$ROOT/etc/ssh/ssh_host_ed25519_key" && -e "$ROOT/etc/pihole/pihole-FTL.db" ]] || fail "something was deleted after the failure"
 echo "    the stored hash is cleared when FTL's password setting does not do it"
@@ -214,11 +299,97 @@ make_golden
 touch "$WORK/password-needs-pwhash"
 bash "$SEAL" --yes >"$WORK/pwhash.out" 2>&1 || { cat "$WORK/pwhash.out"; fail "the pwhash fallback did not work"; }
 grep -q 'webserver.api.pwhash <empty>' "$WORK/calls.log" || fail "the stored hash was not cleared"
-echo "--- if SSH password logins stay on, nothing is armed"
+echo "--- if SSH password logins would stay on, the seal stops and the root password is NOT locked (the lock-down is the last step)"
 make_golden
 touch "$WORK/sshd-open"
 if bash "$SEAL" --yes >"$WORK/open.out" 2>&1; then fail "sealed although SSH password logins are still on"; fi
 grep -q "SSH password logins are still on" "$WORK/open.out" || { cat "$WORK/open.out"; fail "no message about SSH"; }
-[[ ! -e "$ROOT/var/lib/sinko/firstboot" && -e "$ROOT/etc/ssh/ssh_host_ed25519_key" ]] || fail "armed or deleted keys after the SSH check failed"
+grep -q "The root password was NOT locked" "$WORK/open.out" || fail "the message does not say that the root password was not locked"
+grep -q "^passwd" "$WORK/calls.log" && fail "the root password was locked although SSH password logins stay on"
+echo "--- a failure after the first-start service is armed but before the lock-down leaves the seller able to log in and run seal again"
+make_golden
+touch "$WORK/ftl-stop-fails"
+if bash "$SEAL" --yes >"$WORK/midfail.out" 2>&1; then fail "sealed although Pi-hole's FTL could not be stopped"; fi
+grep -q "could not stop Pi-hole's FTL" "$WORK/midfail.out" || { cat "$WORK/midfail.out"; fail "no message about FTL"; }
+grep -q "^passwd" "$WORK/calls.log" && fail "the root password was locked although the seal failed half way"
+[[ ! -e "$ROOT/etc/ssh/sshd_config.d/00-sinko-lockdown.conf" && -f "$ROOT/root/.ssh/authorized_keys" && -e "$ROOT/etc/ssh/ssh_host_ed25519_key" ]] \
+  || fail "a failure half way left the seller locked out (or without keys)"
+rm -f "$WORK/ftl-stop-fails"
+bash "$SEAL" --yes >"$WORK/midfail2.out" 2>&1 || { cat "$WORK/midfail2.out"; fail "running the seal again after the failure did not complete it"; }
+grep -q "^passwd -R $ROOT -l root" "$WORK/calls.log" || fail "the second run did not lock the root password"
+
+echo "--- a two-factor secret or an application password that cannot be cleared stops the seal before anything is armed"
+make_golden
+touch "$WORK/credential-stuck"
+if bash "$SEAL" --yes >"$WORK/cred.out" 2>&1; then fail "sealed although a two-factor secret / application password is still set"; fi
+grep -q "two-factor secret or an application password could not be removed" "$WORK/cred.out" || { cat "$WORK/cred.out"; fail "no message about the secrets"; }
+[[ ! -e "$ROOT/var/lib/sinko/firstboot" && -e "$ROOT/etc/ssh/ssh_host_ed25519_key" && -e "$ROOT/etc/pihole/tls.pem" ]] || fail "something was armed or deleted after the failure"
+
+echo "--- a unit that is not ready to be copied is refused (dry run and real run), every reason is listed, nothing is changed"
+make_golden
+world_before="$(world_digest)"; api_before="$(api_digest)"
+check_refused() {  # reason-pattern what
+  local mode
+  for mode in --dry-run --yes; do
+    if bash "$SEAL" "$mode" >"$WORK/pre.out" 2>&1; then cat "$WORK/pre.out"; fail "$2: sealed or dry-ran although the unit is not ready ($mode)"; fi
+    grep -q "not ready to be sealed" "$WORK/pre.out" || fail "$2: no 'not ready' message ($mode)"
+    grep -q -- "$1" "$WORK/pre.out" || { cat "$WORK/pre.out"; fail "$2: the reason is not given ($mode)"; }
+  done
+  [[ "$(world_digest)" == "$world_before" && "$(api_digest)" == "$api_before" ]] || fail "$2: a refused seal changed something"
+}
+sed -i '/^avahi-daemon$/d' "$WORK/dpkg-installed"
+check_refused "avahi-daemon is not installed" "no avahi"
+echo "    ... unless the box was set up without the local name (SINKO_MDNS=0), or the checks are skipped"
+cp "$ROOT/etc/sinko/config" "$WORK/config.keep"; echo "SINKO_MDNS=0" >>"$ROOT/etc/sinko/config"
+bash "$SEAL" --dry-run >/dev/null 2>&1 || fail "the missing avahi was refused although the local name is switched off"
+cp "$WORK/config.keep" "$ROOT/etc/sinko/config"
+bash "$SEAL" --dry-run --skip-checks >"$WORK/skip.out" 2>&1 || fail "--skip-checks did not skip the checks"
+grep -q "not checked" "$WORK/skip.out" || fail "--skip-checks does not say that the unit was not checked"
+echo avahi-daemon >>"$WORK/dpkg-installed"
+rm "$WORK/units/avahi-daemon.service.enabled"
+check_refused "avahi-daemon is not enabled" "avahi not enabled"
+touch "$WORK/units/avahi-daemon.service.enabled"
+touch "$WORK/ip-static"
+check_refused "fixed address" "a fixed address"
+rm "$WORK/ip-static"
+for unit in sinko.service sinko-lists.timer pihole-FTL.service; do
+  mv "$WORK/units/$unit.enabled" "$WORK/unit.bak"
+  check_refused "$unit is not enabled" "$unit not enabled"
+  mv "$WORK/unit.bak" "$WORK/units/$unit.enabled"
+done
+cp "$ROOT/etc/ssh/sshd_config" "$WORK/sshd_config.keep"
+printf 'PermitRootLogin yes\nPasswordAuthentication yes\n' >"$ROOT/etc/ssh/sshd_config"
+world_before="$(world_digest)"
+check_refused "does not include /etc/ssh/sshd_config.d" "sshd_config without Include"
+bash "$SEAL" --dry-run --keep-ssh-access >/dev/null 2>&1 || fail "a test unit with --keep-ssh-access was refused for its sshd_config"
+cp "$WORK/sshd_config.keep" "$ROOT/etc/ssh/sshd_config"
+printf 'network:\n  version: 2\n  ethernets:\n    eth0:\n      dhcp4: true\n  wifis:\n    wlan0:\n      access-points:\n        "HomeNet":\n          password: "x"\n' >"$ROOT/etc/netplan/50-mixed.yaml"
+world_before="$(world_digest)"
+check_refused "50-mixed.yaml has Wi-Fi and wired settings in one file" "a netplan file with Wi-Fi and wired settings"
+rm "$ROOT/etc/netplan/50-mixed.yaml"
+bash "$SEAL" --dry-run >/dev/null 2>&1 || fail "a ready unit was refused after the problems were fixed"
+
+echo "--- Pi-hole's HTTPS key: the file its settings name (and the public copies beside it) go; an odd location stops the seal"
+make_golden
+mkdir -p "$ROOT/etc/pihole/custom"
+echo key >"$ROOT/etc/pihole/custom/web.pem"; echo cert >"$ROOT/etc/pihole/custom/web.crt"; echo ca >"$ROOT/etc/pihole/custom/web_ca.crt"
+pihole-FTL --config webserver.tls.cert "$ROOT/etc/pihole/custom/web.pem"
+bash "$SEAL" --yes >"$WORK/tls1.out" 2>&1 || { cat "$WORK/tls1.out"; fail "sealing with a custom certificate path failed"; }
+[[ ! -e "$ROOT/etc/pihole/custom/web.pem" && ! -e "$ROOT/etc/pihole/custom/web.crt" && ! -e "$ROOT/etc/pihole/custom/web_ca.crt" ]] || fail "the certificate files named in Pi-hole's settings are still there"
+make_golden
+pihole-FTL --config webserver.tls.cert /etc/passwd
+world_before="$(world_digest)"
+if bash "$SEAL" --yes >"$WORK/tls2.out" 2>&1; then fail "a certificate path outside the box was accepted"; fi
+grep -q "unexpected location of Pi-hole's webserver.tls.cert" "$WORK/tls2.out" || { cat "$WORK/tls2.out"; fail "no message about the odd certificate path"; }
+[[ "$(world_digest)" == "$world_before" ]] || fail "files were changed although the certificate path was refused"
+
+echo "--- the card's copy of the logs can be somewhere else (HDD_LOG in Armbian's settings)"
+make_golden
+rm -rf "$ROOT/var/log.hdd"
+mkdir -p "$ROOT/var/card/pihole" "$ROOT/etc/default"
+echo "HDD_LOG=/var/card" >"$ROOT/etc/default/armbian-ramlog"
+echo "old" >"$ROOT/var/card/syslog.1"; echo "queries" >"$ROOT/var/card/pihole/pihole.log.1"
+bash "$SEAL" --yes >"$WORK/hdd.out" 2>&1 || { cat "$WORK/hdd.out"; fail "sealing with HDD_LOG failed"; }
+[[ ! -e "$ROOT/var/card/syslog.1" && -f "$ROOT/var/card/pihole/pihole.log.1" && ! -s "$ROOT/var/card/pihole/pihole.log.1" ]] || fail "the card's log copy named by HDD_LOG was not cleaned"
 
 echo "seal tests passed"

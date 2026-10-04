@@ -22,7 +22,7 @@ fake_system_init() {
   export WORK ROOT PORT
   : >"$WORK/calls.log"
   printf '%s\n' git curl ca-certificates python3 iproute2 >"$WORK/dpkg-installed"
-  touch "$WORK/units/pihole-FTL.service.active"
+  touch "$WORK/units/pihole-FTL.service.active" "$WORK/units/pihole-FTL.service.enabled"      # a Pi-hole that was installed: running and enabled
   trap fake_system_cleanup EXIT
   guard_snapshot
   make_stubs
@@ -62,9 +62,11 @@ make_stubs() {
 #!/usr/bin/env bash
 [[ -e "$WORK/net-down" ]] && exit 0
 addr="$(cat "$WORK/ipaddr" 2>/dev/null || echo 192.168.1.50)"
+# $WORK/ip-static: the address is a fixed one (no "dynamic" in the line), not one from the router's DHCP.
+dyn="dynamic "; [[ -e "$WORK/ip-static" ]] && dyn=""
 case "$*" in
   *"route show default"*) echo "default via 192.168.1.1 dev eth0 proto dhcp src $addr metric 100" ;;
-  *"addr show dev eth0"*) echo "2: eth0    inet $addr/24 brd 192.168.1.255 scope global dynamic eth0" ;;
+  *"addr show dev eth0"*) echo "2: eth0    inet $addr/24 brd 192.168.1.255 scope global ${dyn}eth0" ;;
 esac
 EOF
   # dpkg -s PKG answers from a list the apt-get stub extends.
@@ -124,8 +126,14 @@ norm() { case "$1" in *.*) echo "$1" ;; *) echo "$1.service" ;; esac; }
 case "$cmd" in
   is-active)  u="$(norm "${units[0]}")"; if [[ -e "$WORK/units/$u.active" ]]; then echo active; exit 0; else echo inactive; exit 3; fi ;;
   is-enabled) u="$(norm "${units[0]}")"; if [[ -e "$WORK/units/$u.enabled" ]]; then echo enabled; exit 0; else echo disabled; exit 1; fi ;;
-  start|restart) for u in "${units[@]}"; do touch "$WORK/units/$(norm "$u").active"; done ;;
-  stop) for u in "${units[@]}"; do rm -f "$WORK/units/$(norm "$u").active"; done ;;
+  start|restart) for u in "${units[@]}"; do touch "$WORK/units/$(norm "$u").active"; done
+                 # $WORK/ftl-makes-cert: Pi-hole's FTL writes its HTTPS key and certificate when it starts without them.
+                 if [[ -e "$WORK/ftl-makes-cert" && " ${units[*]} " == *" pihole-FTL.service "* ]]; then
+                   mkdir -p "$ROOT/etc/pihole"; echo "BEGIN PRIVATE KEY $RANDOM$RANDOM" >"$ROOT/etc/pihole/tls.pem"; echo "certificate" >"$ROOT/etc/pihole/tls.crt"
+                 fi ;;
+  stop) # $WORK/ftl-stop-fails: Pi-hole's FTL cannot be stopped.
+        if [[ -e "$WORK/ftl-stop-fails" && " ${units[*]} " == *" pihole-FTL.service "* ]]; then exit 1; fi
+        for u in "${units[@]}"; do rm -f "$WORK/units/$(norm "$u").active"; done ;;
   enable) for u in "${units[@]}"; do touch "$WORK/units/$(norm "$u").enabled"; (( now )) && touch "$WORK/units/$(norm "$u").active"; done ;;
   disable) for u in "${units[@]}"; do rm -f "$WORK/units/$(norm "$u").enabled"; (( now )) && rm -f "$WORK/units/$(norm "$u").active"; done ;;
 esac
@@ -152,10 +160,18 @@ assert args[0] == "--config", args
 if os.path.exists(work + "/ftl-fail"):
     sys.exit(1)
 if len(args) == 2:
-    print(conf.get(args[1], ""))
+    value = conf.get(args[1], "")
+    if args[1] == "webserver.api.totp_secret":          # like FTL: a write-only secret prints ******** when set, nothing when not
+        value = "********" if value else ""
+    print(value)
     # Like FTL: with -q, a true/false setting is also the exit status.
     sys.exit(1 if "-q" in sys.argv and conf.get(args[1]) == "false" else 0)
 val = args[2]
+if args[1] in ("webserver.api.totp_secret", "webserver.api.app_pwhash", "webserver.api.app_sudo"):
+    with open(work + "/calls.log", "a") as log:
+        log.write("pihole-FTL --config %s <%s>\n" % (args[1], "empty" if not val else "set"))
+    if os.path.exists(work + "/credential-stuck"):      # a secret that cannot be cleared
+        sys.exit(0)
 if args[1] in ("webserver.api.password", "webserver.api.pwhash"):
     # $WORK/password-stuck: nothing removes the password. $WORK/password-needs-pwhash: only clearing the hash does.
     with open(work + "/calls.log", "a") as log:
@@ -366,9 +382,10 @@ fresh_start() {
   rm -rf "$ROOT" "$WORK/units" "$WORK/ftl.json" "$WORK/tz" "$WORK/ipaddr" "$WORK/net-down" "$WORK/offline" "$WORK/apt-fail" \
     "$WORK/ftl-fail" "$WORK/password-stuck" "$WORK/password-needs-pwhash" "$WORK/keygen-fail" "$WORK/sshd-open" \
     "$WORK/pihole-g-block" "$WORK/pihole-g-fail" "$WORK/pihole-g-started" "$WORK/pihole-g-pid" "$WORK/apt-update-fail" "$WORK/apt-nocandidate" \
-    "$WORK/py-old" "$WORK/password-in-env" "$WORK/curl.log" "$WORK/ftl-makes-cert" "$WORK/ftl-cert-fail"
+    "$WORK/py-old" "$WORK/password-in-env" "$WORK/curl.log" "$WORK/ftl-makes-cert" "$WORK/ftl-cert-fail" \
+    "$WORK/ip-static" "$WORK/ftl-stop-fails" "$WORK/credential-stuck"
   mkdir -p "$ROOT/etc/pihole" "$ROOT/etc/ssh" "$ROOT/var/www/html" "$ROOT/var/log" "$WORK/units"
-  touch "$ROOT/etc/pihole/pihole.toml" "$WORK/units/pihole-FTL.service.active"
+  touch "$ROOT/etc/pihole/pihole.toml" "$WORK/units/pihole-FTL.service.active" "$WORK/units/pihole-FTL.service.enabled"
   : >"$WORK/calls.log"
   printf '%s\n' git curl ca-certificates python3 iproute2 >"$WORK/dpkg-installed"
   start_mock
