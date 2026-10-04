@@ -4,12 +4,15 @@
 Commands
   setup        Create/refresh the Pi-hole groups, lists and rules this add-on uses.
   configure    Apply the Pi-hole settings the add-on needs (web root, local name).
-  run          Background scheduler (timers + bedtime). Run by systemd.
+  run          Background scheduler (timers, bedtime, updates, requests from the page). Run by systemd.
   status       Print the current state.
   doctor       Check the installation and print anything that needs fixing.
   diagnose     Read-only report on why a service is still reachable after it was blocked.
   watch        Follow the DNS log to see whether a device's queries reach the box.
-  update       Update the add-on to the latest version from GitHub.
+  update       Update to the newest release (--check, --yes, --ref REF, --force); rolls back by itself if it fails.
+  rollback     Go back to the previous version stored on this box.
+  selfcheck    Quick check that the installation works (run after every update).
+  telemetry    The optional anonymous counter: on, off, status, payload (what would be sent), reset-id.
   use-mac      Re-register children that were added by IP address under their MAC address.
   remove       Delete everything this add-on created inside Pi-hole.
 
@@ -20,9 +23,11 @@ How it works
   by disabling it. Kid devices are members of every pb-* group. Toggling a group
   takes effect immediately (FTL reloads on every API write) — no DNS restart.
 
-  Shared state (timer, bedtime schedule) is stored as JSON in the description of
-  the disabled group "pb-state", so the web page and this daemon share it through
-  the Pi-hole API without any extra port or database.
+  Shared state (timer, bedtime schedule, update status, the parent's requests) is
+  stored as JSON in the description of the disabled group "pb-state", so the web
+  page and this daemon share it through the Pi-hole API without any extra port or
+  database. The page only asks (a request marker); the daemon acts once and clears
+  the marker. Runtime data of the daemon itself lives in /var/lib/sinko (root only).
 
 Only the Python 3 standard library is used.
 """
@@ -30,30 +35,42 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import fcntl
+import gzip
+import hashlib
 import http.client
 import ipaddress
 import json
 import logging
 import os
+import random
 import re
+import secrets
 import shutil
 import signal
 import socket
 import ssl
+import stat
 import struct
 import subprocess
 import sys
+import tarfile
+import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 
-VERSION = "2.2.0"
+VERSION = "3.0.0"
 
 APP_DIR = os.environ.get("SINKO_APP_DIR", "/opt/sinko")
 LISTS_DIR = os.path.join(APP_DIR, "lists")
 CONFIG_FILE = os.environ.get("SINKO_CONFIG_FILE", "/etc/sinko/config")
 DEFAULT_LISTS_BASE = "https://raw.githubusercontent.com/iret33/sinko/master/lists"
+DEFAULT_STATE_DIR = "/var/lib/sinko"
+TELEMETRY_URL = ""          # the anonymous counter's address; empty = not configured, and then nothing is ever sent
 CLI_PW_FILE = os.environ.get("SINKO_CLI_PW_FILE", "/etc/pihole/cli_pw")
 
 G_KIDS = "pb-kids"          # marker: membership == "this is a kid device"
@@ -125,6 +142,10 @@ def read_config(path: str = CONFIG_FILE) -> dict:
                 conf[key.strip()] = value.strip().strip("'\"")
     except FileNotFoundError:
         pass
+    # A box that was installed as pihole-bahrain (<= 2.2.x) still has PB_* keys until the installer rewrites the
+    # file; its answers (hostname, address, list source, ref) must not be lost in between.
+    for key in [k for k in conf if k.startswith("PB_")]:
+        conf.setdefault("SINKO_" + key[3:], conf[key])
     return conf
 
 
@@ -149,6 +170,199 @@ def kid_groups(group_ids: dict, catalog: dict) -> list:
     """Every group a kid device must belong to (except pb-paused)."""
     names = [G_KIDS, G_GUARD, G_OFFLINE] + [svc_group(s["id"]) for s in catalog["services"]]
     return [DEFAULT_GROUP] + [group_ids[n] for n in names if n in group_ids]
+
+
+# --------------------------------------------------------------------------- #
+# Runtime data: /var/lib/sinko (root only, never reachable from the page)
+# --------------------------------------------------------------------------- #
+HANDLED_KINDS = ("update", "check", "power")
+INSTALL_ID_RE = re.compile(r"^[0-9a-f]{32}\Z")
+RESULT_STATUSES = ("ok", "failed")
+
+
+def state_dir() -> str:
+    """Read on every call, so tests (and a second box in a container) can point it elsewhere."""
+    return os.environ.get("SINKO_STATE_DIR") or DEFAULT_STATE_DIR
+
+
+def state_path(name: str) -> str:
+    return os.path.join(state_dir(), name)
+
+
+def _private_dir(path: str) -> None:
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    st = os.stat(path)
+    # makedirs obeys the umask, and an installer may have made the directory with looser rights.
+    if st.st_uid == os.geteuid() and stat.S_IMODE(st.st_mode) & 0o077:
+        os.chmod(path, 0o700)
+
+
+def ensure_state_dir(sub: str = "") -> str:
+    """Create the runtime directory (mode 0700: it holds the counter id and the update files); returns its path."""
+    path = state_dir()
+    _private_dir(path)
+    if sub:
+        path = os.path.join(path, sub)
+        _private_dir(path)
+    return path
+
+
+def _fsync_dir(directory: str) -> None:
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def atomic_write(path: str, data, mode: int = 0o600) -> None:
+    """Replace `path` so that a reader, or a power cut, sees the old content or the new, never half of it.
+
+    The box has no battery-backed clock and loses power without warning; a request marker that is only half
+    written would be acted on twice or not at all.
+    """
+    raw = data.encode("utf-8") if isinstance(data, str) else data
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix="." + os.path.basename(path) + ".")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            os.fchmod(fh.fileno(), mode)
+            fh.write(raw)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    _fsync_dir(directory)
+
+
+def read_json_file(path: str, default=None):
+    """The parsed JSON in `path`, or `default` when it is missing or unreadable (never raises)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return default
+
+
+def load_handled() -> dict:
+    """The request markers this box already acted on: {"update": m, "check": m, "power": m} (missing = never)."""
+    data = read_json_file(state_path("handled.json"), {})
+    out = {}
+    if isinstance(data, dict):
+        for kind in HANDLED_KINDS:
+            marker = _nonce(data.get(kind))
+            if marker is not None:
+                out[kind] = marker
+    return out
+
+
+def set_handled(kind: str, marker) -> None:
+    """Remember (or, with None, forget) the marker of a request. Durable before it returns."""
+    ensure_state_dir()
+    handled = load_handled()
+    if marker is None:
+        handled.pop(kind, None)
+    else:
+        handled[kind] = marker
+    atomic_write(state_path("handled.json"), json.dumps(handled, sort_keys=True))
+
+
+def install_id(create: bool = True):
+    """The random id the optional counter sends. Made on first use; derived from nothing on the device."""
+    try:
+        with open(state_path("install-id"), encoding="ascii") as fh:
+            value = fh.read().strip()
+        if INSTALL_ID_RE.match(value):
+            return value
+    except (OSError, ValueError):
+        pass
+    return reset_install_id() if create else None
+
+
+def reset_install_id() -> str:
+    ensure_state_dir()
+    value = secrets.token_hex(16)
+    atomic_write(state_path("install-id"), value + "\n")
+    return value
+
+
+def write_update_result(status: str, from_version, to_version, error, at: float) -> dict:
+    """What the update runner leaves for the scheduler (see architecture.md, "Update flow")."""
+    result = {"status": status, "from": from_version, "to": to_version, "error": error, "at": at}
+    ensure_state_dir()
+    atomic_write(state_path("update-result.json"), json.dumps(result, sort_keys=True))
+    return result
+
+
+def read_update_result():
+    """The runner's result as parse_state would accept it, or None when there is no (valid) result."""
+    raw = read_json_file(state_path("update-result.json"))
+    if not isinstance(raw, dict) or raw.get("status") not in RESULT_STATUSES or not _is_count(raw.get("at")):
+        return None
+    err = raw.get("error")
+    return {"status": raw["status"],
+            "from": raw.get("from") if isinstance(raw.get("from"), str) and SEMVER_RE.match(raw["from"]) else None,
+            "to": raw.get("to") if isinstance(raw.get("to"), str) and SEMVER_RE.match(raw["to"]) else None,
+            "error": err[:200] if isinstance(err, str) and err.strip() else None,
+            "at": float(raw["at"])}
+
+
+def clear_update_result() -> None:
+    try:
+        os.unlink(state_path("update-result.json"))
+    except FileNotFoundError:
+        pass
+
+
+class RunLock:
+    """An flock on /var/lib/sinko/lock: held for the whole of an update or rollback, so two never run at once.
+
+    The kernel drops the lock when the holder dies, so a crashed runner cannot block the next one. `is_held()` is
+    how the scheduler tells whether a runner is still alive.
+    """
+
+    def __init__(self):
+        self._fh = None
+
+    def acquire(self) -> bool:
+        ensure_state_dir()
+        fh = open(state_path("lock"), "a+")
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fh.close()
+            return False
+        self._fh = fh
+        return True
+
+    def release(self) -> None:
+        if self._fh is not None:
+            self._fh.close()               # closing drops the flock
+            self._fh = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+
+    @staticmethod
+    def is_held() -> bool:
+        probe = RunLock()
+        if probe.acquire():
+            probe.release()
+            return False
+        return True
 
 
 # --------------------------------------------------------------------------- #
@@ -578,13 +792,838 @@ def in_schedule(sched: dict, now: dt.datetime) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# Updates (docs/maintainers/architecture.md, "Update flow")
+# --------------------------------------------------------------------------- #
+DEFAULT_REPO_SLUG = "iret33/sinko"
+DEFAULT_REPO_URL = "https://github.com/iret33/sinko.git"
+RELEASE_ASSET = "sinko.tar.gz"
+MAX_DOWNLOAD = 20 * 1024 * 1024        # a release is a few MB; anything bigger is not ours
+MAX_UNPACKED = 100 * 1024 * 1024       # gzip can inflate a small download a thousandfold
+MAX_MEMBERS = 5000
+MIN_FREE_BYTES = 100 * 1024 * 1024
+CHECK_TIMEOUT = 10
+DOWNLOAD_TIMEOUT = 30                  # for each wait on the network ...
+DOWNLOAD_DEADLINE = 600                # ... and for a whole download
+INSTALL_TIMEOUT = 1800
+SELFCHECK_WAIT = 90                    # the installer has just restarted FTL and the scheduler: give them time
+REQUIRED_MEMBERS = ("sinko/VERSION", "sinko/install.sh", "sinko/bin/sinko")
+REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,100}\Z")      # never starts with "-": it reaches git's command line
+SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]{1,60}/[A-Za-z0-9_.-]{1,60}\Z")
+TAG_RE = re.compile(r"^v(\d{1,4}\.\d{1,4}\.\d{1,4})\Z")
+CACHE_RE = re.compile(r"^sinko-(\d{1,4}\.\d{1,4}\.\d{1,4})\.tar\.gz\Z")
+REPO_URL_RE = re.compile(r"^(?:https://github\.com/|git@github\.com:)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?\Z")
+
+
+class UpdateError(Exception):
+    """A failure with a message a parent can read: short, and never containing a secret."""
+
+
+class UpdateLocked(UpdateError):
+    """Another update or rollback is running."""
+
+
+def parse_version(text):
+    """(major, minor, patch) for 'X.Y.Z', else None."""
+    if isinstance(text, str) and SEMVER_RE.fullmatch(text):          # fullmatch: "$" alone lets a trailing newline through
+        return tuple(int(part) for part in text.split("."))
+    return None
+
+
+def is_newer(candidate, current) -> bool:
+    a, b = parse_version(candidate), parse_version(current)
+    return a is not None and b is not None and a > b
+
+
+def short_text(text, limit: int = 200) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def release_settings(conf=None) -> dict:
+    """Where releases come from. The environment beats /etc/sinko/config beats the built-in GitHub address."""
+    conf = read_config() if conf is None else conf
+
+    def pick(key: str) -> str:
+        return os.environ.get(key) or conf.get(key) or ""
+    repo = pick("SINKO_REPO") or DEFAULT_REPO_URL
+    slug = pick("SINKO_REPO_SLUG") or (REPO_URL_RE.match(repo).group(1) if REPO_URL_RE.match(repo) else "") \
+        or DEFAULT_REPO_SLUG
+    if not SLUG_RE.match(slug) or "." in slug.split("/") or ".." in slug.split("/"):
+        raise UpdateError("The update source in the settings (%s) is not a GitHub name like owner/name." % short_text(slug, 60))
+    base = (pick("SINKO_RELEASE_BASE") or "https://github.com/%s/releases" % slug).rstrip("/")
+    api = pick("SINKO_RELEASE_API") or "https://api.github.com/repos/%s/releases/latest" % slug
+    for url in (base, api):
+        if not url.startswith(("http://", "https://")):
+            raise UpdateError("The update address in the settings is not a web address.")
+    return {"slug": slug, "base": base, "api": api, "repo": repo, "ref": pick("SINKO_REF") or "latest"}
+
+
+def classify_ref(ref):
+    """('latest', None), ('tag', 'X.Y.Z') for vX.Y.Z, or ('branch', ref): the developer path (git)."""
+    if not isinstance(ref, str) or not REF_RE.match(ref) or ".." in ref:
+        raise UpdateError("'%s' is not a version name." % short_text(ref, 40))
+    if ref == "latest":
+        return "latest", None
+    tag = TAG_RE.match(ref)
+    return ("tag", tag.group(1)) if tag else ("branch", ref)
+
+
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow redirects (GitHub serves release files from another host), but never from https down to http."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old, new = urllib.parse.urlsplit(req.full_url).scheme, urllib.parse.urlsplit(newurl).scheme
+        if new not in ("http", "https") or (old == "https" and new != "https"):
+            raise urllib.error.HTTPError(req.full_url, code, "redirect to an insecure address refused", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def http_fetch(url, max_bytes, timeout=DOWNLOAD_TIMEOUT, deadline=DOWNLOAD_DEADLINE, dest=None):
+    """GET `url`. Returns the body, or writes it to the file `dest` and returns None.
+
+    A body over `max_bytes` is refused while it arrives, not after. `timeout` only limits each single wait, so a
+    server that sends a byte a second would hold the update lock for hours: `deadline` limits the whole transfer.
+    """
+    request = urllib.request.Request(url, headers={"User-Agent": "sinko/" + VERSION})
+    started = time.monotonic()
+    total = 0
+    chunks = []
+    out = None
+    try:
+        if dest:
+            out = open(dest, "wb")
+        with urllib.request.build_opener(_SafeRedirect).open(request, timeout=timeout) as resp:
+            read = getattr(resp, "read1", resp.read)         # read1 returns what has arrived; read() would wait for a full block
+            length = resp.headers.get("Content-Length")
+            if length and length.isdigit() and int(length) > max_bytes:
+                raise UpdateError("The download is larger than allowed.")
+            while True:
+                if time.monotonic() - started > deadline:
+                    raise UpdateError("The download took too long.")
+                chunk = read(65536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise UpdateError("The download is larger than allowed.")
+                if out:
+                    out.write(chunk)
+                else:
+                    chunks.append(chunk)
+    except UpdateError:
+        raise
+    except urllib.error.HTTPError as err:
+        err.close()
+        raise UpdateError("The server answered HTTP %s for %s." % (err.code, url.rsplit("/", 1)[-1][:60]))
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as err:
+        raise UpdateError("Could not download %s (%s)." % (url.rsplit("/", 1)[-1][:60],
+                                                          short_text(getattr(err, "reason", None) or err, 80)))
+    finally:
+        if out:
+            out.close()
+    return None if dest else b"".join(chunks)
+
+
+def pick_release(data):
+    """The newest usable release in GitHub's answer as {"version", "tag"}, or None.
+
+    Understands the object of /releases/latest and the list of /releases. Drafts and prereleases never count, and
+    neither does a tag that is not exactly vX.Y.Z.
+    """
+    best = None
+    for item in data if isinstance(data, list) else [data]:
+        if not isinstance(item, dict) or item.get("draft") or item.get("prerelease"):
+            continue
+        tag = item.get("tag_name")
+        match = TAG_RE.match(tag) if isinstance(tag, str) else None
+        if match and (best is None or parse_version(match.group(1)) > parse_version(best["version"])):
+            best = {"version": match.group(1), "tag": tag}
+    return best
+
+
+def notes_url(slug: str, tag: str):
+    """The release page, built from the configured repository, not copied from what a server said."""
+    url = "https://github.com/%s/releases/tag/%s" % (slug, tag)
+    return url if NOTES_RE.match(url) else None
+
+
+def fetch_latest_release(settings: dict, fetch=http_fetch):
+    body = fetch(settings["api"], 1 << 20, CHECK_TIMEOUT, 30)
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except ValueError:
+        raise UpdateError("The answer about the newest version was not understood.")
+    return pick_release(data)
+
+
+def check_for_update(conf=None, running: str = VERSION, fetch=http_fetch, ref=None):
+    """The release this box could update to, {"version", "tag", "notes"}, or None when it is up to date.
+
+    Raises UpdateError when GitHub cannot be asked. A box that follows a git branch (a developer box) is
+    never offered a release.
+    """
+    settings = release_settings(conf)
+    kind, value = classify_ref(ref or settings["ref"])
+    if kind == "branch":
+        return None
+    release = {"version": value, "tag": "v" + value} if kind == "tag" else fetch_latest_release(settings, fetch)
+    if release is None or not is_newer(release["version"], running):
+        return None
+    return dict(release, notes=notes_url(settings["slug"], release["tag"]))
+
+
+def parse_sha256(text: str) -> str:
+    """The hash in a `sha256sum` file: one line, `<64 hex>  sinko.tar.gz`."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    match = re.match(r"^([0-9A-Fa-f]{64})(?:\s+\*?(\S+))?$", lines[0]) if len(lines) == 1 else None
+    if not match or (match.group(2) and match.group(2) != RELEASE_ASSET):
+        raise UpdateError("The checksum file is not in the expected form.")
+    return match.group(1).lower()
+
+
+def sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 16), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def release_url(settings: dict, tag, asset: str) -> str:
+    if tag:
+        return "%s/download/%s/%s" % (settings["base"], tag, asset)
+    return "%s/latest/download/%s" % (settings["base"], asset)
+
+
+def download_release(settings: dict, tag, dest: str, fetch=http_fetch) -> None:
+    """Fetch sinko.tar.gz and its checksum, and keep the file at `dest` only if the two agree."""
+    try:
+        fetch(release_url(settings, tag, RELEASE_ASSET), MAX_DOWNLOAD, DOWNLOAD_TIMEOUT, DOWNLOAD_DEADLINE, dest=dest)
+        text = fetch(release_url(settings, tag, RELEASE_ASSET + ".sha256"), 4096, CHECK_TIMEOUT, 30)
+        try:
+            want = parse_sha256(text.decode("utf-8"))
+        except UnicodeDecodeError:
+            raise UpdateError("The checksum file is not in the expected form.")
+        if sha256_file(dest) != want:
+            raise UpdateError("The download does not match its checksum, so it was not installed.")
+    except BaseException:
+        try:
+            os.unlink(dest)
+        except OSError:
+            pass
+        raise
+
+
+class _CappedReader:
+    """Stops a tarball that unpacks to far more than it should before it fills the disk or the memory."""
+
+    def __init__(self, fh, limit: int):
+        self._fh = fh
+        self._left = limit
+
+    def read(self, size=-1):
+        size = self._left + 1 if size is None or size < 0 else min(size, self._left + 1)
+        data = self._fh.read(size)
+        self._left -= len(data)
+        if self._left < 0:
+            raise UpdateError("The download is not a valid Sinko release (it unpacks to too much data).")
+        return data
+
+
+def _not_a_release(why: str) -> UpdateError:
+    return UpdateError("The download is not a valid Sinko release (%s)." % why)
+
+
+def unpack_release(tar_path: str, dest: str) -> str:
+    """Unpack a release into the empty directory `dest` and return the version it carries.
+
+    Every entry is checked before it is written: only plain files and folders, only below sinko/, no absolute path,
+    no "..", and no link of any kind, so nothing can be written outside `dest` or through a link. (The release has
+    no links; this is stricter than "no link that leaves the tree" on purpose.) Done by hand instead of with
+    tarfile's `filter="data"`, which only exists from Python 3.12 (and in late 3.9-3.11 patch releases).
+    """
+    files = set()
+    total = 0
+    real_dest = os.path.realpath(dest)
+    try:
+        with open(tar_path, "rb") as raw, gzip.GzipFile(fileobj=raw) as gz, \
+                tarfile.open(fileobj=_CappedReader(gz, MAX_UNPACKED + MAX_MEMBERS * 1024 + (1 << 20)), mode="r|") as tar:
+            for count, member in enumerate(tar, 1):
+                if count > MAX_MEMBERS:
+                    raise _not_a_release("too many files")
+                if member.name.startswith("/"):
+                    raise _not_a_release("a file name starts with /")
+                parts = [p for p in member.name.split("/") if p not in ("", ".")]
+                if ".." in parts:
+                    raise _not_a_release("a file name contains ..")
+                if not parts and member.isdir():
+                    continue                                  # "./", the folder itself
+                if not parts or parts[0] != "sinko":
+                    raise _not_a_release("a file is outside the sinko folder")
+                target = os.path.join(dest, *parts)
+                if os.path.commonpath([real_dest, os.path.realpath(target)]) != real_dest:
+                    raise _not_a_release("a file would land outside the folder")
+                if member.isdir():
+                    os.makedirs(target, exist_ok=True)
+                    continue
+                if member.type not in (tarfile.REGTYPE, tarfile.AREGTYPE):
+                    raise _not_a_release("%s is a link or a special file" % short_text(member.name, 60))
+                key = "/".join(parts)
+                total += member.size
+                if key in files or total > MAX_UNPACKED:
+                    raise _not_a_release("a file appears twice or the files are too big")
+                files.add(key)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(fd, "wb") as out:
+                    shutil.copyfileobj(tar.extractfile(member), out, 1 << 16)
+                    os.fchmod(out.fileno(), 0o755 if member.mode & 0o111 else 0o644)    # never setuid, never group-writable
+    except UpdateError:
+        raise
+    except (tarfile.TarError, OSError, EOFError, zlib.error) as err:
+        raise _not_a_release(short_text(err, 80))
+    missing = [name for name in REQUIRED_MEMBERS if name not in files]
+    if missing:
+        raise _not_a_release("%s is missing" % missing[0])
+    top = os.path.join(dest, "sinko")
+    for root, _dirs, _names in os.walk(top):
+        os.chmod(root, 0o755)
+    version = read_version_file(top)
+    if version is None:
+        raise _not_a_release("its VERSION file is not a version number")
+    return version
+
+
+def read_version_file(tree: str):
+    try:
+        with open(os.path.join(tree, "VERSION"), encoding="ascii") as fh:
+            text = fh.read(64).strip()
+    except (OSError, ValueError):
+        return None
+    return text if parse_version(text) else None
+
+
+def install_source(top: str) -> str:
+    """Make `top` the tree /opt/sinko/src (the last downloaded source). The old tree is renamed aside first, so a
+    failure at any point leaves one complete tree behind."""
+    src = os.path.join(APP_DIR, "src")
+    old = src + ".old"
+    shutil.rmtree(old, ignore_errors=True)
+    if os.path.lexists(src):
+        os.rename(src, old)
+    try:
+        os.rename(top, src)
+    except OSError:
+        if os.path.lexists(old):
+            os.rename(old, src)
+        raise
+    shutil.rmtree(old, ignore_errors=True)
+    return src
+
+
+def cache_dir() -> str:
+    return os.path.join(state_dir(), "cache")
+
+
+def cache_file(version: str) -> str:
+    return os.path.join(cache_dir(), "sinko-%s.tar.gz" % version)
+
+
+def cached_versions() -> list:
+    """Versions stored for offline rollback, newest first."""
+    try:
+        names = os.listdir(cache_dir())
+    except OSError:
+        return []
+    found = [m.group(1) for m in (CACHE_RE.match(n) for n in names) if m]
+    return sorted(found, key=parse_version, reverse=True)
+
+
+def drop_cached(version: str) -> None:
+    try:
+        os.unlink(cache_file(version))
+    except OSError:
+        pass
+
+
+def prune_cache(installed: str) -> None:
+    """Keep two releases: the installed one, and the newest older one (the rollback target).
+
+    "Two newest by number" would throw away the installed release after a rollback, and the older one that a second
+    rollback needs.
+    """
+    versions = cached_versions()
+    keep = {installed}
+    older = [v for v in versions if is_newer(installed, v)]
+    newer = [v for v in versions if is_newer(v, installed)]
+    if older:
+        keep.add(older[0])
+    elif newer:
+        keep.add(newer[0])
+    for version in versions:
+        if version not in keep:
+            drop_cached(version)
+
+
+def run_installer(src: str, ref: str) -> int:
+    """The installer shipped in the release, told to use `src` as it is and never to ask anything."""
+    env = dict(os.environ, SINKO_SRC=src, SINKO_NONINTERACTIVE="1", SINKO_REF=ref)
+    try:
+        return subprocess.run(["bash", os.path.join(src, "install.sh")], env=env, cwd="/", stdin=subprocess.DEVNULL,
+                              timeout=INSTALL_TIMEOUT).returncode
+    except subprocess.TimeoutExpired:
+        return 124
+    except OSError:
+        return 127
+
+
+def run_installed_selfcheck(wait: float = SELFCHECK_WAIT):
+    """(ok, detail) from `sinko selfcheck` of the program that is installed NOW.
+
+    It must be a new process: this one still runs the old code, whose VERSION would not match the page the
+    installer has just put in place.
+    """
+    exe = os.path.join(APP_DIR, "bin", "sinko")
+    if not os.path.isfile(exe):
+        return False, "the installed program is missing"
+    try:
+        done = subprocess.run([sys.executable, exe, "selfcheck", "--wait", str(int(wait))], capture_output=True,
+                              text=True, timeout=wait + 120)
+    except (OSError, subprocess.SubprocessError) as err:
+        return False, short_text(err, 80)
+    if done.returncode == 0:
+        return True, ""
+    failed = [l.strip()[4:].strip() for l in done.stdout.splitlines() if l.strip().startswith("FAIL")]
+    return False, short_text(failed[0] if failed else (done.stderr.strip() or "it exited with an error"), 120)
+
+
+class Updater:
+    """`sinko update` and `sinko rollback`. Everything that touches the network or the machine can be replaced
+    (tests give it a local server and a fake installer)."""
+
+    def __init__(self, conf=None, out=print, fetch=http_fetch, installer=run_installer, selfcheck=None, clock=time.time):
+        self.conf = read_config() if conf is None else conf
+        self.out = out
+        self.fetch = fetch
+        self.installer = installer
+        self.selfcheck = selfcheck or run_installed_selfcheck
+        self.clock = clock
+
+    # ----- entry points -----
+    def check(self):
+        return check_for_update(self.conf, fetch=self.fetch)
+
+    def update(self, ref=None, force=False, confirm=None):
+        """Install the newest release (or `ref`). Returns the result dict that was also written to
+        update-result.json, or None when `confirm` said no. Raises UpdateLocked when a run is already going."""
+        lock = RunLock()
+        if not lock.acquire():
+            raise UpdateLocked("Another update is already running.")
+        current = VERSION
+        target = {"to": None}
+        try:
+            clear_update_result()                    # a result from an earlier run must never pass for this one
+            try:
+                outcome = self._update(ref, force, confirm, current, target)
+            except UpdateError as err:
+                outcome = ("failed", target["to"], str(err))
+            except Exception as err:                 # a bug or an odd machine must not leave the box half updated and silent
+                log.exception("update failed unexpectedly")
+                outcome = ("failed", target["to"], "The update stopped unexpectedly (%s)." % type(err).__name__)
+            if outcome is None:
+                return None
+            status, to_version, error = outcome
+            return write_update_result(status, current, to_version, short_text(error) if error else None, self.clock())
+        finally:
+            lock.release()
+
+    def rollback(self):
+        """Put the newest older release stored on this box back. Returns {"status", "from", "to", "error"}."""
+        lock = RunLock()
+        if not lock.acquire():
+            raise UpdateLocked("Another update is already running.")
+        try:
+            ensure_state_dir("cache")
+            older = [v for v in cached_versions() if is_newer(VERSION, v)]
+            if not older:
+                return {"status": "failed", "from": VERSION, "to": None,
+                        "error": "No earlier version is stored on this box."}
+            self.out("Going back from %s to %s ..." % (VERSION, older[0]))
+            ok, why = self._rollback_to(older[0], release_settings(self.conf)["ref"])
+            return {"status": "ok" if ok else "failed", "from": VERSION, "to": older[0],
+                    "error": None if ok else short_text(why)}
+        except UpdateError as err:
+            return {"status": "failed", "from": VERSION, "to": None, "error": str(err)}
+        finally:
+            lock.release()
+
+    # ----- the update itself -----
+    def _update(self, ref, force, confirm, current, target):
+        settings = release_settings(self.conf)
+        ref = ref or settings["ref"]
+        kind, value = classify_ref(ref)
+        self._clean_leftovers()
+        free = shutil.disk_usage(ensure_state_dir("cache")).free
+        if free < MIN_FREE_BYTES:
+            raise UpdateError("There is not enough free space on the box (%d MB are needed)." % (MIN_FREE_BYTES >> 20))
+        os.makedirs(APP_DIR, exist_ok=True)
+        if kind == "branch":
+            if confirm and not confirm(current, None):
+                return None
+            self.out("Fetching %s from %s ..." % (ref, settings["repo"]))
+            src, version = self._fetch_branch(ref, settings["repo"])
+            target["to"] = version
+        else:
+            release = self._resolve(kind, value, settings)
+            if release is None:
+                self.out("No release is published yet; Sinko %s stays." % current)
+                return "ok", current, None
+            if release["version"] and not force and not is_newer(release["version"], current):
+                if kind == "tag":
+                    self.out("Sinko %s is installed and %s is not newer (add --force to install it anyway)."
+                             % (current, release["tag"]))
+                else:
+                    self.out("Sinko %s is already the newest version." % current)
+                return "ok", current, None
+            target["to"] = release["version"]
+            if confirm and not confirm(current, release["version"]):
+                return None
+            self.out("Downloading Sinko %s ..." % (release["version"] or "(latest)"))
+            version, src = self._fetch_release(settings, release, current, force, target)
+            if src is None:
+                self.out("Sinko %s is already the newest version." % current)
+                return "ok", current, None
+        self._ensure_rollback_copy(settings, current)
+        self.out("Installing Sinko %s ..." % version)
+        ok, why = self._install_and_check(src, ref)
+        if ok:
+            prune_cache(version)
+            self.out("Sinko is now at version %s." % version)
+            return "ok", version, None
+        if version != current:
+            drop_cached(version)              # a release that failed here is no rollback target
+            self.out("%s Going back to %s ..." % (why, current))
+            back_ok, back_why = self._rollback_to(current, ref)
+        else:
+            back_ok, back_why = False, "it is the version that was just installed"
+        if back_ok:
+            error = "%s The previous version (%s) was put back." % (why, current)
+        elif back_why.startswith("no earlier copy"):
+            error = "%s There is no earlier copy on this box to go back to." % why
+        else:
+            error = "%s Going back to %s did not work either (%s): run sudo sinko doctor." % (why, current, back_why)
+        return "failed", version, error
+
+    def _resolve(self, kind, value, settings):
+        """{"version", "tag"} of the release to install; version None means "whatever /latest/ is" (see below)."""
+        if kind == "tag":
+            return {"version": value, "tag": "v" + value}
+        try:
+            return fetch_latest_release(settings, self.fetch)
+        except UpdateError as err:
+            # GitHub's API answers 60 requests an hour per address and is blocked on some networks, while the download
+            # address is not. The tarball names its own version, which is compared after unpacking.
+            self.out("Could not ask which version is newest (%s); trying the latest download directly." % err)
+            return {"version": None, "tag": None}
+
+    def _fetch_release(self, settings, release, current, force, target):
+        """Download, verify and unpack. Returns (version, installed source dir), or (version, None) if not newer."""
+        cache = ensure_state_dir("cache")
+        fd, tarball = tempfile.mkstemp(dir=cache, prefix=".dl-", suffix=".tar.gz")
+        os.close(fd)
+        stage = tempfile.mkdtemp(dir=APP_DIR, prefix=".stage-")
+        try:
+            download_release(settings, release["tag"], tarball, self.fetch)
+            self.out("Checking the download ...")
+            version = unpack_release(tarball, stage)
+            if release["version"] and version != release["version"]:
+                raise UpdateError("The download says it is version %s, not %s." % (version, release["version"]))
+            target["to"] = version
+            if not release["version"] and not force and not is_newer(version, current):
+                return version, None
+            os.replace(tarball, cache_file(version))
+            try:
+                return version, install_source(os.path.join(stage, "sinko"))
+            except BaseException:
+                if version != current:
+                    drop_cached(version)
+                raise
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
+            try:
+                os.unlink(tarball)
+            except OSError:
+                pass
+
+    def _fetch_branch(self, ref, repo):
+        """The developer path: git clone/fetch of the configured repository. Returns (source dir, its version)."""
+        if repo.startswith("-"):
+            raise UpdateError("The update source in the settings is not valid.")
+        src = os.path.join(APP_DIR, "src")
+        env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+
+        def git(*args):
+            try:
+                subprocess.run(["git"] + list(args), check=True, env=env, stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, timeout=600)
+            except subprocess.CalledProcessError as err:
+                raise UpdateError("git could not fetch %s (%s)." % (ref, short_text(err.stderr.strip(), 100)))
+            except (OSError, subprocess.SubprocessError) as err:
+                raise UpdateError("git could not run (%s)." % short_text(err, 80))
+        if os.path.isdir(os.path.join(src, ".git")):
+            git("-C", src, "fetch", "--quiet", "--depth", "1", "origin", ref)
+            git("-C", src, "checkout", "--quiet", "--force", "FETCH_HEAD")
+        else:
+            stage = tempfile.mkdtemp(dir=APP_DIR, prefix=".stage-")
+            try:
+                git("clone", "--quiet", "--depth", "1", "--branch", ref, "--", repo, os.path.join(stage, "sinko"))
+                install_source(os.path.join(stage, "sinko"))
+            finally:
+                shutil.rmtree(stage, ignore_errors=True)
+        for name in REQUIRED_MEMBERS:
+            if not os.path.isfile(os.path.join(src, name.split("/", 1)[1])):
+                raise UpdateError("The fetched source has no %s." % name.split("/", 1)[1])
+        version = read_version_file(src)
+        if version is None:
+            raise UpdateError("The fetched source has no valid VERSION file.")
+        return src, version
+
+    def _ensure_rollback_copy(self, settings, current):
+        """The installed release is never in the cache on the first update (the installer put it there, not us):
+        fetch it again now, while the network is known to work. Without it a failed update cannot be undone."""
+        if os.path.isfile(cache_file(current)):
+            return
+        cache = ensure_state_dir("cache")
+        fd, tarball = tempfile.mkstemp(dir=cache, prefix=".dl-", suffix=".tar.gz")
+        os.close(fd)
+        try:
+            download_release(settings, "v" + current, tarball, self.fetch)
+            os.replace(tarball, cache_file(current))
+        except UpdateError as err:
+            self.out("Note: no copy of the current version is stored and it could not be fetched (%s); "
+                     "an update that fails could not be undone automatically." % err)
+        finally:
+            try:
+                os.unlink(tarball)
+            except OSError:
+                pass
+
+    def _install_and_check(self, src, ref):
+        """Run the installer on `src`, then the self-check of what it installed. Returns (ok, reason)."""
+        try:
+            rc = self.installer(src, ref)
+        except Exception:
+            log.exception("could not run the installer")
+            return False, "The installer could not be started."
+        if rc != 0:
+            return False, "The installer stopped with an error (exit status %s)." % rc
+        self.out("Checking the installation ...")
+        try:
+            ok, detail = self.selfcheck()
+        except Exception:
+            log.exception("self-check could not run")
+            ok, detail = False, "it could not run"
+        if not ok:
+            return False, "The new version did not pass its own check (%s)." % (detail or "no reason given")
+        return True, ""
+
+    def _rollback_to(self, version, ref):
+        """Reinstall a stored release. Returns (ok, reason)."""
+        path = cache_file(version)
+        if not os.path.isfile(path):
+            return False, "no earlier copy is stored on this box"
+        os.makedirs(APP_DIR, exist_ok=True)
+        stage = tempfile.mkdtemp(dir=APP_DIR, prefix=".stage-")
+        try:
+            if unpack_release(path, stage) != version:
+                return False, "the stored copy is damaged"
+            src = install_source(os.path.join(stage, "sinko"))
+        except UpdateError as err:
+            return False, str(err)
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
+        ok, why = self._install_and_check(src, ref)
+        return ok, "" if ok else why
+
+    @staticmethod
+    def _clean_leftovers():
+        """Staging folders and half downloads of a run that was cut off (power loss, killed service)."""
+        for pattern_dir, prefix in ((APP_DIR, ".stage-"), (cache_dir(), ".dl-")):
+            try:
+                names = os.listdir(pattern_dir)
+            except OSError:
+                continue
+            for name in names:
+                if name.startswith(prefix):
+                    path = os.path.join(pattern_dir, name)
+                    if os.path.isdir(path) and not os.path.islink(path):
+                        shutil.rmtree(path, ignore_errors=True)
+                    else:
+                        try:
+                            os.unlink(path)
+                        except OSError:
+                            pass
+
+
+# --------------------------------------------------------------------------- #
+# Self-check: "did the update leave a working box?" (fast, no DNS probing)
+# --------------------------------------------------------------------------- #
+def webroot() -> str:
+    if os.environ.get("SINKO_WEBROOT"):
+        return os.environ["SINKO_WEBROOT"]
+    value, err = ftl_try("webserver.paths.webroot")
+    return value if value and err is None else "/var/www/html"
+
+
+def unit_active(name: str) -> bool:
+    try:
+        return subprocess.run(["systemctl", "is-active", "--quiet", name], timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def selfcheck_round(catalog: dict) -> list:
+    """[(ok, text)], one per check."""
+    results = []
+
+    def add(ok: bool, text: str) -> None:
+        results.append((bool(ok), text))
+    api = None
+    try:
+        api = Api()
+        api.login()
+        add(True, "Pi-hole API reachable, signed in with the CLI password")
+    except (ApiError, OSError, ValueError) as err:
+        api = None
+        add(False, "Pi-hole API reachable, signed in with the CLI password (%s)" % short_text(err, 80))
+    groups = lists = None
+    if api is not None:
+        try:
+            groups, lists = api.group_map(), api.lists()
+        except (ApiError, OSError, ValueError) as err:
+            groups = None
+            reason = "could not be read: %s" % short_text(err, 60)
+    else:
+        reason = "needs the Pi-hole API"
+    if groups is not None:
+        wanted = [G_KIDS, G_GUARD, G_OFFLINE, G_PAUSED, G_STATE] + [svc_group(s["id"]) for s in catalog["services"]]
+        missing = [n for n in wanted if n not in groups]
+        add(not missing, "all groups present" + (" (missing: %s)" % ", ".join(missing[:3]) if missing else ""))
+        registered = {l.get("comment") for l in lists}
+        absent = [i for i in [s["id"] for s in catalog["services"]] + ["guard"] if LIST_COMMENT_PREFIX + i not in registered]
+        add(not absent, "every list registered" + (" (missing: %s)" % ", ".join(absent[:3]) if absent else ""))
+    else:
+        add(False, "all groups present (%s)" % reason)
+        add(False, "every list registered (%s)" % reason)
+    if api is not None:
+        try:
+            api.logout()
+        except (ApiError, OSError, ValueError):
+            pass
+    add(unit_active("sinko"), "scheduler service is running")
+    root = webroot()
+    absent = [n for n in ("index.html", "pb/app.js", "pb/version.txt") if not os.path.isfile(os.path.join(root, n))]
+    add(not absent, "page files installed in %s%s" % (root, " (missing: %s)" % ", ".join(absent) if absent else ""))
+    try:
+        with open(os.path.join(root, "pb", "version.txt"), encoding="utf-8") as fh:
+            shown = fh.read().strip()
+    except OSError:
+        shown = None
+    add(shown == VERSION, "page and program are the same version (page: %s, program: %s)" % (shown or "none", VERSION))
+    return results
+
+
+def run_selfcheck(wait: float = 0, out=print, sleep=time.sleep, clock=time.monotonic, catalog=None) -> int:
+    """Print one line per check; the exit status is 1 if any failed. With `wait`, a failing round is repeated until
+    it passes or the time is up: right after an install, FTL and the scheduler are still starting."""
+    catalog = catalog or load_catalog()
+    deadline = clock() + max(0.0, wait)
+    while True:
+        results = selfcheck_round(catalog)
+        if all(ok for ok, _ in results) or clock() >= deadline:
+            break
+        sleep(3)
+    for ok, text in results:
+        out("  " + ("ok" if ok else "FAIL").ljust(6) + text)
+    return 0 if all(ok for ok, _ in results) else 1
+
+
+# --------------------------------------------------------------------------- #
 # Controller
 # --------------------------------------------------------------------------- #
+CLOCK_HOLD_UPTIME = 600            # seconds after boot during which an unsynchronised clock is not believed
+
+
+def read_uptime():
+    try:
+        with open(os.environ.get("SINKO_UPTIME_FILE", "/proc/uptime"), encoding="ascii") as fh:
+            return float(fh.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def ntp_synchronized():
+    """True / False as `timedatectl` says, None when it cannot say (no systemd, no answer within a second)."""
+    try:
+        done = subprocess.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"], capture_output=True,
+                              text=True, timeout=1)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    answer = done.stdout.strip().lower() if done.returncode == 0 else ""
+    return True if answer == "yes" else False if answer == "no" else None
+
+
+class ClockGuard:
+    """Is the box's clock worth believing yet?
+
+    The Orange Pi has no real-time clock: after a power cut it starts with the time it last saved, hours or days
+    ago, until it has reached an internet time server. Acting on that time would switch bedtime off in the middle
+    of the night, or end a timer that has not run out. So while the box has been up less than ten minutes and
+    timedatectl says the clock is NOT synchronised, the current state is held. Only an explicit "no" holds: a machine
+    that cannot tell (no systemd) is believed, and so is every box after ten minutes, because a home without
+    internet must still get its bedtime.
+    """
+
+    def __init__(self, uptime=read_uptime, synchronized=ntp_synchronized, monotonic=time.monotonic):
+        self._uptime = uptime
+        self._probe = synchronized
+        self._mono = monotonic
+        self._synced = False
+        self._asked = None             # (monotonic time, answer) of the last "no"
+        self._holding = False
+
+    def trusted(self) -> bool:
+        up = self._uptime()
+        if up is None or up >= CLOCK_HOLD_UPTIME or self._synced:
+            return self._release()
+        now = self._mono()
+        if self._asked is None or now - self._asked[0] >= 5:        # the tick and the side jobs both ask, a few times
+            answer = self._probe()
+            if answer is True:
+                self._synced = True
+                return self._release()
+            self._asked = (now, answer)
+        if self._asked[1] is False:
+            if not self._holding:
+                self._holding = True
+                log.info("the clock is not synchronised yet: holding bedtime and timers for up to %d minutes",
+                         int((CLOCK_HOLD_UPTIME - up) // 60) + 1)
+            return False
+        return self._release()
+
+    def _release(self) -> bool:
+        if self._holding:
+            self._holding = False
+            log.info("the clock is trusted now: bedtime and timers follow it again")
+        return True
+
+
 class Controller:
-    def __init__(self, api: Api, catalog: dict, base: str | None = None):
+    def __init__(self, api: Api, catalog: dict, base: str | None = None, clock_trusted=None):
         self.api = api
         self.catalog = catalog
         self.base = base or lists_base()
+        self.clock_trusted = clock_trusted         # a callable; None = always believe the clock
         self._pending_kids = []
 
     # ----- setup -----
@@ -791,6 +1830,8 @@ class Controller:
 
     def tick(self, now: dt.datetime | None = None) -> list:
         """One scheduler pass. Returns a list of human-readable actions taken."""
+        if self.clock_trusted is not None and not self.clock_trusted():
+            return []                      # hold the current state: see ClockGuard
         now = now or dt.datetime.now()
         epoch = now.timestamp()
         state, blocked, offline, groups = self.read_state()
@@ -845,8 +1886,634 @@ class Controller:
 
 
 # --------------------------------------------------------------------------- #
+# Maintenance: what the scheduler does besides bedtime and timers
+# --------------------------------------------------------------------------- #
+def apply_pihole_settings(conf: dict, hostname=None, ip=None, remove_hostname=False, disable_web=False) -> None:
+    """What `sinko configure` does (also used when the box's address changes)."""
+    ftl_set_config("webserver.serve_all", "true")
+    ftl_set_config("webserver.api.cli_pw", "true")
+    # The config file still holds the name added by the previous run (install.sh
+    # rewrites it afterwards), so a renamed or removed name does not linger.
+    old = conf.get("SINKO_HOSTNAME", "")
+    hostname = hostname if hostname is not None else old
+    ours = {n for n in (old, hostname) if n}
+    hosts = parse_cli_array(ftl_config("dns.hosts"))
+    new = hosts
+    if remove_hostname or ip:
+        new = [h for h in hosts if not ours & set(h.split()[1:])]
+        if hostname and ip and not remove_hostname:
+            new = merged_hosts(new, ip, hostname)
+    if new != hosts:
+        ftl_set_config("dns.hosts", json.dumps(new))
+    if disable_web:
+        ftl_set_config("webserver.serve_all", "false")
+
+
+def write_config_value(key: str, value: str, path=None) -> None:
+    """Change one KEY=value line of the settings file (adding it if there is none). Every other line, and the file's
+    rights, stay as they are."""
+    if not re.match(r"^[A-Za-z0-9._:-]+\Z", value):
+        raise ValueError("not a plain value: %r" % value)
+    path = path or CONFIG_FILE
+    with open(path, encoding="utf-8") as fh:
+        lines = fh.read().splitlines()
+    out, done = [], False
+    for line in lines:
+        name = line.split("=", 1)[0].strip()
+        if "=" in line and not line.lstrip().startswith("#") and name == key:
+            if not done:
+                out.append("%s=%s" % (key, value))
+            done = True                       # a repeated key would shadow the new value, so only one is kept
+        else:
+            out.append(line)
+    if not done:
+        out.append("%s=%s" % (key, value))
+    atomic_write(path, "\n".join(out) + "\n", stat.S_IMODE(os.stat(path).st_mode))
+
+
+def valid_lan_ip(text) -> bool:
+    ip = parse_ip(text)
+    return ip is not None and ip.version == 4 and not (ip.is_loopback or ip.is_link_local or ip.is_unspecified
+                                                       or ip.is_multicast or ip.is_reserved)
+
+
+def default_route_ipv4():
+    """The IPv4 address this box uses towards its router, or None. Connecting a UDP socket sends nothing: it only
+    makes the kernel choose the source address, so this is instant and needs no subprocess."""
+    gateway = SystemProbe().default_gateway()
+    if not gateway:
+        return None
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.settimeout(1)
+        sock.connect((gateway, 9))
+        ip = sock.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        sock.close()
+    return ip if valid_lan_ip(ip) else None
+
+
+def apply_new_address(ip: str, conf: dict, config_path=None) -> None:
+    """The box got another address: point the local name at it (what `sinko configure --ip` does), then remember it."""
+    apply_pihole_settings(conf, hostname=conf.get("SINKO_HOSTNAME", ""), ip=ip)
+    write_config_value("SINKO_IP", ip, config_path)
+
+
+def start_update_runner() -> bool:
+    """Start `sinko update --yes --from-panel` so that it outlives the restart of this service, which the installer
+    causes: as its own transient systemd unit, and if systemd refuses, as a detached process."""
+    argv = [sys.executable, os.path.abspath(__file__), "update", "--yes", "--from-panel"]
+    # systemd-run does not pass the environment on. Forward the SINKO_* settings (test hooks, overrides), but never
+    # anything that could be a secret: the command line of a unit is visible to every user and is logged.
+    setenv = ["--setenv=%s=%s" % (k, v) for k, v in sorted(os.environ.items())
+              if k.startswith("SINKO_") and not re.search(r"PASS|SECRET|TOKEN|KEY", k)]
+    cmd = ["systemd-run", "--unit", "sinko-update", "--collect", "--quiet", "--description=Sinko update"] + setenv + ["--"] + argv
+    try:
+        done = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
+        if done.returncode == 0:
+            return True
+        why = done.stderr.strip()
+    except (OSError, subprocess.SubprocessError) as err:
+        why = str(err)
+    if unit_active("sinko-update"):
+        return True                           # a runner from an earlier attempt is still going; it owns the result
+    log.warning("systemd-run could not start the update (%s); starting it directly", short_text(why, 100))
+    ensure_state_dir()
+    fd = os.open(state_path("update.log"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        # A detached process stays in this service's control group, so a restart of the service may still end it;
+        # the scheduler then marks the update as not finished. systemd-run is the dependable way.
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=fd, stderr=fd, start_new_session=True, close_fds=True)
+    finally:
+        os.close(fd)
+    threading.Thread(target=proc.wait, daemon=True).start()          # reaps it when it ends
+    return True
+
+
+def run_power(action: str) -> None:
+    if action not in POWER_ACTIONS:
+        raise ValueError("unknown power action %r" % (action,))
+    subprocess.run(["systemctl", "--no-block", action], check=True, capture_output=True, timeout=30)
+
+
+# --------------------------------------------------------------------------- #
+# Optional anonymous counter ("boxes online"): architecture.md, "Optional anonymous counter"
+# --------------------------------------------------------------------------- #
+PING_TIMEOUT = 10
+PING_RESPONSE_MAX = 4096
+MAX_COUNT = 10_000_000
+
+
+class TelemetryError(Exception):
+    pass
+
+
+def telemetry_url(conf=None) -> str:
+    """The counter's address (environment, then settings, then TELEMETRY_URL); "" when there is none or it is not
+    acceptable: the id travels in the request, so it must be https (plain http only to this machine, for tests)."""
+    conf = read_config() if conf is None else conf
+    url = (os.environ.get("SINKO_TELEMETRY_URL") or conf.get("SINKO_TELEMETRY_URL") or TELEMETRY_URL).strip()
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host, _ = parts.hostname, parts.port
+    except ValueError:
+        return ""
+    if not url or not host or parts.username or parts.password or parts.query or parts.fragment:
+        return ""
+    if parts.scheme == "https" or (parts.scheme == "http" and host in ("127.0.0.1", "localhost", "::1")):
+        return url.rstrip("/")
+    return ""
+
+
+def hardware_kind(model_file=None, machine=None) -> str:
+    """"orangepi-zero3", "raspberrypi", "x86" or "other": the only thing about the machine that is ever sent."""
+    path = model_file or os.environ.get("SINKO_DT_MODEL") or "/proc/device-tree/model"
+    try:
+        with open(path, "rb") as fh:
+            model = fh.read(200).decode("ascii", "ignore")             # the device tree's text ends in a NUL byte
+    except OSError:
+        model = ""
+    squashed = re.sub(r"[^a-z0-9]", "", model.lower())
+    if "orangepizero3" in squashed:
+        return "orangepi-zero3"
+    if "raspberrypi" in squashed:
+        return "raspberrypi"
+    if (machine or os.uname().machine).lower() in ("x86_64", "amd64", "i386", "i686", "x86"):
+        return "x86"
+    return "other"
+
+
+def telemetry_body() -> str:
+    """Exactly what the counter would be sent. Nothing else leaves the box: no domain, device, address, child, rule,
+    language or time zone."""
+    body = json.dumps({"id": install_id(), "v": VERSION, "hw": hardware_kind()}, separators=(",", ":"))
+    if len(body.encode("utf-8")) > 512:
+        raise TelemetryError("the payload is larger than allowed")
+    return body
+
+
+def send_ping(url: str, body: str, timeout: float = PING_TIMEOUT):
+    """POST `body` to {url}/v1/ping. Returns {"online", "total"} from the answer, or None when the answer holds
+    numbers that make no sense. Raises TelemetryError when the counter cannot be reached."""
+    request = urllib.request.Request(url + "/v1/ping", data=body.encode("utf-8"), method="POST",
+                                     headers={"Content-Type": "application/json", "User-Agent": "sinko/" + VERSION})
+    try:
+        with urllib.request.build_opener(_SafeRedirect).open(request, timeout=timeout) as resp:
+            raw = resp.read(PING_RESPONSE_MAX + 1)
+    except urllib.error.HTTPError as err:
+        err.close()
+        raise TelemetryError("the counter answered HTTP %s" % err.code)
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as err:
+        raise TelemetryError("the counter could not be reached (%s)" % short_text(getattr(err, "reason", None) or err, 80))
+    try:
+        data = json.loads(raw[:PING_RESPONSE_MAX].decode("utf-8")) if len(raw) <= PING_RESPONSE_MAX else None
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    online, total = data.get("online"), data.get("total")
+    for value in (online, total):
+        if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= MAX_COUNT:
+            return None
+    return {"online": online, "total": total} if online <= total else None
+
+
+class BackgroundJob:
+    """One function at a time on a daemon thread. The scheduler's tick only starts jobs and collects what they
+    returned, so a slow network can never delay bedtime."""
+
+    def __init__(self, name: str):
+        self.name = name
+        self._lock = threading.Lock()
+        self._busy = False
+        self._outcome = None
+
+    def busy(self) -> bool:
+        with self._lock:
+            return self._busy
+
+    def start(self, fn) -> bool:
+        with self._lock:
+            if self._busy:
+                return False
+            self._busy = True
+            self._outcome = None
+        threading.Thread(target=self._run, args=(fn,), name="sinko-" + self.name, daemon=True).start()
+        return True
+
+    def _run(self, fn) -> None:
+        try:
+            outcome = ("ok", fn())
+        except Exception as err:
+            outcome = ("error", err)
+        with self._lock:
+            self._outcome = outcome
+
+    def take(self):
+        """("ok", value) or ("error", exception) of a finished run, once; None while it still runs or nothing ran."""
+        with self._lock:
+            outcome, self._outcome = self._outcome, None
+            if outcome is not None:
+                self._busy = False
+        return outcome
+
+
+class Maintenance:
+    """The scheduler's side jobs: update check and install, power requests, address watch, anonymous counter.
+
+    `Controller.tick` stays the only code that changes rules. These jobs only touch the keys of the shared state that
+    belong to the scheduler (update.*, community, and clearing request markers), and every one of them is wrapped:
+    a failing job is logged (not every 15 seconds) and never stops the tick or the other jobs. Anything slow (network,
+    systemd, pihole-FTL) runs in a BackgroundJob; the tick thread only reads files and talks to Pi-hole's API.
+    """
+    CHECK_FIRST = 120                 # seconds after start, then every day (or when the page asks)
+    CHECK_EVERY = 24 * 3600
+    ADDRESS_FIRST = 30
+    ADDRESS_EVERY = 300
+    MIN_RUN_GAP = 300                 # between two update runs
+    STUCK_AFTER = 20 * 60             # a run with no sign of life for this long did not finish
+    FAILED_BLOCKS_AUTO = 7 * 24 * 3600
+    AUTO_WINDOW = (3, 5)              # box time, hours: 03:00 up to 05:00
+    COMPLAIN_EVERY = 1800
+    PING_FIRST = 300
+    PING_EVERY = 6 * 3600
+    PING_JITTER = 1800                # +-, so the boxes do not all call in at the same minute
+    PING_RETRY = 1800
+
+    def __init__(self, api=None, config_path=None, monotonic=time.monotonic, job_factory=BackgroundJob, clock_ok=None,
+                 check=None, start_runner=None, power=None, default_ip=None, apply_address=None, ping=None, body=None,
+                 jitter=None):
+        self.api = api
+        self.config_path = config_path or CONFIG_FILE
+        self.mono = monotonic
+        self._job_factory = job_factory
+        self.clock_ok = clock_ok or (lambda: True)
+        self.check = check or check_for_update
+        self.start_runner = start_runner or start_update_runner
+        self.power = power or run_power
+        self.default_ip = default_ip or default_route_ipv4
+        self.apply_address = apply_address or apply_new_address
+        self.ping = ping or send_ping
+        self.body = body or telemetry_body
+        self.jitter = jitter or random.uniform
+        started = monotonic()
+        self._next_check = started + self.CHECK_FIRST
+        self._next_address = started + self.ADDRESS_FIRST
+        self._next_ping = started + self.PING_FIRST
+        self._check_forced = False
+        self._force_check = False
+        self._jobs = {}
+        self._callbacks = {}
+        self._state = None
+        self._last_logged = {}
+        self._actions = []
+
+    # ----- plumbing -----
+    def conf(self) -> dict:
+        return read_config(self.config_path)
+
+    def run(self, now: dt.datetime) -> list:
+        """One pass of every side job. Never raises. Returns what it did, as text."""
+        self._actions = []
+        epoch = now.timestamp()
+        self._state = None
+        try:
+            self._cur()
+        except LookupError:
+            return []                         # `sinko setup` has not made the shared state yet
+        except Exception as err:
+            self._complain("state", err)
+            return []
+        for name, step in (("jobs", self._collect), ("reconcile", self._reconcile), ("check", self._check),
+                           ("update", self._update), ("power", self._power), ("address", self._address),
+                           ("telemetry", self._telemetry)):
+            try:
+                step(now, epoch)
+            except Exception as err:
+                self._complain(name, err)
+                self._state = None
+        for line in self._actions:
+            log.info(line)
+        return self._actions
+
+    def _complain(self, name: str, err) -> None:
+        """Log a failure of a side job at most once every 30 minutes per job (a network that is down would otherwise
+        fill the log with a line every 15 seconds)."""
+        log.debug("maintenance job %s failed", name, exc_info=err if isinstance(err, BaseException) else None)
+        now = self.mono()
+        last = self._last_logged.get(name)
+        if last is None or now - last >= self.COMPLAIN_EVERY:
+            self._last_logged[name] = now
+            log.warning("%s: %s (shown at most every %d minutes)", name, short_text(err, 160), self.COMPLAIN_EVERY // 60)
+
+    def _read(self) -> dict:
+        groups = self.api.group_map()
+        if G_STATE not in groups:
+            raise LookupError("the shared state does not exist yet")
+        return parse_state(groups[G_STATE].get("comment"))
+
+    def _cur(self):
+        if self._state is None:
+            self._state = self._read()
+        return self._state
+
+    def _change(self, mutate) -> bool:
+        """Apply `mutate` to the state as it is right now (re-read, so what the page wrote a moment ago is kept) and
+        write it only if something changed: every write makes Pi-hole reload."""
+        self._state = None
+        return patch_state(self.api, mutate)
+
+    def _spawn(self, name: str, fn, callback) -> bool:
+        job = self._jobs.get(name)
+        if job is None:
+            job = self._jobs[name] = self._job_factory(name)
+        if job.busy():
+            return False
+        self._callbacks[name] = callback
+        return job.start(fn)
+
+    def _collect(self, now, epoch) -> None:
+        for name, job in list(self._jobs.items()):
+            outcome = job.take()
+            if outcome is None:
+                continue
+            try:
+                self._callbacks.pop(name)(outcome, epoch)
+            except Exception as err:
+                self._complain(name, err)
+                self._state = None
+
+    @staticmethod
+    def _slot(state: dict, kind: str):
+        return {"update": (state["update"], "request"), "check": (state["update"], "checkRequest"),
+                "power": (state["power"], "request")}[kind]
+
+    def _take_marker(self, kind: str, marker, extra=None):
+        """The request protocol: store the marker as handled, clear it in the state, and only then may the caller act.
+
+        Returns what was seen in the state (a dict: {"action": ...} for power), or None when the caller must not act:
+        the page wrote another request in between (that one is picked up on the next tick). If the state cannot be
+        written the marker is forgotten again, so a request is never lost.
+        """
+        previous = load_handled().get(kind)
+        set_handled(kind, marker)
+        seen = {}
+
+        def clear(state):
+            node, key = self._slot(state, kind)
+            if node[key] != marker:
+                seen["aborted"] = True
+                return
+            node[key] = None
+            if kind == "power":
+                seen["action"], node["action"] = node["action"], None
+            if extra:
+                extra(state)
+        try:
+            self._change(clear)
+        except BaseException:
+            set_handled(kind, previous)
+            raise
+        if seen.pop("aborted", False):
+            set_handled(kind, previous)
+            return None
+        return seen
+
+    def _clear_stale(self, kind: str, marker) -> None:
+        """A request this box already acted on is still in the state (it was cut off before the clearing, or the page
+        was slow): remove it, and do not act again."""
+        def clear(state):
+            node, key = self._slot(state, kind)
+            if node[key] == marker:
+                node[key] = None
+                if kind == "power":
+                    node["action"] = None
+        self._change(clear)
+
+    # ----- the update's result -----
+    def _reconcile(self, now, epoch) -> None:
+        u = self._cur()["update"]
+        stale_latest = bool(u["latest"]) and not is_newer(u["latest"], VERSION)
+        if not stale_latest and u["status"] != "running":
+            return
+        result = read_update_result() if u["status"] == "running" else None
+        seen = {}
+
+        def mutate(state):
+            up = state["update"]
+            if up["latest"] and not is_newer(up["latest"], VERSION):
+                up["latest"] = up["notes"] = None                       # that release is installed now
+            if up["status"] != "running":
+                return
+            if result is not None and result["at"] >= up["at"] - 5:
+                up["status"] = result["status"]
+                up["from"] = result["from"] or up["from"]
+                up["to"] = result["to"] or up["to"]
+                up["error"] = result["error"] if result["status"] == "failed" else None
+                up["at"] = result["at"]
+                if result["status"] == "ok" and up["latest"] and result["to"] and not is_newer(up["latest"], result["to"]):
+                    up["latest"] = up["notes"] = None
+                seen["result"] = result["status"]
+            elif abs(epoch - up["at"]) > self.STUCK_AFTER and not RunLock.is_held():
+                up["status"], up["error"], up["at"] = "failed", "The update did not finish.", epoch
+                seen["stuck"] = True
+        self._change(mutate)
+        if "result" in seen:
+            clear_update_result()                                       # only after the state holds it
+            self._actions.append("update %s" % ("finished" if seen["result"] == "ok" else "failed"))
+        elif seen.get("stuck"):
+            self._actions.append("update did not finish")
+
+    # ----- update check -----
+    def _check_enabled(self) -> bool:
+        try:
+            return classify_ref(release_settings(self.conf())["ref"])[0] != "branch"      # a developer box is never offered a release
+        except UpdateError:
+            return False
+
+    def _check(self, now, epoch) -> None:
+        u = self._cur()["update"]
+        forced = False
+        marker = u["checkRequest"]
+        if marker is not None:
+            if load_handled().get("check") == marker:
+                self._clear_stale("check", marker)
+            elif self._take_marker("check", marker) is not None:
+                forced = True
+                self._actions.append("check requested by the page")
+        if not self._check_enabled():
+            return
+        forced = forced or self._force_check
+        if not (forced or (self.mono() >= self._next_check and self.clock_ok())):
+            return
+        conf = self.conf()
+        if self._spawn("check", lambda: self.check(conf), self._check_done):
+            self._next_check = self.mono() + self.CHECK_EVERY
+            self._check_forced, self._force_check = forced, False
+        elif forced:
+            self._force_check = True           # a check is running already: ask again when it is done
+
+    def _check_done(self, outcome, epoch) -> None:
+        status, value = outcome
+        if status == "error":
+            self._complain("update check", value)      # offline or rate limited: the old answer stays
+            return
+        latest = value["version"] if value else None
+        notes = value["notes"] if value else None
+        forced = self._check_forced
+
+        def mutate(state):
+            u = state["update"]
+            if u["latest"] != latest or u["notes"] != notes or forced or not 0 <= epoch - u["checked"] < 86400:
+                u["latest"], u["notes"], u["checked"] = latest, notes, epoch
+        self._change(mutate)
+        if latest:
+            self._actions.append("update %s is available" % latest)
+
+    # ----- update run -----
+    def _update(self, now, epoch) -> None:
+        st = self._cur()
+        u = st["update"]
+        marker = u["request"]
+        if marker is not None and load_handled().get("update") == marker:
+            self._clear_stale("update", marker)
+            return
+        too_soon = u["status"] in ("ok", "failed") and 0 <= epoch - u["at"] < self.MIN_RUN_GAP
+        if marker is not None:
+            if u["status"] == "running":
+                if self._take_marker("update", marker) is not None:
+                    self._actions.append("update request ignored: an update is already running")
+                return
+            if too_soon:
+                return                         # keep the request; it is acted on when the gap is over
+            self._begin_update(epoch, marker, "update requested by the page")
+            return
+        if (u["auto"] and u["latest"] and is_newer(u["latest"], VERSION) and u["status"] != "running" and not too_soon
+                and self.AUTO_WINDOW[0] <= now.hour < self.AUTO_WINDOW[1] and self.clock_ok()
+                and not (u["status"] == "failed" and u["to"] == u["latest"] and epoch - u["at"] < self.FAILED_BLOCKS_AUTO)):
+            self._begin_update(epoch, None, "automatic update to %s" % u["latest"])
+
+    def _begin_update(self, epoch: float, marker, why: str) -> None:
+        def running(state):
+            up = state["update"]
+            up["status"], up["at"], up["error"] = "running", epoch, None
+            up["from"], up["to"] = VERSION, up["latest"]
+        if marker is not None:
+            if self._take_marker("update", marker, running) is None:
+                return
+        else:
+            self._change(running)
+        clear_update_result()                  # the runner's result is the only one the next reconcile may see
+        self._actions.append(why)
+        if not self._spawn("runner", self.start_runner, self._runner_started):
+            self._runner_started(("ok", False), epoch)
+
+    def _runner_started(self, outcome, epoch) -> None:
+        status, value = outcome
+        if status == "ok" and value:
+            return
+        if status == "error":
+            self._complain("update runner", value)
+        else:
+            self._complain("update runner", "it could not be started")
+
+        def failed(state):
+            up = state["update"]
+            if up["status"] == "running" and not RunLock.is_held():
+                up["status"], up["error"], up["at"] = "failed", "The update could not be started.", epoch
+        self._change(failed)
+
+    # ----- power -----
+    def _power(self, now, epoch) -> None:
+        st = self._cur()
+        marker = st["power"]["request"]
+        if marker is None:
+            return
+        if load_handled().get("power") == marker:
+            self._clear_stale("power", marker)
+            return
+        if st["update"]["status"] == "running":
+            return                             # never cut the power in the middle of an installation
+        seen = self._take_marker("power", marker)
+        if seen is None or seen.get("action") not in POWER_ACTIONS:
+            return
+        action = seen["action"]
+        self._actions.append("power request: %s" % action)
+        self._spawn("power", lambda: self.power(action), self._power_done)
+
+    def _power_done(self, outcome, epoch) -> None:
+        if outcome[0] == "error":
+            self._complain("power request", outcome[1])
+
+    # ----- address watch -----
+    def _address(self, now, epoch) -> None:
+        if self.mono() < self._next_address:
+            return
+        self._next_address = self.mono() + self.ADDRESS_EVERY
+        conf = self.conf()
+        known = conf.get("SINKO_IP")
+        if not known:
+            return                             # not a box this program installed
+        current = self.default_ip()
+        if not current or current == known or not valid_lan_ip(current):
+            return
+        self._actions.append("address changed from %s to %s" % (known, current))
+        self._spawn("address", lambda: self.apply_address(current, conf, self.config_path), self._address_done)
+
+    def _address_done(self, outcome, epoch) -> None:
+        if outcome[0] == "error":
+            self._complain("address change", outcome[1])       # retried at the next address check
+
+    # ----- anonymous counter -----
+    def _telemetry(self, now, epoch) -> None:
+        """Nothing is sent unless the parent said yes (the state is the only authority) AND a counter address is
+        configured."""
+        st = self._cur()
+        if st["telemetry"]["on"] is not True:
+            if st["community"] is not None:
+                self._change(lambda state: state.update(community=None))      # an old number must not outlive the "no"
+            return
+        url = telemetry_url(self.conf())
+        if not url or self.mono() < self._next_ping or not self.clock_ok():
+            return
+        self._next_ping = self.mono() + self.PING_EVERY + self.jitter(-self.PING_JITTER, self.PING_JITTER)
+        self._spawn("ping", lambda: self.ping(url, self.body()), self._ping_done)
+
+    def _ping_done(self, outcome, epoch) -> None:
+        status, value = outcome
+        if status == "error":
+            self._complain("anonymous counter", value)
+            self._next_ping = self.mono() + self.PING_RETRY
+            return
+        if value is None:
+            return                                              # an answer with numbers that make no sense: show none
+
+        def store(state):
+            if state["telemetry"]["on"] is True:                # not if the parent switched it off while the ping was away
+                state["community"] = {"online": value["online"], "at": epoch}
+        self._change(store)
+
+
+# --------------------------------------------------------------------------- #
 # Commands
 # --------------------------------------------------------------------------- #
+def seed_telemetry_answer(api: Api, conf: dict) -> bool:
+    """The installer asked whether the anonymous counter may run (or was told) and recorded the answer as
+    SINKO_TELEMETRY in the settings. The answer itself lives in the shared state, so copy it there, but only while the
+    state has none: whatever the parent has since answered on the page wins."""
+    value = (conf.get("SINKO_TELEMETRY") or "").strip().lower()
+    answer = True if value in ("1", "true", "yes", "on") else False if value in ("0", "false", "no", "off") else None
+    if answer is None:
+        return False                       # not decided at install time: the page asks later
+
+    def seed(state):
+        if state["telemetry"]["on"] is None:
+            state["telemetry"]["on"] = answer
+    return patch_state(api, seed)
+
+
 def cmd_setup(args) -> int:
     api = Api()
     api.wait_ready()
@@ -855,11 +2522,68 @@ def cmd_setup(args) -> int:
         ctl = Controller(api, load_catalog())
         ctl.setup(run_gravity=False)
         ctl.readd_legacy_devices()
+        seed_telemetry_answer(api, read_config())
+        try:
+            ensure_state_dir("cache")
+        except OSError as err:
+            log.warning("cannot create %s: %s (updates will not work until it exists)", state_dir(), err)
         if not args.no_gravity:
             ctl.gravity()
     finally:
         api.logout()
     print("sinko: Pi-hole objects are up to date")
+    return 0
+
+
+def cmd_telemetry(args) -> int:
+    """`sinko telemetry on|off|status|payload|reset-id`. The answer lives in the shared state (the page shows and
+    sets the same one); nothing here ever prints the id except `payload`, which shows what would be sent."""
+    if args.action == "payload":
+        print(telemetry_body())
+        return 0
+    if args.action == "reset-id":
+        reset_install_id()
+        print("sinko: a new random id was made; the old one is forgotten. Nothing was sent.")
+        return 0
+    conf = read_config()
+    try:
+        api = Api()
+        api.login()
+    except (ApiError, OSError, ValueError) as err:
+        print("sinko: Pi-hole could not be reached (%s)" % short_text(err, 80), file=sys.stderr)
+        return 2
+    try:
+        groups = api.group_map()
+        if G_STATE not in groups:
+            print("sinko: Sinko is not set up in Pi-hole yet. Run: sudo sinko setup", file=sys.stderr)
+            return 1
+        if args.action in ("on", "off"):
+            answer = args.action == "on"
+
+            def record(state):
+                state["telemetry"]["on"] = answer
+                if not answer:
+                    state["community"] = None             # an old number must not outlive the "no"
+            patch_state(api, record)
+        state = parse_state(api.group_map()[G_STATE].get("comment"))
+    except (ApiError, OSError, ValueError) as err:
+        print("sinko: Pi-hole could not be read or written (%s)" % short_text(err, 80), file=sys.stderr)
+        return 2
+    finally:
+        api.logout()
+    on = state["telemetry"]["on"]
+    configured = bool(telemetry_url(conf))
+    print("Anonymous counter: %s" % ("on" if on else "off" if on is False else "not decided yet"))
+    if on and not configured:
+        print("No counter address is set up on this box, so nothing is sent.")
+    elif on:
+        print("It sends the data shown by: sudo sinko telemetry payload (every 6 hours or so). Switch off: sudo sinko telemetry off")
+    elif on is False:
+        print("Nothing is sent.")
+    else:
+        print("Nothing is sent until it is switched on: sudo sinko telemetry on")
+    if state["community"]:
+        print("Boxes online at the last answer: %d" % state["community"]["online"])
     return 0
 
 
@@ -872,6 +2596,12 @@ def cmd_run(args) -> int:
     signal.signal(signal.SIGINT, _stop)
 
     catalog = load_catalog()
+    try:
+        ensure_state_dir("cache")
+    except OSError as err:
+        log.error("cannot create %s: %s (updates and requests from the page will not work)", state_dir(), err)
+    clock = ClockGuard()
+    maintenance = Maintenance(clock_ok=clock.trusted)
     api = None
     backoff = 5
     log.info("scheduler %s started", VERSION)
@@ -880,9 +2610,11 @@ def cmd_run(args) -> int:
             if api is None:
                 api = Api()
                 api.login()
-            Controller(api, catalog).tick()
+            Controller(api, catalog, clock_trusted=clock.trusted).tick()
             backoff = 5
             wait = TICK_SECONDS
+            maintenance.api = api
+            maintenance.run(dt.datetime.now())          # never raises; a failing job is logged and skipped
         except (ApiError, OSError, ValueError, KeyError, http.client.HTTPException) as err:
             # FTL restarting, cli_pw rotated, network hiccup… retry with backoff.
             log.warning("scheduler: %s (retrying in %ss)", err, backoff)
@@ -929,6 +2661,10 @@ def build_status(api: Api, catalog: dict) -> dict:
         "timer": state["timer"],
         "schedule": state["schedule"],
         "bedtime_now": state["scheduleActive"],
+        # What the scheduler knows about updates. The page's request markers are not part of the picture.
+        "update": {k: v for k, v in state["update"].items() if k not in ("request", "checkRequest")},
+        # The parent's answer (null = not asked yet). Never the counter's id: that is shown by `telemetry payload` only.
+        "telemetry": {"on": state["telemetry"]["on"]},
     }
 
 
@@ -1038,6 +2774,26 @@ def kid_checks(rep: Report, catalog: dict, groups: dict, clients: list, devices:
 # --------------------------------------------------------------------------- #
 class SystemProbe:
     """Reads the routing table, IPv6 state and Pi-hole's log. Paths can be overridden with SINKO_* variables."""
+
+    def free_disk_bytes(self):
+        """Free space on the box's disk (the root file system, where /opt and /var/lib are), or None."""
+        try:
+            return shutil.disk_usage(os.environ.get("SINKO_DISK_PATH", "/")).free
+        except OSError:
+            return None
+
+    def cpu_temp_c(self):
+        """CPU temperature in degrees Celsius from the first thermal zone, or None (a PC, a VM, no sensor)."""
+        try:
+            with open(os.environ.get("SINKO_THERMAL_FILE", "/sys/class/thermal/thermal_zone0/temp"), encoding="ascii") as fh:
+                raw = float(fh.read().strip())
+        except (OSError, ValueError):
+            return None
+        temp = raw / 1000.0 if abs(raw) > 1000 else raw                  # the kernel reports millidegrees
+        return temp if -50 <= temp <= 200 else None
+
+    def clock_synchronized(self):
+        return ntp_synchronized()
 
     @staticmethod
     def _lines(env: str, default: str) -> list:
@@ -1220,6 +2976,48 @@ def doctor_api_checks(rep: Report, api: Api, catalog: dict, probe=None, now: flo
     network_checks(rep, api, probe, now)
 
 
+DISK_WARN_BYTES = 300 * 1024 * 1024
+TEMP_WARN_C = 80.0
+
+
+def health_checks(rep: Report, state, probe=None) -> None:
+    """What a box needs besides working rules: the version it runs and whether an update waits, room on the disk, a
+    CPU that is not too hot, a clock that is right, and the state of the anonymous counter. `state` is None when
+    Pi-hole could not be asked; the lines that need it are then left out."""
+    probe = probe or SystemProbe()
+    rep.info("running version %s" % VERSION)
+    if state is not None:
+        update = state["update"]
+        if update["latest"] and is_newer(update["latest"], VERSION):
+            rep.info("update available: %s (install it with: sudo sinko update)" % update["latest"])
+        if update["status"] == "failed" and update["error"]:
+            rep.info("the last update did not work: %s" % update["error"])
+    free = probe.free_disk_bytes()
+    if free is not None:
+        if free < DISK_WARN_BYTES:
+            rep.warn("only %d MB of disk space is free. Updates and the Pi-hole database need room: delete what is not "
+                     "needed, or use a larger card." % (free // (1024 * 1024)))
+        else:
+            rep.ok("%d MB of disk space free" % (free // (1024 * 1024)))
+    temp = probe.cpu_temp_c()
+    if temp is not None:
+        if temp > TEMP_WARN_C:
+            rep.warn("the CPU is at %.0f C (above %.0f C). Give the box air, and keep it out of the sun and away from heaters."
+                     % (temp, TEMP_WARN_C))
+        else:
+            rep.ok("CPU temperature is %.0f C" % temp)
+    synced = probe.clock_synchronized()
+    if synced is False:
+        rep.warn("the clock is not synchronised with a time server. Bedtime and timers follow the box's time, which can be "
+                 "wrong until it is: check that the box can reach the internet.")
+    elif synced is True:
+        rep.ok("the clock is synchronised")
+    if state is not None:
+        on = state["telemetry"]["on"]
+        rep.info("anonymous counter: %s%s" % ("on" if on else "off" if on is False else "not decided yet",
+                 " (no counter address is set up, so nothing is sent)" if on and not telemetry_url() else ""))
+
+
 def cmd_doctor(args) -> int:
     rep = Report()
     try:
@@ -1236,10 +3034,12 @@ def cmd_doctor(args) -> int:
         rep.check(os.path.isfile(os.path.join(webroot, "pb", "app.js")), "web page installed in " + webroot)
     except (OSError, subprocess.SubprocessError) as err:
         rep.fix("pihole-FTL CLI available (%s)" % err)
+    state = None
     try:
         api = Api()
         api.login()
         doctor_api_checks(rep, api, load_catalog())
+        state = parse_state(api.group_map().get(G_STATE, {}).get("comment"))
         base = lists_base()
         if base.startswith("http"):
             try:
@@ -1250,6 +3050,7 @@ def cmd_doctor(args) -> int:
         api.logout()
     except (ApiError, OSError, ValueError) as err:
         rep.fix("Pi-hole API reachable (%s)" % err)
+    health_checks(rep, state)
     return rep.finish()
 
 
@@ -1798,41 +3599,109 @@ def cmd_watch(args) -> int:
 
 
 def cmd_configure(args) -> int:
-    conf = read_config()
-    ftl_set_config("webserver.serve_all", "true")
-    ftl_set_config("webserver.api.cli_pw", "true")
-    # The config file still holds the name added by the previous run (install.sh
-    # rewrites it afterwards), so a renamed or removed name does not linger.
-    old = conf.get("SINKO_HOSTNAME", "")
-    hostname = args.hostname if args.hostname is not None else old
-    ours = {n for n in (old, hostname) if n}
-    hosts = parse_cli_array(ftl_config("dns.hosts"))
-    new = hosts
-    if args.remove_hostname or args.ip:
-        new = [h for h in hosts if not ours & set(h.split()[1:])]
-        if hostname and args.ip and not args.remove_hostname:
-            new = merged_hosts(new, args.ip, hostname)
-    if new != hosts:
-        ftl_set_config("dns.hosts", json.dumps(new))
-    if args.disable_web:
-        ftl_set_config("webserver.serve_all", "false")
+    apply_pihole_settings(read_config(), args.hostname, args.ip, args.remove_hostname, args.disable_web)
     print("sinko: Pi-hole settings applied")
     return 0
 
 
+def patch_state(api: Api, mutate) -> bool:
+    """Read the shared state, let `mutate(state)` change what the caller owns, and write it back only if it changed
+    (every write makes Pi-hole reload). False when nothing was written."""
+    groups = api.group_map()
+    if G_STATE not in groups:
+        return False
+    state = parse_state(groups[G_STATE].get("comment"))
+    before = json.dumps(state, sort_keys=True)
+    mutate(state)
+    if json.dumps(state, sort_keys=True) == before:
+        return False
+    api.put_group(G_STATE, json.dumps(state, separators=(",", ":")), False)
+    return True
+
+
+def note_rollback(undone: str, restored: str) -> None:
+    """After a rollback by hand, tell the scheduler that `undone` is not wanted: its auto-update rule skips a release
+    that failed in the last 7 days, so the box does not install the same release again the next night."""
+    def mark(state):
+        update = state["update"]
+        update.update(status="failed", to=undone, at=time.time(), error="Went back to %s by hand." % restored)
+        update["from"] = restored
+    try:
+        api = Api()
+        api.login()
+        try:
+            patch_state(api, mark)
+        finally:
+            api.logout()
+    except (ApiError, OSError, ValueError) as err:
+        log.warning("could not record the rollback in the shared state: %s", err)
+
+
 def cmd_update(args) -> int:
     conf = read_config()
-    src = os.path.join(APP_DIR, "src")
-    repo = conf.get("SINKO_REPO", "https://github.com/iret33/sinko.git")
-    ref = args.ref or conf.get("SINKO_REF", "master")
-    if not os.path.isdir(os.path.join(src, ".git")):
-        subprocess.run(["rm", "-rf", src], check=True)
-        subprocess.run(["git", "clone", "--quiet", "--depth", "1", "--branch", ref, repo, src], check=True)
-    else:
-        subprocess.run(["git", "-C", src, "fetch", "--quiet", "--depth", "1", "origin", ref], check=True)
-        subprocess.run(["git", "-C", src, "checkout", "--quiet", "--force", "FETCH_HEAD"], check=True)
-    env = dict(os.environ, SINKO_REF=ref, SINKO_NONINTERACTIVE="1")
-    return subprocess.run(["bash", os.path.join(src, "install.sh")], env=env).returncode
+    updater = Updater(conf)
+    try:
+        ref = args.ref or release_settings(conf)["ref"]
+        kind, _ = classify_ref(ref)
+    except UpdateError as err:
+        print("sinko: %s" % err, file=sys.stderr)
+        return 1
+    if args.check:
+        if kind == "branch":
+            print("This box follows the developer branch '%s': updates are fetched with git, there is no release to check." % ref)
+            return 0
+        try:
+            release = check_for_update(conf, fetch=updater.fetch, ref=ref)
+        except UpdateError as err:
+            print("sinko: could not check for updates: %s" % err, file=sys.stderr)
+            return 1
+        if release:
+            print("Update available: Sinko %s (this box has %s). Install it with: sudo sinko update"
+                  % (release["version"], VERSION))
+        else:
+            print("Sinko %s is the newest version." % VERSION)
+        return 0
+    asked = not (args.yes or args.from_panel)
+    if asked and not sys.stdin.isatty():
+        print("sinko: run 'sudo sinko update --yes' to update without being asked.", file=sys.stderr)
+        return 1
+
+    def confirm(current, to_version):
+        try:
+            answer = input("Update Sinko from %s to %s? [y/N] " % (current, to_version or "the latest version of " + ref))
+        except EOFError:
+            return False
+        return answer.strip().lower() in ("y", "yes")
+    try:
+        result = updater.update(ref=args.ref, force=args.force, confirm=confirm if asked else None)
+    except UpdateLocked as err:
+        print("sinko: %s" % err, file=sys.stderr)
+        return 1
+    if result is None:
+        print("Nothing was changed.")
+        return 1
+    if result["status"] == "ok":
+        return 0
+    print("sinko: the update failed. %s" % result["error"], file=sys.stderr)
+    return 1
+
+
+def cmd_rollback(args) -> int:
+    try:
+        result = Updater().rollback()
+    except UpdateLocked as err:
+        print("sinko: %s" % err, file=sys.stderr)
+        return 1
+    if result["status"] != "ok":
+        print("sinko: could not go back. %s" % result["error"], file=sys.stderr)
+        return 1
+    print("Sinko is back at version %s." % result["to"])
+    note_rollback(result["from"], result["to"])
+    return 0
+
+
+def cmd_selfcheck(args) -> int:
+    return run_selfcheck(args.wait)
 
 
 def cmd_password_state(args) -> int:
@@ -1883,8 +3752,16 @@ def main(argv=None) -> int:
     p.add_argument("--disable-web", action="store_true", help="turn webserver.serve_all off (uninstall)")
     p.set_defaults(fn=cmd_configure)
     p = sub.add_parser("update", help="update to the latest version")
-    p.add_argument("--ref", default=None, help="git branch or tag (default from config)")
+    p.add_argument("--check", action="store_true", help="only say whether a newer version exists")
+    p.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+    p.add_argument("--ref", default=None, help="latest, a release such as v3.1.0, or a branch (default from the settings)")
+    p.add_argument("--force", action="store_true", help="install even if that version is not newer")
+    p.add_argument("--from-panel", action="store_true", help=argparse.SUPPRESS)      # started by the scheduler
     p.set_defaults(fn=cmd_update)
+    sub.add_parser("rollback", help="go back to the previous version stored on this box").set_defaults(fn=cmd_rollback)
+    p = sub.add_parser("selfcheck", help="quick check that the installation works (used after an update)")
+    p.add_argument("--wait", type=float, default=0, help="keep trying for this many seconds while services start")
+    p.set_defaults(fn=cmd_selfcheck)
     sub.add_parser("password-state", help=argparse.SUPPRESS).set_defaults(fn=cmd_password_state)
     p = sub.add_parser("diagnose", help="read-only report on why a service is not blocked")
     p.add_argument("services", nargs="*", help="service ids to test (default: youtube instagram)")
@@ -1900,6 +3777,9 @@ def main(argv=None) -> int:
     p.set_defaults(fn=cmd_use_mac)
     sub.add_parser("run", help="run the scheduler (systemd)").set_defaults(fn=cmd_run)
     sub.add_parser("status", help="print current state").set_defaults(fn=cmd_status)
+    p = sub.add_parser("telemetry", help="the optional anonymous counter (boxes online): on, off, status, payload, reset-id")
+    p.add_argument("action", choices=["on", "off", "status", "payload", "reset-id"])
+    p.set_defaults(fn=cmd_telemetry)
     sub.add_parser("doctor", help="check the installation").set_defaults(fn=cmd_doctor)
     sub.add_parser("remove", help="delete this add-on's Pi-hole objects").set_defaults(fn=cmd_remove)
     args = parser.parse_args(argv)
