@@ -7,6 +7,7 @@ Requires: pip install playwright && playwright install chromium
 import argparse
 import importlib.machinery
 import importlib.util
+import json
 import os
 import sys
 import time
@@ -150,10 +151,23 @@ with sync_playwright() as p:
     page.click("[data-act=pause]")
     settle(page)
 
+    # Everything the scheduler (or the My box sheet) keeps in the shared state must survive a bedtime save.
+    state_group = next(g for g in store.groups if g["name"] == "pb-state")
+    seeded = json.loads(state_group["comment"])
+    seeded["update"].update({"auto": True, "latest": "3.1.0", "notes": "https://github.com/iret33/sinko/releases/tag/v3.1.0",
+                             "checked": 1800000000, "status": "ok", "from": "3.0.0", "to": "3.1.0", "at": 1800000100})
+    seeded["telemetry"] = {"on": True}
+    seeded["community"] = {"online": 42, "at": 1800000000}
+    seeded["setup"] = {"done": True}
+    state_group["comment"] = json.dumps(seeded)
     page.check("#bedOn")
     page.fill("#bedStart", "21:30")
     page.click("[data-act=saveBed]")
     settle(page)
+    kept = json.loads(state_group["comment"])
+    expect(kept["schedule"]["start"] == "21:30" and kept["schedule"]["enabled"], "the bedtime itself was saved")
+    expect(all(kept[k] == seeded[k] for k in ("update", "telemetry", "community", "setup")),
+           "saving bedtime keeps every field the scheduler wrote (update, counter answer, community, setup)")
     page.reload()
     page.wait_for_selector(".tile")
     expect(page.input_value("#bedStart") == "21:30" and page.is_checked("#bedOn"), "bedtime saved and session kept")
