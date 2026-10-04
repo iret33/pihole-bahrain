@@ -1,0 +1,83 @@
+# Deploys the optional anonymous counter (telemetry/) to Cloudflare. Started by hand only: nothing here runs on a push.
+#
+# One-time setup, in the repository settings (Secrets and variables, Actions):
+#   CLOUDFLARE_API_TOKEN   a Cloudflare API token with "Edit Cloudflare Workers" and "D1 Edit" permissions
+#   CLOUDFLARE_ACCOUNT_ID  the account id shown on the Cloudflare dashboard
+# and in telemetry/wrangler.toml the real database_id (telemetry/README.md, step 2). The optional GITHUB_TOKEN of the
+# Worker is a different thing: set it by hand with "npx wrangler secret put GITHUB_TOKEN"; a deploy keeps it.
+name: Deploy the counter
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Two deploys at once could apply the schema while the other deploys. Wait instead of cancelling.
+concurrency:
+  group: deploy-telemetry
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # 20 has no node:sqlite, so only the in-memory D1 fake runs there; 22 also runs everything on real SQLite.
+        node-version: ["20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Counter tests
+        working-directory: telemetry
+        run: npm test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check the setup
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          missing=0
+          for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::The secret $name is not set. See the comment at the top of .github/workflows/deploy-telemetry.yml."
+              missing=1
+            fi
+          done
+          if grep -q 'REPLACE-WITH-YOUR-DATABASE-ID' telemetry/wrangler.toml; then
+            echo "::error file=telemetry/wrangler.toml::database_id is still the placeholder. Create the database (npx wrangler d1 create sinko-counter) and paste its id here. See telemetry/README.md."
+            missing=1
+          fi
+          exit "$missing"
+
+      # The schema is idempotent (CREATE ... IF NOT EXISTS), so it can run on every deploy. It runs first, because
+      # the new code may need a table the old database does not have. --remote matters: without it wrangler would
+      # change a throwaway local database and report success.
+      - name: Apply the database schema
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.147.0"
+          workingDirectory: telemetry
+          command: d1 execute DB --remote --yes --file=schema.sql
+
+      - name: Deploy the Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.147.0"
+          workingDirectory: telemetry
+          command: deploy
