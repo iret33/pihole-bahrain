@@ -1,0 +1,14 @@
+{
+  "name": "sinko-counter",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Sinko's optional anonymous counter: a Cloudflare Worker with a D1 database. No dependencies, no build step.",
+  "license": "GPL-3.0-or-later",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}

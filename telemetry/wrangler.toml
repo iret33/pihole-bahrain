@@ -1,0 +1,36 @@
+# Sinko anonymous counter: Cloudflare Worker + D1 database. Setup in five minutes: README.md in this folder.
+
+name = "sinko-counter"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+# The address https://sinko-counter.<your-subdomain>.workers.dev works at once. For a name of your own
+# (counter.example.org) add a [[routes]] block, see "Custom domain" in the README.
+workers_dev = true
+
+[vars]
+# The repository whose release downloads are added up for /v1/stats and the downloads badge.
+GITHUB_REPO = "iret33/sinko"
+# Optional secret (never put it in this file): GITHUB_TOKEN, a token that can read public repositories, only
+# so that GitHub's anonymous rate limit does not hide the download total:  npx wrangler secret put GITHUB_TOKEN
+
+[[d1_databases]]
+binding = "DB"
+database_name = "sinko-counter"
+# PLACEHOLDER. Create the database (npx wrangler d1 create sinko-counter), then paste the database_id it prints
+# here. It is an identifier, not a secret, so it is fine to commit. The deploy workflow refuses to run while the
+# placeholder is still here.
+database_id = "REPLACE-WITH-YOUR-DATABASE-ID"
+
+[triggers]
+# Every day at 03:17 UTC: forget boxes that have not been seen for 180 days.
+crons = ["17 3 * * *"]
+
+# No request logging, on purpose. New Workers log every request by default (Workers Logs "invocation logs", which
+# describe the request), and the privacy statement promises that no address or user agent is stored or logged.
+[observability]
+enabled = false
+
+[observability.logs]
+enabled = false
+invocation_logs = false

@@ -1,0 +1,69 @@
+# Publishes the project site (site/) to GitHub Pages.
+#
+# One-time setup, in the repository: Settings, Pages, "Build and deployment", Source = "GitHub Actions".
+# Until that is chosen, the "Pages settings" step below fails ("Get Pages site failed"). Nothing else is needed: no
+# branch, no token. After choosing it, start this workflow by hand (Actions, Project site, Run workflow).
+#
+# Runs when something the site is made of changes on master: the site itself, the screenshots and preview image
+# (docs/img), the fonts (web/fonts) and the icon (web/icon.svg), or this workflow. It can also be started by hand.
+name: Project site
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "site/**"
+      - "docs/img/**"
+      - "web/icon.svg"
+      - "web/fonts/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time, and the one that is running is allowed to finish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # The site's own tests first: a broken translation or config is stopped here, not published.
+      - name: Site tests
+        run: node --test site/test/*.test.mjs
+
+      - name: Pages settings
+        id: pages
+        uses: actions/configure-pages@v5
+
+      # site/ + docs/img as img/ + web/fonts as fonts/ + web/icon.svg, and the site's address in the link previews.
+      - name: Assemble the site
+        env:
+          BASE_URL: ${{ steps.pages.outputs.base_url }}
+        run: bash site/assemble.sh _site "$BASE_URL"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
