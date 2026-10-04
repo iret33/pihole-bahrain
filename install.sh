@@ -31,6 +31,7 @@ set -Eeuo pipefail
 shopt -s inherit_errexit   # also stop on failures inside $(…), e.g. a failed download
 
 main() {
+  import_legacy_env        # an old "pihole-bahrain update" runs this installer with PB_* variables
   # ---------------------------------------------------------------- constants
   local R="${SINKO_ROOT:-}"                        # test hook: install under a fake root
   [[ -z "$R" || "$R" == /* ]] || die "SINKO_ROOT must be an absolute path."
@@ -44,6 +45,13 @@ main() {
   LOG_FILE="$R/var/log/sinko-install.log"
   DEFAULT_SLUG="iret33/sinko"
   DEFAULT_REF="latest"
+  # What pihole-bahrain (<= 2.2.x) left behind; see "Migration from pihole-bahrain" in docs/maintainers/architecture.md.
+  LEGACY_APP="$R/opt/pihole-bahrain"
+  LEGACY_CONF_DIR="$R/etc/pihole-bahrain"
+  LEGACY_BIN="$R/usr/local/bin/pihole-bahrain"
+  LEGACY_LOG="$R/var/log/pihole-bahrain-install.log"
+  LEGACY_UNITS=(pihole-bahrain.service pihole-bahrain-lists.service pihole-bahrain-lists.timer)
+  MIGRATING=0 LEGACY_STOPPED=0 NEW_SCHEDULER_UP=0
 
   mkdir -p "$(dirname "$LOG_FILE")"
   if [[ "${SINKO_REEXEC:-}" != 1 ]]; then
@@ -58,6 +66,7 @@ main() {
     exec > >(tee -a "$LOG_FILE") 2>&1
   fi
   trap 'on_error $LINENO' ERR
+  trap 'on_exit $?' EXIT
   echo
   echo "=== sinko installer — $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
 
@@ -85,8 +94,11 @@ main() {
 
   detect_network
   install_pihole
+  detect_legacy
+  stop_legacy_scheduler
   install_files
   set_timezone
+  seed_config_from_legacy   # so that configure_pihole knows the name the old version put in Pi-hole
   configure_pihole          # before write_settings: it reads the previous hostname
   write_settings
   set_password
@@ -96,6 +108,7 @@ main() {
   install_services
   step "Final check"
   "$BIN_LINK" doctor || warn "Some checks failed — see above. Run 'sudo sinko doctor' again later."
+  finish_legacy_migration   # the very last change: the running installer may live inside the old folder
   summary
   show_generated_password
 }
@@ -109,6 +122,29 @@ die()  { printf '\n%sError:%s %s\n' "$RD" "$N" "$*" >&2; exit 1; }
 on_error() {
   printf '\n%sInstallation failed%s (line %s). Full log: %s\n' "$RD" "$N" "$1" "$LOG_FILE" >&2
   printf 'It is safe to run the installer again after fixing the problem.\n' >&2
+}
+# Whatever way the installer ends: a box that was being migrated must not be left without a scheduler, because
+# bedtime and timers would silently stop. The old files are still there until the new scheduler runs.
+on_exit() {
+  local rc="$1"
+  if (( rc != 0 )) && [[ "$LEGACY_STOPPED" == 1 && "$NEW_SCHEDULER_UP" != 1 ]]; then
+    local unit
+    for unit in pihole-bahrain.service pihole-bahrain-lists.timer; do
+      [[ -f "$UNIT_DIR/$unit" ]] && systemctl enable --now "$unit" >/dev/null 2>&1
+    done
+    printf 'The previous version keeps running, so the rules still apply. Run the installer again after fixing the problem.\n' >&2
+  fi
+  return 0
+}
+
+# An old "pihole-bahrain update" starts this installer with PB_NONINTERACTIVE and PB_REF; people also had PB_* in their
+# scripts. A SINKO_* variable of the same name always wins.
+import_legacy_env() {
+  local k old new
+  for k in PASSWORD HOSTNAME UPSTREAMS TIMEZONE LISTS_BASE REPO REF NONINTERACTIVE INTERFACE PIHOLE_INSTALLER TTY; do
+    old="PB_$k"; new="SINKO_$k"
+    if [[ -n "${!old+x}" && -z "${!new+x}" ]]; then export "$new=${!old}"; fi
+  done
 }
 TTY_DEV="${SINKO_TTY:-/dev/tty}"      # the terminal; SINKO_TTY is a test hook
 can_prompt() { [[ "${SINKO_NONINTERACTIVE:-}" != 1 ]] && { : <"$TTY_DEV"; } 2>/dev/null; }
@@ -160,7 +196,7 @@ need_internet() {
 # ------------------------------------------------------------------ settings
 # What can be saved in /etc/sinko/config (and be overridden by an environment variable of the same name).
 SETTING_KEYS="HOSTNAME LISTS_BASE REPO REPO_SLUG REF IP RELEASE_BASE"
-declare -A ENVV=() SAVED=()
+declare -A ENVV=() SAVED=() LEGACY=()   # environment, /etc/sinko/config, /etc/pihole-bahrain/config
 
 # Reads the KEY=value lines of a settings file (shell syntax, as write_settings writes it) into the associative array
 # $3, for the keys the file really sets. Runs in a subshell so nothing leaks into the installer, and with the
@@ -170,7 +206,7 @@ read_settings_file() {  # file prefix array-name
   [[ -f "$file" ]] || return 0
   out="$(
     set +eu
-    for k in $SETTING_KEYS; do unset "SINKO_$k"; done
+    for k in $SETTING_KEYS; do unset "SINKO_$k" "PB_$k"; done
     # shellcheck disable=SC1090
     . "$file" >/dev/null 2>&1
     for k in $SETTING_KEYS; do
@@ -190,6 +226,18 @@ saved_value() {  # KEY
   if [[ -n "${SAVED[$1]+x}" ]]; then printf '%s' "${SAVED[$1]}"; return 0; fi
   return 1
 }
+# What an earlier installation chose: this version's settings first, then the pihole-bahrain ones it replaces.
+kept_value() {  # KEY
+  saved_value "$1" && return 0
+  if [[ -n "${LEGACY[$1]+x}" ]]; then printf '%s' "${LEGACY[$1]}"; return 0; fi
+  return 1
+}
+# Did this address belong to the old project (iret33/pihole-bahrain)? A fork of it does not count.
+points_at_old_repo() {  # URL
+  local u="${1,,}"
+  [[ "$u" == *"github.com/iret33/pihole-bahrain"* || "$u" == *"github.com:iret33/pihole-bahrain"* \
+     || "$u" == *"raw.githubusercontent.com/iret33/pihole-bahrain/"* ]]
+}
 
 # owner/name from a GitHub URL, or nothing.
 slug_of_repo() {
@@ -205,16 +253,17 @@ slug_of_repo() {
 }
 
 load_settings() {
-  # Precedence: environment > saved config > defaults.
+  # Precedence: environment > saved config > the old pihole-bahrain config (migration) > defaults.
   local k v
-  ENVV=(); SAVED=()
+  ENVV=(); SAVED=(); LEGACY=()
   for k in $SETTING_KEYS; do
     v="SINKO_$k"
     if [[ -n "${!v+x}" ]]; then ENVV[$k]="${!v}"; fi
   done
   read_settings_file "$CONF_FILE" SINKO_ SAVED
+  read_settings_file "$LEGACY_CONF_DIR/config" PB_ LEGACY
 
-  if v="$(env_value HOSTNAME)" || v="$(saved_value HOSTNAME)"; then SINKO_HOSTNAME="$v"; else SINKO_HOSTNAME="family.lan"; fi
+  if v="$(env_value HOSTNAME)" || v="$(kept_value HOSTNAME)"; then SINKO_HOSTNAME="$v"; else SINKO_HOSTNAME="family.lan"; fi
   [[ "$SINKO_HOSTNAME" == none ]] && SINKO_HOSTNAME=""
   if [[ -n "$SINKO_HOSTNAME" && ! "$SINKO_HOSTNAME" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; then
     die "SINKO_HOSTNAME '$SINKO_HOSTNAME' is not a valid name like family.lan"
@@ -229,7 +278,8 @@ load_settings() {
   elif [[ -n "$env_slug" ]]; then
     slug="$env_slug"
   else
-    repo="$(saved_value REPO || true)"; slug="$(saved_value REPO_SLUG || true)"
+    repo="$(kept_value REPO || true)"; slug="$(saved_value REPO_SLUG || true)"
+    if points_at_old_repo "$repo"; then repo=""; fi          # the new project has the old one's history, not its address
     [[ -n "$slug" || -z "$repo" ]] || slug="$(slug_of_repo "$repo")"
   fi
   SINKO_REPO_SLUG="${slug:-$DEFAULT_SLUG}"
@@ -240,7 +290,7 @@ load_settings() {
   [[ "$SINKO_REPO" =~ ^(https://|file://|git@)[A-Za-z0-9._~:/@+%=-]+$ ]] \
     || die "SINKO_REPO '$SINKO_REPO' is not a git address (https://… or file://…)"
 
-  SINKO_REF="$(env_value REF || saved_value REF || echo "$DEFAULT_REF")"
+  SINKO_REF="$(env_value REF || kept_value REF || echo "$DEFAULT_REF")"
   [[ -n "$SINKO_REF" ]] || SINKO_REF="$DEFAULT_REF"
   if [[ ! "$SINKO_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,100}$ || "$SINKO_REF" == *..* ]]; then
     die "SINKO_REF '$SINKO_REF' is not a version or branch name (use latest, vX.Y.Z or a branch such as master)"
@@ -249,9 +299,11 @@ load_settings() {
   # A saved list address that is just the default of the project saved with it was never a choice: it follows
   # the project if that changes (a fork, a rename). Any other saved or given address stays.
   local kept_lists kept_slug
-  kept_lists="$(saved_value LISTS_BASE || true)"
+  kept_lists="$(kept_value LISTS_BASE || true)"
   kept_slug="$(saved_value REPO_SLUG || true)"
-  if [[ "$kept_lists" == "https://raw.githubusercontent.com/${kept_slug:-$DEFAULT_SLUG}/master/lists" ]]; then kept_lists=""; fi
+  if [[ "$kept_lists" == "https://raw.githubusercontent.com/${kept_slug:-$DEFAULT_SLUG}/master/lists" ]] || points_at_old_repo "$kept_lists"; then
+    kept_lists=""
+  fi
   SINKO_LISTS_BASE="$(env_value LISTS_BASE || echo "$kept_lists")"
   SINKO_LISTS_BASE="${SINKO_LISTS_BASE:-https://raw.githubusercontent.com/$SINKO_REPO_SLUG/master/lists}"
   SINKO_RELEASE_BASE="$(env_value RELEASE_BASE || saved_value RELEASE_BASE || true)"
@@ -524,6 +576,63 @@ EOF
   ok "Pi-hole installed"
 }
 
+# ------------------------------------------------------------------ migration from pihole-bahrain
+# Detected by the old folder, the old settings or the old units. The order is the one in docs/maintainers/architecture.md:
+# old scheduler stopped, new files, `sinko setup` (registers the lists under the new address and keeps groups, devices,
+# rules and state: Pi-hole objects keep their pb- names), new units, and only at the very end the old folders go.
+detect_legacy() {
+  local unit
+  if [[ -e "$LEGACY_APP" || -e "$LEGACY_CONF_DIR" ]]; then MIGRATING=1; fi
+  for unit in "${LEGACY_UNITS[@]}"; do
+    if [[ -e "$UNIT_DIR/$unit" ]]; then MIGRATING=1; fi
+  done
+  if (( MIGRATING )); then
+    step "Found an earlier version (pihole-bahrain): moving it to Sinko"
+    ok "Its settings, children's devices, rules and timers are kept"
+  fi
+}
+
+# The old scheduler stops first, so two schedulers never work on the same Pi-hole groups. Its files stay until the new
+# scheduler runs: if the installer fails in between, on_exit starts the old one again.
+stop_legacy_scheduler() {
+  (( MIGRATING )) || return 0
+  systemctl disable --now pihole-bahrain.service pihole-bahrain-lists.timer >/dev/null 2>&1 || true
+  LEGACY_STOPPED=1
+  ok "Stopped the old scheduler"
+}
+
+# `sinko configure` replaces the name an earlier run put into Pi-hole and learns that name from the settings file, which
+# an old box does not have in the new place yet.
+seed_config_from_legacy() {
+  (( MIGRATING )) || return 0
+  [[ ! -f "$CONF_FILE" && -n "${LEGACY[HOSTNAME]+x}" ]] || return 0
+  install -d -m 755 "$CONF_DIR"
+  printf '# sinko settings (moved from pihole-bahrain)\nSINKO_HOSTNAME=%q\n' "${LEGACY[HOSTNAME]}" >"$CONF_FILE.tmp"
+  chmod 644 "$CONF_FILE.tmp"
+  mv "$CONF_FILE.tmp" "$CONF_FILE"
+}
+
+remove_legacy_units() {
+  (( MIGRATING )) || return 0
+  local unit
+  for unit in "${LEGACY_UNITS[@]}"; do rm -f "$UNIT_DIR/$unit"; done
+  systemctl daemon-reload
+}
+
+# Last step, after everything else worked: the old command keeps working as a shortcut, then the old folders go.
+# (An old "pihole-bahrain update" runs this installer from inside /opt/pihole-bahrain/src, so nothing may read from
+# the source folder after this point.)
+finish_legacy_migration() {
+  (( MIGRATING )) || return 0
+  if [[ -L "$LEGACY_BIN" || ! -e "$LEGACY_BIN" ]]; then
+    ln -sfn "$APP_DIR/bin/sinko" "$LEGACY_BIN"
+    ok "The command is now called sinko; 'pihole-bahrain' still works as a shortcut for now."
+  fi
+  rm -rf "$LEGACY_APP" "$LEGACY_CONF_DIR" || warn "Could not remove the old folders $LEGACY_APP and $LEGACY_CONF_DIR; they are not used any more."
+  rm -f "$LEGACY_LOG"
+  ok "Removed the old version's files"
+}
+
 install_files() {
   step "Installing the parent page"
   install -d -m 755 "$APP_DIR" "$APP_DIR/bin" "$APP_DIR/lists" "$APP_DIR/tools" "$CONF_DIR" "$(dirname "$BIN_LINK")"
@@ -549,6 +658,8 @@ install_files() {
   if [[ -f "$WEBROOT/index.html" ]] && ! grep -q 'name="generator" content="sinko"' "$WEBROOT/index.html"; then
     if grep -q 'parental/app.js' "$WEBROOT/index.html"; then
       rm -f "$WEBROOT/index.html"             # page from the 1.x installer
+    elif grep -q 'name="generator" content="pihole-bahrain"' "$WEBROOT/index.html"; then
+      rm -f "$WEBROOT/index.html"             # page from pihole-bahrain 2.x: ours, not a page somebody made
     elif [[ ! -f "$WEBROOT/index.html.pb-backup" ]]; then
       mv "$WEBROOT/index.html" "$WEBROOT/index.html.pb-backup"
       ok "Kept the previous start page as index.html.pb-backup"
@@ -658,6 +769,8 @@ install_services() {
   systemctl enable --quiet sinko.service sinko-lists.timer
   systemctl restart sinko.service
   systemctl restart sinko-lists.timer
+  NEW_SCHEDULER_UP=1
+  remove_legacy_units
   ok "Scheduler running; lists refresh every night"
 }
 

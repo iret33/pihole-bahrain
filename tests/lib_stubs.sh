@@ -268,3 +268,46 @@ make_release() {
   ( cd "$out" && sha256sum sinko.tar.gz >sinko.tar.gz.sha256 )
   rm -rf "$stage"
 }
+
+# Starts over with an empty fake root and a fresh mock API (a second scenario in the same test).
+fresh_start() {
+  if [[ -n "${MOCK_PID:-}" ]]; then { kill "$MOCK_PID" 2>/dev/null || true; wait "$MOCK_PID" 2>/dev/null || true; }; fi
+  rm -rf "$ROOT" "$WORK/units" "$WORK/ftl.json" "$WORK/tz" "$WORK/ipaddr" "$WORK/net-down" "$WORK/offline" "$WORK/apt-fail"
+  mkdir -p "$ROOT/etc/pihole" "$ROOT/etc/ssh" "$ROOT/var/www/html" "$ROOT/var/log" "$WORK/units"
+  touch "$ROOT/etc/pihole/pihole.toml" "$WORK/units/pihole-FTL.service.active"
+  : >"$WORK/calls.log"
+  printf '%s\n' git curl ca-certificates python3 iproute2 >"$WORK/dpkg-installed"
+  start_mock
+}
+
+# json_get 'python expression on d' <<<json: prints the value, for reading answers of the mock API.
+json_get() { python3 -c 'import json, sys; d = json.load(sys.stdin); print('"$1"')'; }
+
+# What a family has on the box: Sinko's groups and lists (registered under the given lists address), two children's
+# devices (one paused), a bedtime, and objects of the user's own that no Sinko command may touch: a group, a list, a
+# client in that group, and a grown-up's device that sits in Sinko's pb-paused group.
+seed_pihole_objects() {
+  local base="$1" kid_ids paused_id mine_id
+  SINKO_APP_DIR="$REPO" SINKO_CONFIG_FILE=/nonexistent SINKO_LISTS_BASE="$base" python3 "$REPO/bin/sinko" setup --no-gravity >/dev/null
+  kid_ids="$(mock_api GET /api/groups | json_get '[0] + [g["id"] for g in d["groups"] if g["name"].startswith("pb-") and g["name"] not in ("pb-paused", "pb-state")]')"
+  paused_id="$(mock_api GET /api/groups | json_get '[g["id"] for g in d["groups"] if g["name"] == "pb-paused"][0]')"
+  mock_api POST /api/clients "{\"client\":\"aa:bb:cc:dd:ee:01\",\"comment\":\"Sara\",\"groups\":$kid_ids}" >/dev/null
+  mock_api POST /api/clients "{\"client\":\"aa:bb:cc:dd:ee:02\",\"comment\":\"Omar\",\"groups\":${kid_ids%]}, $paused_id]}" >/dev/null
+  mock_api PUT /api/groups/pb-state '{"enabled": false, "comment": "{\"v\":1,\"timer\":null,\"schedule\":{\"enabled\":true,\"start\":\"22:00\",\"end\":\"06:30\",\"days\":[0,1,2,3,4,5,6]},\"scheduleActive\":false}"}' >/dev/null
+  mock_api POST /api/groups '{"name":"my-group","comment":"mine","enabled":true}' >/dev/null
+  mine_id="$(mock_api GET /api/groups | json_get '[g["id"] for g in d["groups"] if g["name"] == "my-group"][0]')"
+  mock_api POST '/api/lists?type=block' '{"address":"https://example.org/mine.txt","comment":"my list","groups":[0],"enabled":true}' >/dev/null
+  mock_api POST /api/clients "{\"client\":\"192.168.1.99\",\"comment\":\"grown-up laptop\",\"groups\":[$mine_id]}" >/dev/null
+  mock_api POST /api/clients "{\"client\":\"192.168.1.98\",\"comment\":\"grown-up phone\",\"groups\":[0, $paused_id]}" >/dev/null
+}
+
+# The user's own Pi-hole objects from seed_pihole_objects are all still there, unchanged.
+assert_user_objects_intact() {
+  local mine_id
+  mock_api GET /api/groups | json_get '[g["comment"] for g in d["groups"] if g["name"] == "my-group"]' | grep -qx "\['mine'\]" || fail "the user's own group changed"
+  mock_api GET /api/lists | json_get '[l["comment"] for l in d["lists"] if l["address"] == "https://example.org/mine.txt"]' | grep -qx "\['my list'\]" || fail "the user's own list changed"
+  mock_api GET /api/clients | json_get '[c["comment"] for c in d["clients"] if c["client"] == "192.168.1.99"]' | grep -qx "\['grown-up laptop'\]" || fail "the user's own client changed"
+  mine_id="$(mock_api GET /api/groups | json_get '[g["id"] for g in d["groups"] if g["name"] == "my-group"][0]')"
+  mock_api GET /api/clients | json_get '[c["groups"] for c in d["clients"] if c["client"] == "192.168.1.99"][0] == ['"$mine_id"']' | grep -qx True || fail "the user's own client lost its group"
+  mock_api GET /api/clients | json_get '[c["comment"] for c in d["clients"] if c["client"] == "192.168.1.98"]' | grep -qx "\['grown-up phone'\]" || fail "a grown-up's device was removed"
+}
