@@ -29,6 +29,9 @@
 #   SINKO_TELEMETRY       1 = count this box in the anonymous number of Sinko boxes online, 0 = do not.
 #                      Interactive installs ask (default no). Not asked and not set: nothing is saved
 #                      and the parent page asks later. What is sent: docs/privacy.md
+#   SINKO_MDNS            0 = do not install avahi-daemon (the box answers to <hostname>.local when it is there)
+#   SINKO_OS_UPDATES      0 = do not set up automatic Debian security updates (never a restart; left alone when
+#                      unattended-upgrades is already installed)
 #   SINKO_NONINTERACTIVE  1 = never prompt
 set -Eeuo pipefail
 shopt -s inherit_errexit   # also stop on failures inside $(…), e.g. a failed download
@@ -110,6 +113,8 @@ main() {
   "$BIN_LINK" setup
   ok "Pi-hole is set up"
   install_services
+  install_local_name
+  install_os_updates
   step "Final check"
   "$BIN_LINK" doctor || warn "Some checks failed — see above. Run 'sudo sinko doctor' again later."
   finish_legacy_migration   # the very last change: the running installer may live inside the old folder
@@ -155,15 +160,17 @@ can_prompt() { [[ "${SINKO_NONINTERACTIVE:-}" != 1 ]] && { : <"$TTY_DEV"; } 2>/d
 has_tty() { { : >>"$TTY_DEV"; } 2>/dev/null; }
 
 # ------------------------------------------------------------------ steps
-# shellcheck disable=SC1091  # /etc/os-release is read at runtime
+# shellcheck disable=SC1090,SC1091  # os-release is read at runtime
 preflight() {
+  OS_RELEASE="${SINKO_OS_RELEASE:-/etc/os-release}"       # SINKO_OS_RELEASE is a test hook
   step "Checking this device"
   [[ "$(id -u)" -eq 0 ]] || die "Run as root: curl -fsSL <url> | sudo bash"
-  [[ -r /etc/os-release ]] || die "Unknown operating system (no /etc/os-release)."
+  [[ -r "$OS_RELEASE" ]] || die "Unknown operating system (no /etc/os-release)."
   local id like pretty
-  id="$(. /etc/os-release && echo "${ID:-}")"
-  like="$(. /etc/os-release && echo "${ID_LIKE:-}")"
-  pretty="$(. /etc/os-release && echo "${PRETTY_NAME:-$id}")"
+  id="$(. "$OS_RELEASE" && echo "${ID:-}")"
+  like="$(. "$OS_RELEASE" && echo "${ID_LIKE:-}")"
+  pretty="$(. "$OS_RELEASE" && echo "${PRETTY_NAME:-$id}")"
+  OS_ID="$id"
   if [[ ! " $id $like " =~ [[:space:]](debian|ubuntu)[[:space:]] ]]; then
     die "Unsupported system: $pretty. Use Armbian, Debian, Ubuntu or Raspberry Pi OS."
   fi
@@ -199,7 +206,7 @@ need_internet() {
 
 # ------------------------------------------------------------------ settings
 # What can be saved in /etc/sinko/config (and be overridden by an environment variable of the same name).
-SETTING_KEYS="HOSTNAME LISTS_BASE REPO REPO_SLUG REF IP RELEASE_BASE TELEMETRY TELEMETRY_URL"
+SETTING_KEYS="HOSTNAME LISTS_BASE REPO REPO_SLUG REF IP RELEASE_BASE TELEMETRY TELEMETRY_URL MDNS OS_UPDATES"
 declare -A ENVV=() SAVED=() LEGACY=()   # environment, /etc/sinko/config, /etc/pihole-bahrain/config
 
 # Reads the KEY=value lines of a settings file (shell syntax, as write_settings writes it) into the associative array
@@ -325,6 +332,13 @@ load_settings() {
     v="$(saved_value TELEMETRY || true)"
     if [[ "$v" == 1 || "$v" == 0 ]]; then SINKO_TELEMETRY="$v"; else SINKO_TELEMETRY=""; fi
   fi
+  # Two switches that default to on and, once turned off, stay off through updates.
+  for k in MDNS OS_UPDATES; do
+    v="$(env_value "$k" || saved_value "$k" || true)"
+    [[ -n "$v" ]] || v=1
+    [[ "$v" == 1 || "$v" == 0 ]] || die "SINKO_$k must be 1 or 0."
+    printf -v "SINKO_$k" '%s' "$v"
+  done
   # Where the counter lives. Empty = the CLI's built-in address; never invented here, only kept or given.
   SINKO_TELEMETRY_URL="$(env_value TELEMETRY_URL || saved_value TELEMETRY_URL || true)"
   [[ -z "$SINKO_TELEMETRY_URL" || "$SINKO_TELEMETRY_URL" =~ ^https?://[A-Za-z0-9._~:/@+%=-]+$ ]] \
@@ -735,6 +749,8 @@ write_settings() {
     # Only what somebody answered or set: no answer is not "no".
     if [[ -n "$SINKO_TELEMETRY" ]]; then printf 'SINKO_TELEMETRY=%q\n' "$SINKO_TELEMETRY"; fi
     if [[ -n "$SINKO_TELEMETRY_URL" ]]; then printf 'SINKO_TELEMETRY_URL=%q\n' "$SINKO_TELEMETRY_URL"; fi
+    printf 'SINKO_MDNS=%q\n' "$SINKO_MDNS"
+    printf 'SINKO_OS_UPDATES=%q\n' "$SINKO_OS_UPDATES"
   } >"$tmp"
   chmod 644 "$tmp"
   mv "$tmp" "$CONF_FILE"
@@ -817,6 +833,90 @@ install_services() {
   ok "Scheduler running; lists refresh every night"
 }
 
+# Optional extras. Neither is allowed to fail the installation: the children's rules do not depend on them.
+APT_UPDATED=0
+apt_install() {  # package... : 0 when installed
+  if (( ! APT_UPDATED )); then
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq </dev/null || return 1
+    APT_UPDATED=1
+  fi
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "$@" </dev/null >/dev/null
+}
+
+# avahi-daemon makes the box answer to <hostname>.local, so the page opens by a name that never changes even when the
+# router hands out another address. An avahi that is already installed is left exactly as it is.
+install_local_name() {
+  step "Local name"
+  if [[ "$SINKO_MDNS" != 1 ]]; then
+    ok "Skipped (SINKO_MDNS=0): the page is reachable by its address only"
+    return 0
+  fi
+  if dpkg -s avahi-daemon >/dev/null 2>&1; then
+    ok "avahi-daemon is already installed (left as it is)"
+    return 0
+  fi
+  if apt_install avahi-daemon; then
+    systemctl enable --now avahi-daemon.service >/dev/null 2>&1 || warn "avahi-daemon is installed but could not be started."
+    ok "Installed avahi-daemon"
+  else
+    warn "Could not install avahi-daemon (no internet?). The page is still reachable by its address; run the installer again later."
+  fi
+}
+
+# Debian's security updates, nothing else, and never an automatic restart: a restart at a random hour would cut the
+# children's internet (and the box has no clock battery to bring it back on schedule). An unattended-upgrades that is
+# already installed keeps its own settings.
+install_os_updates() {
+  step "Security updates"
+  if [[ "$SINKO_OS_UPDATES" != 1 ]]; then
+    ok "Skipped (SINKO_OS_UPDATES=0)"
+    return 0
+  fi
+  if dpkg -s unattended-upgrades >/dev/null 2>&1; then
+    ok "Automatic updates are already set up (left as they are)"
+    return 0
+  fi
+  if ! apt_install unattended-upgrades; then
+    warn "Could not install unattended-upgrades (no internet?). Run the installer again later, or update the system by hand."
+    return 0
+  fi
+  local origins file="$R/etc/apt/apt.conf.d/52sinko-unattended-upgrades"
+  # ${distro_codename} is apt's own macro, not ours: single quotes on purpose.
+  if [[ "$OS_ID" == ubuntu ]]; then
+    # shellcheck disable=SC2016
+    origins='        "origin=Ubuntu,codename=${distro_codename}-security,label=Ubuntu";'
+  else
+    # shellcheck disable=SC2016
+    origins='        "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+        "origin=Debian,codename=${distro_codename},label=Debian-Security";'
+  fi
+  install -d -m 755 "$(dirname "$file")"
+  {
+    echo '// Written by the Sinko installer. Security updates only, and never an automatic restart.'
+    echo 'APT::Periodic::Update-Package-Lists "1";'
+    echo 'APT::Periodic::Unattended-Upgrade "1";'
+    echo '// The package also allows ordinary updates; this replaces its list (it is read after 50unattended-upgrades).'
+    echo '#clear Unattended-Upgrade::Origins-Pattern;'
+    echo 'Unattended-Upgrade::Origins-Pattern {'
+    echo "$origins"
+    echo '};'
+    echo 'Unattended-Upgrade::Automatic-Reboot "false";'
+  } >"$file.tmp"
+  chmod 644 "$file.tmp"
+  mv "$file.tmp" "$file"
+  systemctl enable --now apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
+  ok "Automatic security updates are on (no automatic restart)"
+}
+
+# The name avahi publishes: the host name of the system, without a domain.
+system_hostname() {
+  local name=""
+  if [[ -r "$R/etc/hostname" ]]; then name="$(head -n1 "$R/etc/hostname" 2>/dev/null || true)"; else name="$(hostname 2>/dev/null || true)"; fi
+  name="${name%%.*}"
+  [[ "$name" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] && printf '%s' "$name"
+  return 0
+}
+
 # A password we generated is never written to stdout, because stdout is copied into the install log.
 # It goes to the terminal only; without a terminal it is saved in a root-only file instead.
 show_generated_password() {
@@ -834,12 +934,17 @@ show_generated_password() {
 }
 
 summary() {
-  local url="http://$IPV4/"
+  local url="http://$IPV4/" local_name="" host
+  host="$(system_hostname)"
+  if [[ -n "$host" ]] && systemctl is-active --quiet avahi-daemon.service 2>/dev/null; then
+    local_name="http://$host.local/"
+  fi
   cat <<EOF
 
 ${G}${B}Sinko is ready.${N}
 
-  Parent page:   ${B}$url${N}${SINKO_HOSTNAME:+
+  Parent page:   ${B}$url${N}${local_name:+
+                 or ${B}$local_name${N} (works on phones and computers at home as it is)}${SINKO_HOSTNAME:+
                  or http://$SINKO_HOSTNAME/ (after the router step below)}
 EOF
   if [[ -n "${SHOW_PASSWORD:-}" ]]; then

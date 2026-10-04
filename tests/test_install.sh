@@ -8,6 +8,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib_stubs.sh"
 PORT="${PORT:-18080}"
 fake_system_init
+# The machine that runs this test is not Debian; the installer is told what it would see on the box.
+cat >"$WORK/os-release" <<'EOF'
+PRETTY_NAME="Armbian 25.8 trixie"
+ID=debian
+VERSION_CODENAME=trixie
+EOF
+export SINKO_OS_RELEASE="$WORK/os-release"
+echo kidsbox >"$ROOT/etc/hostname"
 
 # Pretend an old 1.x page is installed
 mkdir -p "$ROOT/var/www/html/parental"
@@ -69,6 +77,24 @@ grep -q "unknown service" "$WORK/diagnose2.out" || fail "no message for an unkno
 : >"$WORK/pihole.log"
 SINKO_DNSMASQ_LOG="$WORK/pihole.log" "$ROOT/usr/local/bin/sinko" watch 0.02 >"$WORK/watch.out" 2>&1 || { cat "$WORK/watch.out"; fail "watch failed"; }
 grep -q "not using this box for DNS" "$WORK/watch.out" || { cat "$WORK/watch.out"; fail "watch printed no summary"; }
+
+echo "--- the local name and security updates are installed (stubbed apt and systemd)"
+grep -q 'apt-get install .*avahi-daemon' "$WORK/calls.log" || fail "avahi-daemon was not installed"
+grep -q 'apt-get install .*unattended-upgrades' "$WORK/calls.log" || fail "unattended-upgrades was not installed"
+[[ -e "$WORK/units/avahi-daemon.service.enabled" && -e "$WORK/units/avahi-daemon.service.active" ]] || fail "avahi-daemon was not enabled and started"
+grep -q 'http://kidsbox.local/' "$WORK/install.out" || { cat "$WORK/install.out"; fail "the summary does not show the .local name"; }
+ua="$ROOT/etc/apt/apt.conf.d/52sinko-unattended-upgrades"
+[[ -f "$ua" ]] || fail "no unattended-upgrades settings written"
+grep -q '^#clear Unattended-Upgrade::Origins-Pattern;$' "$ua" || fail "the package's own origin list is not cleared (apt lists add up)"
+# shellcheck disable=SC2016  # apt's macro, literal on purpose
+grep -qF 'origin=Debian,codename=${distro_codename}-security,label=Debian-Security' "$ua" || fail "Debian security origin missing"
+grep -q 'label=Debian"' "$ua" && fail "an origin other than Debian security is allowed"
+grep -q 'Origins-Pattern {' "$ua" || fail "no origin list"
+grep -q '^Unattended-Upgrade::Automatic-Reboot "false";$' "$ua" || fail "automatic reboot is not switched off"
+grep -q '^APT::Periodic::Unattended-Upgrade "1";$' "$ua" || fail "periodic upgrades are not switched on"
+grep -q '^SINKO_MDNS=1$' "$ROOT/etc/sinko/config" || fail "SINKO_MDNS is not saved"
+grep -q '^SINKO_OS_UPDATES=1$' "$ROOT/etc/sinko/config" || fail "SINKO_OS_UPDATES is not saved"
+[[ "$(grep -c 'apt-get install .*avahi-daemon' "$WORK/calls.log")" == 1 ]] || fail "avahi-daemon installed more than once"
 
 echo "--- re-run (update) keeps settings, hostname change replaces host entry"
 SINKO_HOSTNAME=kids.home bash "$REPO/install.sh" >"$WORK/install2.out" 2>&1 || { cat "$WORK/install2.out"; fail "second run failed"; }
@@ -189,6 +215,45 @@ bash "$REPO/install.sh" >"$WORK/t12.out" 2>&1 || fail "update failed"
 grep -q '^SINKO_TELEMETRY_URL=https://counter.example.org$' "$conf" || fail "SINKO_TELEMETRY_URL was not kept"
 if SINKO_TELEMETRY_URL='javascript:alert(1)' bash "$REPO/install.sh" >"$WORK/t13.out" 2>&1; then fail "a bad SINKO_TELEMETRY_URL was accepted"; fi
 sed -i '/^SINKO_TELEMETRY_URL=/d' "$conf"
+
+echo "--- packages that are already there are left alone, and the switches stay where they were put"
+: >"$WORK/calls.log"
+rm -f "$ua"
+bash "$REPO/install.sh" >"$WORK/e1.out" 2>&1 || { cat "$WORK/e1.out"; fail "run with the packages present failed"; }
+grep -q 'apt-get install' "$WORK/calls.log" && fail "installed a package that was already installed"
+[[ ! -e "$ua" ]] || fail "rewrote the settings of an unattended-upgrades that was already installed"
+grep -q "already installed (left as it is)" "$WORK/e1.out" || fail "no note about avahi"
+grep -q "already set up (left as they are)" "$WORK/e1.out" || fail "no note about the automatic updates"
+echo "    avahi that is not running: no .local line in the summary"
+rm -f "$WORK/units/avahi-daemon.service.active"
+bash "$REPO/install.sh" >"$WORK/e1b.out" 2>&1 || fail "run with avahi stopped failed"
+grep -q '\.local/' "$WORK/e1b.out" && fail "the summary shows a .local name although avahi is not running"
+echo "    SINKO_MDNS=0 and SINKO_OS_UPDATES=0 install nothing and are remembered"
+sed -i '/^avahi-daemon$/d; /^unattended-upgrades$/d' "$WORK/dpkg-installed"
+: >"$WORK/calls.log"
+SINKO_MDNS=0 SINKO_OS_UPDATES=0 bash "$REPO/install.sh" >"$WORK/e2.out" 2>&1 || fail "run with both switches off failed"
+bash "$REPO/install.sh" >"$WORK/e3.out" 2>&1 || fail "run after switching off failed"
+grep -q 'apt-get install' "$WORK/calls.log" && fail "installed a package although the switch is off (or forgot it)"
+grep -q '^SINKO_MDNS=0$' "$ROOT/etc/sinko/config" || fail "SINKO_MDNS=0 was not remembered"
+grep -q '^SINKO_OS_UPDATES=0$' "$ROOT/etc/sinko/config" || fail "SINKO_OS_UPDATES=0 was not remembered"
+[[ ! -e "$ua" ]] || fail "settings written although the switch is off"
+if SINKO_MDNS=maybe bash "$REPO/install.sh" >"$WORK/e4.out" 2>&1; then fail "SINKO_MDNS=maybe accepted"; fi
+grep -q "SINKO_MDNS must be 1 or 0" "$WORK/e4.out" || fail "no message for a bad SINKO_MDNS"
+echo "    when apt cannot install them the installation still succeeds, with a warning"
+touch "$WORK/apt-fail"
+SINKO_MDNS=1 SINKO_OS_UPDATES=1 bash "$REPO/install.sh" >"$WORK/e5.out" 2>&1 || { cat "$WORK/e5.out"; fail "a failing apt broke the installation"; }
+grep -q "Could not install avahi-daemon" "$WORK/e5.out" || fail "no warning about avahi"
+grep -q "Could not install unattended-upgrades" "$WORK/e5.out" || fail "no warning about unattended-upgrades"
+grep -q "Sinko is ready" "$WORK/e5.out" || fail "the installation did not finish"
+[[ ! -e "$ua" ]] || fail "settings written although the package is not installed"
+rm -f "$WORK/apt-fail"
+echo "    Ubuntu has its own security origin"
+printf 'PRETTY_NAME="Ubuntu 24.04"\nID=ubuntu\nID_LIKE=debian\n' >"$WORK/os-release"
+bash "$REPO/install.sh" >"$WORK/e6.out" 2>&1 || fail "run on Ubuntu failed"
+# shellcheck disable=SC2016  # apt's macro, literal on purpose
+grep -qF 'origin=Ubuntu,codename=${distro_codename}-security,label=Ubuntu' "$ua" || { cat "$ua"; fail "no Ubuntu security origin"; }
+grep -q 'origin=Debian' "$ua" && fail "Debian origins on Ubuntu"
+grep -q 'http://kidsbox.local/' "$WORK/e6.out" || fail "avahi was installed again but the .local name is not shown"
 
 echo "--- uninstall"
 bash "$ROOT/opt/sinko/uninstall.sh" >"$WORK/un.out" 2>&1 || { cat "$WORK/un.out"; fail "uninstall failed"; }
