@@ -1077,7 +1077,7 @@ class TickDoesNotWaitTests(Fixture):
         order = []
 
         class FakeController:
-            def __init__(self, api, catalog):
+            def __init__(self, api, catalog, clock_trusted=None):
                 pass
 
             def tick(self):
@@ -1085,6 +1085,9 @@ class TickDoesNotWaitTests(Fixture):
 
         class FakeMaintenance:
             api = None
+
+            def __init__(self, clock_ok=None):
+                pass
 
             def run(self, now):
                 order.append("maintenance")
@@ -1111,7 +1114,7 @@ class TickDoesNotWaitTests(Fixture):
         calls = []
 
         class FailingController:
-            def __init__(self, api, catalog):
+            def __init__(self, api, catalog, clock_trusted=None):
                 pass
 
             def tick(self):
@@ -1120,6 +1123,9 @@ class TickDoesNotWaitTests(Fixture):
 
         class FakeMaintenance:
             api = None
+
+            def __init__(self, clock_ok=None):
+                pass
 
             def run(self, now):
                 calls.append("maintenance")
@@ -1162,6 +1168,216 @@ class EverythingFailsTests(Fixture):
         self.assertEqual(self.state()["power"], {"request": None, "action": None})
         self.assertEqual(self.power_calls, ["reboot"])
         self.assertEqual(self.rules(), json.dumps([g for g in self.store.groups if g["name"] != "pb-state"], sort_keys=True))
+
+
+class ClockGuardTests(unittest.TestCase):
+    def guard(self, uptime=100.0, answers=(False,), mono=None):
+        self.asked = []
+        replies = iter(answers)
+        self.clock = [0.0] if mono is None else mono
+
+        def probe():
+            self.asked.append(self.clock[0])
+            return next(replies)
+        return pb.ClockGuard(uptime=lambda: uptime, synchronized=probe, monotonic=lambda: self.clock[0])
+
+    def test_a_clock_that_is_not_synchronised_is_not_believed_in_the_first_ten_minutes(self):
+        with self.assertLogs("sinko", level="INFO") as logs:
+            self.assertFalse(self.guard(uptime=0).trusted())
+        self.assertIn("not synchronised", logs.output[0])
+        with self.assertLogs("sinko", level="INFO"):
+            self.assertFalse(self.guard(uptime=599.9).trusted())
+
+    def test_after_ten_minutes_it_is_believed_without_even_asking(self):
+        for uptime in (600, 601, 86400 * 30):
+            guard = self.guard(uptime=uptime)
+            self.assertTrue(guard.trusted(), uptime)
+            self.assertEqual(self.asked, [], "no need to run timedatectl")
+
+    def test_a_synchronised_clock_is_believed_and_stays_believed(self):
+        guard = self.guard(answers=(True, False))
+        self.assertTrue(guard.trusted())
+        self.clock[0] += 60
+        self.assertTrue(guard.trusted())
+        self.assertEqual(len(self.asked), 1)
+
+    def test_when_the_answer_is_unknown_the_clock_is_believed(self):
+        # No systemd (a container, a development machine) must not hold bedtime for ten minutes.
+        guard = self.guard(answers=(None,))
+        self.assertTrue(guard.trusted())
+        self.assertTrue(pb.ClockGuard(uptime=lambda: None, synchronized=lambda: False).trusted(), "unknown uptime")
+
+    def test_the_answer_is_not_asked_for_more_than_once_every_five_seconds(self):
+        guard = self.guard(answers=(False, False, False))
+        with self.assertLogs("sinko", level="INFO"):
+            for _ in range(4):
+                self.assertFalse(guard.trusted())
+                self.clock[0] += 1
+            self.assertEqual(len(self.asked), 1)
+            self.clock[0] += 5
+            self.assertFalse(guard.trusted())
+        self.assertEqual(len(self.asked), 2)
+
+    def test_when_the_clock_gets_synchronised_the_hold_ends_and_it_is_said_once(self):
+        guard = self.guard(answers=(False, True))
+        with self.assertLogs("sinko", level="INFO") as logs:
+            self.assertFalse(guard.trusted())
+            self.assertFalse(guard.trusted())
+            self.clock[0] += 6
+            self.assertTrue(guard.trusted())
+            self.assertTrue(guard.trusted())
+        self.assertEqual(len(logs.records), 2, "one line when holding starts, one when it ends")
+
+    def test_the_hold_ends_by_itself_after_ten_minutes_of_uptime(self):
+        uptime = [100.0]
+        guard = pb.ClockGuard(uptime=lambda: uptime[0], synchronized=lambda: False, monotonic=lambda: uptime[0])
+        with self.assertLogs("sinko", level="INFO"):
+            self.assertFalse(guard.trusted())
+            uptime[0] = 600
+            self.assertTrue(guard.trusted())
+
+    def test_timedatectl_is_asked_for_exactly_this_with_a_short_timeout(self):
+        def run(answer, code=0):
+            return mock.patch.object(pb.subprocess, "run", return_value=subprocess.CompletedProcess([], code, answer, ""))
+        with run("yes\n") as m:
+            self.assertIs(pb.ntp_synchronized(), True)
+        self.assertEqual(m.call_args[0][0], ["timedatectl", "show", "-p", "NTPSynchronized", "--value"])
+        self.assertLessEqual(m.call_args[1]["timeout"], 2)
+        with run("no\n"):
+            self.assertIs(pb.ntp_synchronized(), False)
+        for odd in ("", "maybe", "n/a"):
+            with run(odd):
+                self.assertIsNone(pb.ntp_synchronized(), odd)
+        with run("no\n", code=1):
+            self.assertIsNone(pb.ntp_synchronized(), "a failing command is not an answer")
+        for error in (FileNotFoundError("timedatectl"), subprocess.TimeoutExpired("timedatectl", 1), PermissionError()):
+            with mock.patch.object(pb.subprocess, "run", side_effect=error):
+                self.assertIsNone(pb.ntp_synchronized())
+
+    def test_uptime_is_read_from_proc_uptime_or_the_override(self):
+        with tempfile.NamedTemporaryFile("w", delete=False) as fh:
+            fh.write("123.45 678.9\n")
+        self.addCleanup(os.remove, fh.name)
+        with mock.patch.dict(os.environ, {"SINKO_UPTIME_FILE": fh.name}):
+            self.assertEqual(pb.read_uptime(), 123.45)
+        with mock.patch.dict(os.environ, {"SINKO_UPTIME_FILE": fh.name + ".missing"}):
+            self.assertIsNone(pb.read_uptime())
+        with open(fh.name, "w") as out:
+            out.write("junk")
+        with mock.patch.dict(os.environ, {"SINKO_UPTIME_FILE": fh.name}):
+            self.assertIsNone(pb.read_uptime())
+
+
+class ClockHoldTests(Fixture):
+    """A board without a clock starts with an old time: the scheduler must hold the state, not flip it."""
+
+    def controller(self, trusted):
+        return pb.Controller(self.api, self.catalog, "https://lists.example/l", clock_trusted=lambda: trusted[0])
+
+    def enabled(self, name):
+        return self.group(name)["enabled"]
+
+    def bedtime(self, **extra):
+        sched = {"enabled": True, "start": "21:00", "end": "06:00", "days": [0, 1, 2, 3, 4, 5, 6]}
+        self.set_state(lambda s: s.update(schedule=sched, **extra))
+
+    def test_bedtime_is_not_started_by_a_clock_that_is_not_believed_yet(self):
+        self.bedtime()
+        trusted = [False]
+        ctl = self.controller(trusted)
+        writes = self.store.writes
+        self.assertEqual(ctl.tick(dt.datetime(2026, 9, 17, 22, 0)), [])
+        self.assertFalse(self.enabled("pb-offline"))
+        self.assertEqual(self.store.writes, writes, "the state is not even rewritten")
+        trusted[0] = True
+        self.assertTrue(ctl.tick(dt.datetime(2026, 9, 17, 22, 0)))
+        self.assertTrue(self.enabled("pb-offline"))
+
+    def test_bedtime_is_not_ended_by_an_old_time_that_says_it_is_afternoon(self):
+        # The box lost power at night and restarts believing it is 14:00 of an earlier day.
+        self.bedtime(scheduleActive=True)
+        self.api.put_group("pb-offline", "", True)
+        trusted = [False]
+        ctl = self.controller(trusted)
+        self.assertEqual(ctl.tick(dt.datetime(2026, 9, 15, 14, 0)), [])
+        self.assertTrue(self.enabled("pb-offline"), "the children's internet stays off")
+        self.assertTrue(self.state()["scheduleActive"])
+        trusted[0] = True                              # the time server answered: it is 23:10 for real
+        ctl.tick(dt.datetime(2026, 9, 17, 23, 10))
+        self.assertTrue(self.enabled("pb-offline"))
+        self.assertTrue(self.state()["scheduleActive"])
+
+    def test_a_timer_is_not_ended_by_an_old_time_either(self):
+        until = dt.datetime(2026, 9, 17, 16, 0).timestamp()
+        self.set_state(lambda s: s.update(timer={"mode": "free", "until": until,
+                                                 "snapshot": {"services": {"youtube": True}, "offline": False}}))
+        trusted = [False]
+        ctl = self.controller(trusted)
+        self.assertEqual(ctl.tick(dt.datetime(2026, 9, 17, 17, 0)), [], "past the end by the box's time, which is not believed")
+        self.assertIsNotNone(self.state()["timer"])
+        trusted[0] = True
+        self.assertTrue(ctl.tick(dt.datetime(2026, 9, 17, 17, 0)))
+        self.assertIsNone(self.state()["timer"])
+
+    def test_without_a_guard_the_tick_behaves_as_before(self):
+        self.bedtime()
+        ctl = pb.Controller(self.api, self.catalog, "https://lists.example/l")
+        self.assertTrue(ctl.tick(dt.datetime(2026, 9, 17, 22, 0)))
+        self.assertTrue(self.enabled("pb-offline"))
+
+    def test_the_guard_does_not_stop_the_requests_of_the_page(self):
+        # Held rules are not held requests: a parent who presses "Restart" is obeyed whatever the clock says.
+        self.set_state(lambda s: s["power"].update(request=1, action="reboot"))
+        self.clock_trusted = False
+        self.settle()
+        self.assertEqual(self.power_calls, ["reboot"])
+
+    def test_the_real_guard_drives_both_the_tick_and_the_side_jobs(self):
+        self.bedtime()
+        guard = pb.ClockGuard(uptime=lambda: 30.0, synchronized=lambda: False)
+        ctl = pb.Controller(self.api, self.catalog, "https://lists.example/l", clock_trusted=guard.trusted)
+        self.set_state(lambda s: s["update"].update(auto=True, latest="3.1.0"))
+        m = pb.Maintenance(self.api, config_path=self.config_path, monotonic=lambda: self.mono, job_factory=InlineJob,
+                           clock_ok=guard.trusted, check=self.fake_check, start_runner=self.fake_runner,
+                           power=self.fake_power, default_ip=lambda: self.ip, apply_address=self.fake_apply,
+                           ping=self.fake_ping, body=lambda: "BODY")
+        night = dt.datetime(2026, 9, 18, 3, 30)
+        with self.assertLogs("sinko", level="INFO"):
+            self.assertEqual(ctl.tick(night), [])
+            m.run(night)
+            m.run(night)
+        self.assertEqual(self.runner_calls, [], "no automatic update on a clock nobody believes")
+        self.assertFalse(self.enabled("pb-offline"))
+
+    def test_the_scheduler_loop_hands_the_guard_to_both(self):
+        seen = {}
+
+        class FakeController:
+            def __init__(self, api, catalog, clock_trusted=None):
+                seen["controller"] = clock_trusted
+
+            def tick(self):
+                return []
+
+        class FakeMaintenance:
+            api = None
+
+            def __init__(self, clock_ok=None):
+                seen["maintenance"] = clock_ok
+
+            def run(self, now):
+                return []
+        stop = {}
+
+        def fake_sleep(seconds):
+            stop["handler"]()
+        with mock.patch.object(pb.signal, "signal", lambda sig, handler: stop.update(handler=handler)), \
+                mock.patch.object(pb.time, "sleep", fake_sleep), mock.patch.object(pb, "Controller", FakeController), \
+                mock.patch.object(pb, "Maintenance", FakeMaintenance), mock.patch.object(pb, "Api", lambda: mock.Mock()), \
+                mock.patch.object(pb, "load_catalog", return_value={}):
+            pb.cmd_run(None)
+        self.assertEqual(seen["controller"].__self__, seen["maintenance"].__self__, "one guard, shared")
+        self.assertIsInstance(seen["controller"].__self__, pb.ClockGuard)
 
 
 if __name__ == "__main__":

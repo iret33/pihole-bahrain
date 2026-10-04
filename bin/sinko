@@ -1546,11 +1546,79 @@ def run_selfcheck(wait: float = 0, out=print, sleep=time.sleep, clock=time.monot
 # --------------------------------------------------------------------------- #
 # Controller
 # --------------------------------------------------------------------------- #
+CLOCK_HOLD_UPTIME = 600            # seconds after boot during which an unsynchronised clock is not believed
+
+
+def read_uptime():
+    try:
+        with open(os.environ.get("SINKO_UPTIME_FILE", "/proc/uptime"), encoding="ascii") as fh:
+            return float(fh.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def ntp_synchronized():
+    """True / False as `timedatectl` says, None when it cannot say (no systemd, no answer within a second)."""
+    try:
+        done = subprocess.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"], capture_output=True,
+                              text=True, timeout=1)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    answer = done.stdout.strip().lower() if done.returncode == 0 else ""
+    return True if answer == "yes" else False if answer == "no" else None
+
+
+class ClockGuard:
+    """Is the box's clock worth believing yet?
+
+    The Orange Pi has no real-time clock: after a power cut it starts with the time it last saved, hours or days
+    ago, until it has reached an internet time server. Acting on that time would switch bedtime off in the middle
+    of the night, or end a timer that has not run out. So while the box has been up less than ten minutes and
+    timedatectl says the clock is NOT synchronised, the current state is held. Only an explicit "no" holds: a machine
+    that cannot tell (no systemd) is believed, and so is every box after ten minutes, because a home without
+    internet must still get its bedtime.
+    """
+
+    def __init__(self, uptime=read_uptime, synchronized=ntp_synchronized, monotonic=time.monotonic):
+        self._uptime = uptime
+        self._probe = synchronized
+        self._mono = monotonic
+        self._synced = False
+        self._asked = None             # (monotonic time, answer) of the last "no"
+        self._holding = False
+
+    def trusted(self) -> bool:
+        up = self._uptime()
+        if up is None or up >= CLOCK_HOLD_UPTIME or self._synced:
+            return self._release()
+        now = self._mono()
+        if self._asked is None or now - self._asked[0] >= 5:        # the tick and the side jobs both ask, a few times
+            answer = self._probe()
+            if answer is True:
+                self._synced = True
+                return self._release()
+            self._asked = (now, answer)
+        if self._asked[1] is False:
+            if not self._holding:
+                self._holding = True
+                log.info("the clock is not synchronised yet: holding bedtime and timers for up to %d minutes",
+                         int((CLOCK_HOLD_UPTIME - up) // 60) + 1)
+            return False
+        return self._release()
+
+    def _release(self) -> bool:
+        if self._holding:
+            self._holding = False
+            log.info("the clock is trusted now: bedtime and timers follow it again")
+        return True
+
+
 class Controller:
-    def __init__(self, api: Api, catalog: dict, base: str | None = None):
+    def __init__(self, api: Api, catalog: dict, base: str | None = None, clock_trusted=None):
         self.api = api
         self.catalog = catalog
         self.base = base or lists_base()
+        self.clock_trusted = clock_trusted         # a callable; None = always believe the clock
         self._pending_kids = []
 
     # ----- setup -----
@@ -1757,6 +1825,8 @@ class Controller:
 
     def tick(self, now: dt.datetime | None = None) -> list:
         """One scheduler pass. Returns a list of human-readable actions taken."""
+        if self.clock_trusted is not None and not self.clock_trusted():
+            return []                      # hold the current state: see ClockGuard
         now = now or dt.datetime.now()
         epoch = now.timestamp()
         state, blocked, offline, groups = self.read_state()
@@ -2450,7 +2520,8 @@ def cmd_run(args) -> int:
         ensure_state_dir("cache")
     except OSError as err:
         log.error("cannot create %s: %s (updates and requests from the page will not work)", state_dir(), err)
-    maintenance = Maintenance()
+    clock = ClockGuard()
+    maintenance = Maintenance(clock_ok=clock.trusted)
     api = None
     backoff = 5
     log.info("scheduler %s started", VERSION)
@@ -2459,7 +2530,7 @@ def cmd_run(args) -> int:
             if api is None:
                 api = Api()
                 api.login()
-            Controller(api, catalog).tick()
+            Controller(api, catalog, clock_trusted=clock.trusted).tick()
             backoff = 5
             wait = TICK_SECONDS
             maintenance.api = api
