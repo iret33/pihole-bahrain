@@ -2653,6 +2653,10 @@ def build_status(api: Api, catalog: dict) -> dict:
         "timer": state["timer"],
         "schedule": state["schedule"],
         "bedtime_now": state["scheduleActive"],
+        # What the scheduler knows about updates. The page's request markers are not part of the picture.
+        "update": {k: v for k, v in state["update"].items() if k not in ("request", "checkRequest")},
+        # The parent's answer (null = not asked yet). Never the counter's id: that is shown by `telemetry payload` only.
+        "telemetry": {"on": state["telemetry"]["on"]},
     }
 
 
@@ -2762,6 +2766,26 @@ def kid_checks(rep: Report, catalog: dict, groups: dict, clients: list, devices:
 # --------------------------------------------------------------------------- #
 class SystemProbe:
     """Reads the routing table, IPv6 state and Pi-hole's log. Paths can be overridden with SINKO_* variables."""
+
+    def free_disk_bytes(self):
+        """Free space on the box's disk (the root file system, where /opt and /var/lib are), or None."""
+        try:
+            return shutil.disk_usage(os.environ.get("SINKO_DISK_PATH", "/")).free
+        except OSError:
+            return None
+
+    def cpu_temp_c(self):
+        """CPU temperature in degrees Celsius from the first thermal zone, or None (a PC, a VM, no sensor)."""
+        try:
+            with open(os.environ.get("SINKO_THERMAL_FILE", "/sys/class/thermal/thermal_zone0/temp"), encoding="ascii") as fh:
+                raw = float(fh.read().strip())
+        except (OSError, ValueError):
+            return None
+        temp = raw / 1000.0 if abs(raw) > 1000 else raw                  # the kernel reports millidegrees
+        return temp if -50 <= temp <= 200 else None
+
+    def clock_synchronized(self):
+        return ntp_synchronized()
 
     @staticmethod
     def _lines(env: str, default: str) -> list:
@@ -2944,6 +2968,48 @@ def doctor_api_checks(rep: Report, api: Api, catalog: dict, probe=None, now: flo
     network_checks(rep, api, probe, now)
 
 
+DISK_WARN_BYTES = 300 * 1024 * 1024
+TEMP_WARN_C = 80.0
+
+
+def health_checks(rep: Report, state, probe=None) -> None:
+    """What a box needs besides working rules: the version it runs and whether an update waits, room on the disk, a
+    CPU that is not too hot, a clock that is right, and the state of the anonymous counter. `state` is None when
+    Pi-hole could not be asked; the lines that need it are then left out."""
+    probe = probe or SystemProbe()
+    rep.info("running version %s" % VERSION)
+    if state is not None:
+        update = state["update"]
+        if update["latest"] and is_newer(update["latest"], VERSION):
+            rep.info("update available: %s (install it with: sudo sinko update)" % update["latest"])
+        if update["status"] == "failed" and update["error"]:
+            rep.info("the last update did not work: %s" % update["error"])
+    free = probe.free_disk_bytes()
+    if free is not None:
+        if free < DISK_WARN_BYTES:
+            rep.warn("only %d MB of disk space is free. Updates and the Pi-hole database need room: delete what is not "
+                     "needed, or use a larger card." % (free // (1024 * 1024)))
+        else:
+            rep.ok("%d MB of disk space free" % (free // (1024 * 1024)))
+    temp = probe.cpu_temp_c()
+    if temp is not None:
+        if temp > TEMP_WARN_C:
+            rep.warn("the CPU is at %.0f C (above %.0f C). Give the box air, and keep it out of the sun and away from heaters."
+                     % (temp, TEMP_WARN_C))
+        else:
+            rep.ok("CPU temperature is %.0f C" % temp)
+    synced = probe.clock_synchronized()
+    if synced is False:
+        rep.warn("the clock is not synchronised with a time server. Bedtime and timers follow the box's time, which can be "
+                 "wrong until it is: check that the box can reach the internet.")
+    elif synced is True:
+        rep.ok("the clock is synchronised")
+    if state is not None:
+        on = state["telemetry"]["on"]
+        rep.info("anonymous counter: %s%s" % ("on" if on else "off" if on is False else "not decided yet",
+                 " (no counter address is set up, so nothing is sent)" if on and not telemetry_url() else ""))
+
+
 def cmd_doctor(args) -> int:
     rep = Report()
     try:
@@ -2960,10 +3026,12 @@ def cmd_doctor(args) -> int:
         rep.check(os.path.isfile(os.path.join(webroot, "pb", "app.js")), "web page installed in " + webroot)
     except (OSError, subprocess.SubprocessError) as err:
         rep.fix("pihole-FTL CLI available (%s)" % err)
+    state = None
     try:
         api = Api()
         api.login()
         doctor_api_checks(rep, api, load_catalog())
+        state = parse_state(api.group_map().get(G_STATE, {}).get("comment"))
         base = lists_base()
         if base.startswith("http"):
             try:
@@ -2974,6 +3042,7 @@ def cmd_doctor(args) -> int:
         api.logout()
     except (ApiError, OSError, ValueError) as err:
         rep.fix("Pi-hole API reachable (%s)" % err)
+    health_checks(rep, state)
     return rep.finish()
 
 
