@@ -3454,6 +3454,65 @@ def load_catalog_safely():
         raise CatalogError("%s: %s" % (type(err).__name__, short_text(err, 100)))
 
 
+def _list_file_problem(path: str, is_catalog: bool) -> bool:
+    """True when the file is missing, empty, or (services.json) not JSON: what a write that a power cut interrupted
+    can leave behind."""
+    try:
+        if os.stat(path).st_size == 0:
+            return True
+        if is_catalog:
+            with open(path, encoding="utf-8") as fh:
+                json.load(fh)
+    except (OSError, ValueError):
+        return True
+    return False
+
+
+def repair_catalog_files() -> list:
+    """Put back the service lists (and services.json) that cannot be read, from a copy of this very version that is
+    known to be whole: the source tree the installer ran from, else the verified copy kept for rollback. Only files
+    that cannot be read are written (each atomically); everything else is left exactly as it is. Returns the names
+    written, [] when there was nothing to do or nothing to do it from."""
+    lists_dir = os.path.join(APP_DIR, "lists")
+
+    def restore_from(folder):
+        """The names written from `folder`, or None when that copy is not whole itself (then it is no help)."""
+        try:
+            names = ["services.json"] + [s["id"] + ".txt" for s in load_catalog(folder)["services"]] + ["guard.txt"]
+        except (SystemExit, OSError, ValueError, KeyError, TypeError):
+            return None
+        written = []
+        for name in dict.fromkeys(names):
+            target = os.path.join(lists_dir, name)
+            if _list_file_problem(target, name == "services.json"):
+                with open(os.path.join(folder, name), "rb") as fh:
+                    atomic_write(target, fh.read(), 0o644)
+                written.append(name)
+        return written
+    try:
+        src = os.path.join(APP_DIR, "src")
+        if read_version_file(src) == VERSION:
+            done = restore_from(os.path.join(src, "lists"))
+            if done is not None:
+                return done
+        cached = cache_file(VERSION)
+        if not os.path.isfile(cached):
+            return []
+        os.makedirs(APP_DIR, exist_ok=True)
+        scrap = tempfile.mkdtemp(dir=APP_DIR, prefix=".stage-")
+        try:
+            if unpack_release(cached, scrap) != VERSION:
+                return []
+            return restore_from(os.path.join(scrap, "sinko", "lists")) or []
+        except UpdateError:
+            return []
+        finally:
+            shutil.rmtree(scrap, ignore_errors=True)
+    except OSError as err:
+        log.debug("could not repair the lists: %s", err)
+        return []
+
+
 # Errors that mean "Pi-hole (or the network to it) did not answer properly": the session is dropped and the pass is
 # tried again with a back-off. Anything else is a bug in this program or a state it did not foresee.
 TRANSPORT_ERRORS = (ApiError, OSError, ValueError, http.client.HTTPException)
@@ -3469,14 +3528,39 @@ class Scheduler:
     """
     MAX_BACKOFF = 120
 
-    def __init__(self, clock=None, maintenance=None, gate=None):
+    REPAIR_EVERY = 3600
+
+    def __init__(self, clock=None, maintenance=None, gate=None, repair=None, monotonic=time.monotonic):
         self.clock = clock or ClockGuard()
         self.maintenance = maintenance if maintenance is not None else Maintenance(clock_ok=self.clock.trusted)
         self.gate = gate or LogGate()
+        self.repair = repair or repair_catalog_files
+        self.mono = monotonic
         self.api = None
         self.catalog = None
         self.backoff = 5
         self.ticks = 0
+        self._next_repair = 0.0
+
+    def _load_catalog(self):
+        """The service catalog; when it cannot be read, put back the files that cannot (from a whole copy of this
+        version), at most once an hour, and try again."""
+        try:
+            return load_catalog_safely()
+        except CatalogError:
+            if self.mono() < self._next_repair:
+                raise
+            self._next_repair = self.mono() + self.REPAIR_EVERY
+            try:
+                fixed = self.repair()
+            except Exception as err:                        # a repair that fails is no worse than none
+                log.debug("could not repair the lists: %s", err)
+                fixed = []
+            if not fixed:
+                raise
+            log.warning("scheduler: put back %s, which could not be read (an update was probably cut short)",
+                        ", ".join(fixed[:4]) + (" and more" if len(fixed) > 4 else ""))
+            return load_catalog_safely()
 
     def step(self) -> float:
         """One pass. Returns the number of seconds to wait before the next."""
@@ -3486,7 +3570,7 @@ class Scheduler:
                 self.api = Api()
                 self.api.login()
             if self.catalog is None:
-                self.catalog = load_catalog_safely()
+                self.catalog = self._load_catalog()
             Controller(self.api, self.catalog, clock_trusted=self.clock.trusted).tick()
             ok = True
         except Exception as err:

@@ -7,19 +7,25 @@ import json
 import logging
 import os
 import random
+import shutil
+import stat
 import unittest
 from unittest import mock
 
+import fake_release
 import mock_pihole
 import test_maintenance as tm
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+LISTS = os.path.join(ROOT, "lists")
 
 loader = importlib.machinery.SourceFileLoader("sinko_cli", os.path.join(ROOT, "bin", "sinko"))
 spec = importlib.util.spec_from_loader("sinko_cli", loader)
 pb = importlib.util.module_from_spec(spec)
 loader.exec_module(pb)
+
+REAL_LOAD_CATALOG = pb.load_catalog
 
 
 class LoopFixture(tm.Fixture):
@@ -37,8 +43,10 @@ class LoopFixture(tm.Fixture):
             patch.start()
             self.addCleanup(patch.stop)
         self.gate_clock = [0.0]
+        self.repairs = []
         self.sched = pb.Scheduler(clock=pb.ClockGuard(uptime=lambda: None, synchronized=lambda: None), maintenance=self.m,
-                                  gate=pb.LogGate(monotonic=lambda: self.gate_clock[0]))
+                                  gate=pb.LogGate(monotonic=lambda: self.gate_clock[0]),
+                                  repair=lambda: self.repairs.append(1) or [], monotonic=lambda: self.gate_clock[0])
         self.addCleanup(self.sched.close)
 
     def open_sessions(self):
@@ -234,6 +242,145 @@ class CatalogTests(LoopFixture):
         self.assertIn("duplicate service id", str(caught.exception))
         with mock.patch.object(pb, "load_catalog", return_value={"services": []}):
             self.assertEqual(pb.load_catalog_safely(), {"services": []})
+
+
+class RepairTests(LoopFixture):
+    """An update cut short by a power failure can leave a list or services.json empty or missing. The scheduler puts
+    back what cannot be read from a copy of this version that is whole, and touches nothing else."""
+
+    def setUp(self):
+        super().setUp()
+        self.app = os.path.join(self.tmp, "app")
+        self.lists = os.path.join(self.app, "lists")
+        os.makedirs(self.lists)
+        for name in os.listdir(LISTS):
+            shutil.copy(os.path.join(LISTS, name), os.path.join(self.lists, name))
+        env = mock.patch.object(pb, "APP_DIR", self.app)
+        env.start()
+        self.addCleanup(env.stop)
+        # the real catalog reader again (the loop fixture gives the scheduler a ready-made one), reading this box's folder
+        patch = mock.patch.object(pb, "load_catalog", lambda lists_dir=None: REAL_LOAD_CATALOG(lists_dir or self.lists))
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def put_source(self, version=None):
+        src = os.path.join(self.app, "src")
+        shutil.copytree(LISTS, os.path.join(src, "lists"))
+        with open(os.path.join(src, "VERSION"), "w") as fh:
+            fh.write((version or pb.VERSION) + "\n")
+        return src
+
+    def put_cached(self, version=None, broken=False):
+        version = version or pb.VERSION
+        extra = {"sinko/lists/" + n: (self.raw(os.path.join(LISTS, n)), 0o644) for n in os.listdir(LISTS)}
+        data = fake_release.build_release(version, extra=extra)
+        os.makedirs(pb.cache_dir(), exist_ok=True)
+        with open(pb.cache_file(pb.VERSION), "wb") as fh:
+            fh.write(data[:len(data) // 2] if broken else data)
+
+    @staticmethod
+    def raw(path):
+        with open(path, "rb") as fh:
+            return fh.read()
+
+    def read(self, name):
+        return self.raw(os.path.join(self.lists, name))
+
+    def test_nothing_is_written_when_everything_reads(self):
+        self.put_source()
+        before = {n: os.stat(os.path.join(self.lists, n)).st_ino for n in os.listdir(self.lists)}
+        self.assertEqual(pb.repair_catalog_files(), [])
+        self.assertEqual({n: os.stat(os.path.join(self.lists, n)).st_ino for n in os.listdir(self.lists)}, before)
+
+    def test_a_missing_empty_or_garbled_file_is_put_back_and_the_others_are_not_touched(self):
+        self.put_source()
+        os.unlink(os.path.join(self.lists, "tiktok.txt"))
+        open(os.path.join(self.lists, "guard.txt"), "w").close()
+        with open(os.path.join(self.lists, "services.json"), "w") as fh:
+            fh.write('{"services": [')
+        untouched = os.stat(os.path.join(self.lists, "youtube.txt")).st_ino
+        fixed = pb.repair_catalog_files()
+        self.assertEqual(sorted(fixed), ["guard.txt", "services.json", "tiktok.txt"])
+        for name in fixed:
+            self.assertEqual(self.read(name), self.raw(os.path.join(LISTS, name)), name)
+            self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.lists, name)).st_mode), 0o644)
+        self.assertEqual(os.stat(os.path.join(self.lists, "youtube.txt")).st_ino, untouched)
+        self.assertEqual(pb.load_catalog(self.lists)["services"][0]["id"], pb.load_catalog(LISTS)["services"][0]["id"])
+        self.assertEqual([n for n in os.listdir(self.lists) if n.startswith(".")], [], "no temporary file is left")
+
+    def test_a_file_that_is_there_and_readable_is_never_replaced_even_when_it_differs(self):
+        self.put_source()
+        with open(os.path.join(self.lists, "youtube.txt"), "a") as fh:
+            fh.write("||added.example^\n")
+        os.unlink(os.path.join(self.lists, "guard.txt"))
+        self.assertEqual(pb.repair_catalog_files(), ["guard.txt"])
+        self.assertIn(b"added.example", self.read("youtube.txt"))
+
+    def test_the_source_tree_of_another_version_is_not_used(self):
+        self.put_source("2.9.0")
+        os.unlink(os.path.join(self.lists, "guard.txt"))
+        self.assertEqual(pb.repair_catalog_files(), [])
+        self.assertFalse(os.path.exists(os.path.join(self.lists, "guard.txt")))
+
+    def test_without_a_whole_source_tree_the_stored_copy_is_used_and_nothing_is_left_behind(self):
+        src = self.put_source()
+        os.unlink(os.path.join(src, "lists", "guard.txt"))        # the tree is itself damaged
+        self.put_cached()
+        os.unlink(os.path.join(self.lists, "guard.txt"))
+        self.assertEqual(pb.repair_catalog_files(), ["guard.txt"])
+        self.assertEqual(self.read("guard.txt"), self.raw(os.path.join(LISTS, "guard.txt")))
+        self.assertEqual([n for n in os.listdir(self.app) if n.startswith(".stage-")], [])
+
+    def test_a_stored_copy_that_is_damaged_or_of_another_version_is_no_help(self):
+        os.unlink(os.path.join(self.lists, "guard.txt"))
+        self.put_cached(broken=True)
+        self.assertEqual(pb.repair_catalog_files(), [])
+        self.put_cached(version="2.9.0")
+        self.assertEqual(pb.repair_catalog_files(), [])
+        self.assertEqual([n for n in os.listdir(self.app) if n.startswith(".stage-")], [])
+
+    def test_with_nothing_to_repair_from_it_says_so_by_returning_nothing(self):
+        os.unlink(os.path.join(self.lists, "guard.txt"))
+        self.assertEqual(pb.repair_catalog_files(), [])
+
+    def scheduler(self, repair):
+        return pb.Scheduler(clock=pb.ClockGuard(uptime=lambda: None, synchronized=lambda: None), maintenance=self.m,
+                            gate=pb.LogGate(monotonic=lambda: self.gate_clock[0]), repair=repair,
+                            monotonic=lambda: self.gate_clock[0])
+
+    def test_the_scheduler_repairs_the_lists_once_and_carries_on_in_the_same_pass(self):
+        self.put_source()
+        os.unlink(os.path.join(self.lists, "guard.txt"))
+        sched = self.scheduler(pb.repair_catalog_files)
+        self.addCleanup(sched.close)
+        with self.assertLogs("sinko", level="WARNING") as logs:
+            self.assertEqual(sched.step(), pb.TICK_SECONDS)
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn("guard.txt", logs.records[0].getMessage())
+        self.assertEqual(pb.read_heartbeat()["ticks"], 1)
+
+    def test_a_repair_that_finds_nothing_is_not_tried_more_than_once_an_hour(self):
+        calls = []
+        sched = self.scheduler(lambda: calls.append(1) or [])
+        self.addCleanup(sched.close)
+        os.unlink(os.path.join(self.lists, "guard.txt"))
+        with self.assertLogs("sinko", level="WARNING"):
+            for _ in range(5):
+                sched.step()
+        self.assertEqual(len(calls), 1)
+        self.gate_clock[0] += 3601
+        with self.assertLogs("sinko", level="WARNING"):
+            sched.step()
+        self.assertEqual(len(calls), 2)
+
+    def test_a_repair_that_raises_is_no_worse_than_none(self):
+        def boom():
+            raise RuntimeError("disk gone")
+        sched = self.scheduler(boom)
+        self.addCleanup(sched.close)
+        os.unlink(os.path.join(self.lists, "guard.txt"))
+        with self.assertLogs("sinko", level="WARNING"):
+            self.assertEqual(sched.step(), 5)
 
 
 def garbage(rng, depth=0):
