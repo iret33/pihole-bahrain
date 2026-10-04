@@ -37,12 +37,18 @@ pb = importlib.util.module_from_spec(spec)
 loader.exec_module(pb)
 
 
+# The pictures open the page at a home-network address, not 127.0.0.1: a browser proxy sends that address to the mock (the My box sheet
+# shows the address the page was opened at, and a README picture must not show a loopback number "for your router").
+HOME_ADDRESS = "192.168.1.50"
+HOME_URL = "http://%s/" % HOME_ADDRESS
+
+
 def demo_box():
-    """A mock Pi-hole with Sinko set up and a family on it. Returns (server, store, url)."""
+    """A mock Pi-hole with Sinko set up and a family on it. Returns (server, store)."""
     httpd, store = mock_pihole.serve(0, os.path.join(ROOT, "web"))
-    url = "http://127.0.0.1:%d/" % httpd.server_port
+    store.config["dns"]["hosts"] = ["%s family.lan" % HOME_ADDRESS]
     catalog = pb.load_catalog(os.path.join(ROOT, "lists"))
-    api = pb.Api(url.rstrip("/"), password=mock_pihole.PASSWORD)
+    api = pb.Api("http://127.0.0.1:%d" % httpd.server_port, password=mock_pihole.PASSWORD)
     api.login()
     pb.Controller(api, catalog, os.path.join(ROOT, "lists")).setup(run_gravity=False)
     gid = {g["name"]: g["id"] for g in api.groups()}
@@ -59,14 +65,15 @@ def demo_box():
         "setup": {"done": True}}))
     mock_pihole.seed_history(store)
     mock_pihole.start_live(store)
-    return httpd, store, url
+    return httpd, store
 
 
-def sign_in(browser, url, lang, **view):
-    ctx = browser.new_context(**dict(dict(locale="en-GB", device_scale_factor=2), **view))
+def sign_in(browser, lang, **view):
+    proxy = {"server": "http://127.0.0.1:%d" % httpd.server_port}
+    ctx = browser.new_context(**dict(dict(locale="en-GB", device_scale_factor=2, proxy=proxy), **view))
     page = ctx.new_page()
     page.set_default_timeout(20000)
-    page.goto(url)
+    page.goto(HOME_URL)
     page.wait_for_selector("#login:not([hidden])")
     if lang == "ar":
         page.click("#login .lang-toggle")
@@ -97,12 +104,12 @@ def save(page, name):
     note(path)
 
 
-httpd, store, url = demo_box()
+httpd, store = demo_box()
 try:
     with sync_playwright() as p:
-        browser = p.chromium.launch()
+        browser = p.chromium.launch(proxy={"server": "per-context"})
         for lang in ("en", "ar"):
-            ctx, page = sign_in(browser, url, lang, viewport={"width": 390, "height": 844})
+            ctx, page = sign_in(browser, lang, viewport={"width": 390, "height": 844})
             settle(page)
             save(page, "panel-%s.png" % lang)
             if lang == "en":
@@ -111,12 +118,12 @@ try:
                 page.locator("#live .live-card").screenshot(path=os.path.join(args.out, "live-en.png"))
                 note(os.path.join(args.out, "live-en.png"))
             ctx.close()
-        ctx, page = sign_in(browser, url, "en", viewport={"width": 1280, "height": 900}, device_scale_factor=1)
+        ctx, page = sign_in(browser, "en", viewport={"width": 1280, "height": 900}, device_scale_factor=1)
         settle(page)
         save(page, "desktop-en.png")
         ctx.close()
         for lang in ("en", "ar"):
-            ctx, page = sign_in(browser, url, lang, viewport={"width": 390, "height": 1180})
+            ctx, page = sign_in(browser, lang, viewport={"width": 390, "height": 1500})
             page.click(".topbar [data-act=box]")
             page.wait_for_selector("#boxDialog[open]")
             page.wait_for_selector("#boxHealth .box-value:not(:text('…'))")

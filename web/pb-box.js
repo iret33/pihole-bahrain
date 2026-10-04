@@ -38,6 +38,7 @@
       boxStarting: 'Starting the update…', boxRunning: 'Updating to Sinko {v}…', boxRunningNoV: 'Updating Sinko…',
       boxRunningNote: 'This takes a few minutes. Keep the box plugged in. The internet at home may pause for a minute, and this page may go quiet while the box restarts some of its parts.',
       boxLateStart: 'The box has not started yet. It will begin as soon as it can.',
+      boxUpdateStuck: 'The box did not start the update. Unplug the box, plug it back in, wait two minutes and try again. If it keeps happening, ask whoever set up the box.',
       boxWaitingBox: 'The box is restarting. Waiting for it to come back…',
       boxLongWait: 'The box has not answered for a while. Check that it is plugged in and on your Wi‑Fi, then reload this page.',
       boxSignedOut: 'The box restarted and signed you out. Sign in again to see how the update went.',
@@ -57,8 +58,9 @@
       boxTempHotNote: 'Move the box somewhere cooler and open.', boxTempNone: 'Not available on this box.',
       boxMemLabel: 'Memory', boxMemOk: 'Plenty free ({p} in use)', boxMemBusy: 'Getting full ({p} in use)', boxMemFull: 'Almost full ({p} in use)',
       boxLastSeenLabel: 'Last device seen', boxLastSeenValue: '{n}, {t}', boxLastSeenNone: 'No device yet',
-      boxClockLabel: 'Box clock', boxClockOk: 'Same as this phone.',
+      boxClockLabel: 'Box clock', boxClockOk: 'Agrees with this phone.',
       boxClockOff: 'This phone and the box differ by about {t}. Bedtime and timers follow the box.',
+      boxClockZone: 'Bedtime follows the box’s own time zone, which the box does not tell this page. If bedtime starts at the wrong hour, the box’s time zone is probably not yours.',
       // addresses
       boxNetTitle: 'Addresses', boxNetHint: 'These open this page from any phone or tablet on your Wi‑Fi.',
       boxNetIp: 'Number address', boxNetIpNote: 'For your router settings.',
@@ -129,6 +131,7 @@
       boxStarting: 'جارٍ بدء التحديث…', boxRunning: 'جارٍ التحديث إلى سينكو {v}…', boxRunningNoV: 'جارٍ تحديث سينكو…',
       boxRunningNote: 'يستغرق هذا بضع دقائق. أبقِ الصندوق موصولًا بالكهرباء. قد يتوقف الإنترنت في البيت لدقيقة، وقد تصمت هذه الصفحة قليلًا أثناء إعادة تشغيل الصندوق لبعض أجزائه.',
       boxLateStart: 'لم يبدأ الصندوق بعد. سيبدأ حال استطاعته.',
+      boxUpdateStuck: 'لم يبدأ الصندوق التحديث. افصل الصندوق عن الكهرباء ثم أعد توصيله وانتظر دقيقتين وحاول مجددًا. إذا تكرر ذلك فاسأل من أعدّ الصندوق.',
       boxWaitingBox: 'الصندوق يعيد التشغيل. بانتظار عودته…',
       boxLongWait: 'لم يستجب الصندوق منذ فترة. تأكد أنه موصول بالكهرباء وبشبكة Wi‑Fi، ثم أعد تحميل الصفحة.',
       boxSignedOut: 'أعاد الصندوق التشغيل وسُجّل خروجك. سجّل الدخول مجددًا لمعرفة نتيجة التحديث.',
@@ -147,8 +150,9 @@
       boxTempHotNote: 'انقل الصندوق إلى مكان أبرد ومفتوح.', boxTempNone: 'غير متاحة على هذا الصندوق.',
       boxMemLabel: 'الذاكرة', boxMemOk: 'متوفرة بكثرة (المستخدم {p})', boxMemBusy: 'تمتلئ تدريجيًا (المستخدم {p})', boxMemFull: 'شبه ممتلئة (المستخدم {p})',
       boxLastSeenLabel: 'آخر جهاز ظهر', boxLastSeenValue: '{n}، {t}', boxLastSeenNone: 'لم يظهر أي جهاز بعد',
-      boxClockLabel: 'ساعة الصندوق', boxClockOk: 'مطابقة لساعة هذا الهاتف.',
+      boxClockLabel: 'ساعة الصندوق', boxClockOk: 'متفقة مع ساعة هذا الهاتف.',
       boxClockOff: 'يوجد فرق نحو {t} بين هذا الهاتف والصندوق. وقت النوم والمؤقتات يتبعان ساعة الصندوق.',
+      boxClockZone: 'يتبع وقت النوم المنطقة الزمنية الخاصة بالصندوق، ولا يخبر الصندوق هذه الصفحة بها. إذا بدأ وقت النوم في ساعة خاطئة، فالأرجح أن المنطقة الزمنية للصندوق ليست منطقتك.',
       boxNetTitle: 'العناوين', boxNetHint: 'تفتح هذه العناوين هذه الصفحة من أي هاتف أو جهاز لوحي على شبكة Wi‑Fi.',
       boxNetIp: 'العنوان الرقمي', boxNetIpNote: 'لإعدادات الراوتر.',
       boxNetName: 'الاسم السهل', boxNetNameNote: 'يعمل على الأجهزة التي تستخدم الصندوق.',
@@ -390,7 +394,7 @@
 
   // ------------------------------------------------------------------ the sheet (browser only from here)
   // How long the page waits before it says something did not happen (ms). A variable, so the browser tests can shorten the waits.
-  var timing = { checkOffline: 20000, checkSlow: 45000, powerStuck: 45000, powerNoRestart: 180000, startLate: 90000, longDown: 600000, startLost: 300000 };
+  var timing = { checkOffline: 20000, checkSlow: 45000, powerStuck: 45000, powerNoRestart: 180000, startLate: 90000, longDown: 600000, startLost: 360000 };   // startLost: the scheduler waits up to 5 minutes between runs
   var env = null;                    // what the page lends us, see init()
   var ui = null;                     // the elements, built on first open (and again after a language change)
   var poller = null;
@@ -408,6 +412,7 @@
   var restoring = false;
   var skipReload = false;            // the sheet was closed because the session ended
   var okSeenAt = 0;                  // the finish time of the update whose result was already checked
+  var pending = null;                // { marker, at, withdrawing }: an update request this page has been watching, see sweepStuckRequest
 
   function t(k, v) { return env.t(k, v); }
   function el(tag, attrs, kids) { return env.el(tag, attrs, kids); }
@@ -429,7 +434,7 @@
     var d = document.getElementById('boxDialog');
     if (d && d.open) { skipReload = true; env.closeDialog('boxDialog'); }
     clearSecrets();
-    upd = null; power = null; signedOut = false; restoring = false; st = null; health = null; hosts = null; updSig = '';
+    upd = null; power = null; signedOut = false; restoring = false; st = null; health = null; hosts = null; updSig = ''; pending = null;
   }
 
   function open() {
@@ -509,8 +514,10 @@
     ui.hFilter = row('boxFilterLabel'); ui.hUptime = row('boxUptimeLabel'); ui.hTemp = row('boxTempLabel');
     ui.hMem = row('boxMemLabel'); ui.hSeen = row('boxLastSeenLabel'); ui.hClock = row('boxClockLabel');
     ui.hNone = el('p', { class: 'box-note', text: t('boxHealthNone'), hidden: true });
+    // The clock row can only say the box and this phone agree. Pi-hole does not report the box's time zone, and bedtime runs on it.
+    ui.hZone = el('p', { class: 'box-note', id: 'boxClockZone', text: t('boxClockZone') });
     ui.healthCard = card('boxHealth', 'boxHealthTitle', [el('div', { class: 'box-rows' },
-      [ui.hFilter.node, ui.hUptime.node, ui.hTemp.node, ui.hMem.node, ui.hSeen.node, ui.hClock.node]), ui.hNone]);
+      [ui.hFilter.node, ui.hUptime.node, ui.hTemp.node, ui.hMem.node, ui.hSeen.node, ui.hClock.node]), ui.hZone, ui.hNone]);
 
     // addresses
     ui.netList = el('ul', { class: 'box-addr' });
@@ -863,10 +870,12 @@
     // Nothing is judged before our own write has landed: until then the state still shows an older attempt.
     if (upd && !upd.written) { /* wait for the write */ }
     else if (upd && upd.kind === 'update') {
-      if (view.phase === 'running' || view.phase === 'starting') upd.seen = true;
-      if (view.phase === 'ok' || view.phase === 'failed' || view.phase === 'stalled' || (upd.seen && view.phase !== 'running' && view.phase !== 'starting')) {
+      var active = view.phase === 'running' || view.phase === 'starting';
+      if (active) upd.seen = true;
+      // Over when it ended one way or the other, or when the request is gone without the scheduler ever having started (withdrawn, below).
+      if (view.phase === 'ok' || view.phase === 'failed' || view.phase === 'stalled' || (!active && (upd.seen || nowMs() - upd.writtenAt > 3000))) {
         upd = null; setFast(false);
-      } else if (!upd.seen && nowMs() - upd.since > timing.startLost) { upd = null; setFast(false); }
+      }
     } else if (upd && upd.kind === 'check') {
       var waited = nowMs() - upd.since;
       if (u.checked > upd.checkedBefore) { upd = null; updNotice = ''; setFast(false); }
@@ -876,6 +885,30 @@
     // An update that finished (watched here, or while nobody was looking: automatic at night, or started on another phone).
     if (view.phase === 'ok' && u.at !== okSeenAt) { okSeenAt = u.at; afterUpdateOk(view.to); }
     if (power && power.written) trackPower();
+    sweepStuckRequest(st);
+  }
+
+  /**
+   * An update request that nobody picks up means the scheduler on the box is not running. The card must not show a progress bar for
+   * ever (and the main page must not say "Sinko is updating"): after a while the request is withdrawn, so it cannot fire later by
+   * surprise, and the parent is told what to do. Whoever wrote the request, and whichever screen is open (it is called from both):
+   * only this page's own watching time counts, never a clock.
+   */
+  function sweepStuckRequest(state) {
+    var u = state.update;
+    if (u.request === null || u.status === 'running') { pending = null; return; }
+    if (!pending || pending.marker !== u.request) { pending = { marker: u.request, at: nowMs(), withdrawing: false }; return; }
+    if (pending.withdrawing || nowMs() - pending.at < timing.startLost) return;
+    var mine = pending;
+    mine.withdrawing = true;
+    env.writeState(function (s) { if (s.update.request === mine.marker) s.update.request = null; }).then(function () {
+      if (pending === mine) pending = null;
+      if (upd && upd.kind === 'update') { upd = null; setFast(false); }
+      updNotice = t('boxUpdateStuck');
+      if (ui) { st = env.state(); updSig = ''; renderUpdate(); }
+      env.toast(t('boxUpdateStuck'), true);
+      env.reload().catch(function () {});                    // the banner on the main page goes back to "ready"
+    }, function () { mine.withdrawing = false; });
   }
   function trackPower() {
     var p = power, waited = nowMs() - p.since;
@@ -956,7 +989,7 @@
     var mine = upd = { kind: 'update', since: nowMs(), seen: false, written: false };
     updNotice = ''; updSig = ''; renderUpdate();
     focusStatus();                                           // the button the parent pressed is gone now: focus moves to the status
-    env.writeState(function (s) { s.update.request = nowMs(); }).then(function () { mine.written = true; pollSoon(); }, function (e) {
+    env.writeState(function (s) { s.update.request = nowMs(); }).then(function () { mine.written = true; mine.writtenAt = nowMs(); pollSoon(); }, function (e) {
       if (upd === mine) upd = null;
       updSig = ''; renderUpdate();
       env.toast(t('failed', { e: e && e.message ? e.message : String(e) }), true);
@@ -1156,7 +1189,10 @@
     });
   }
 
-  var api = { strings: BOX_STR, pure: pure, timing: timing, init: init, open: open, relang: relang, reset: reset };
+  /** For the main page, which looks at the state too: it withdraws a stuck update request even when this sheet is closed. */
+  function sweep(state) { if (env && env.model()) sweepStuckRequest(state); }
+
+  var api = { strings: BOX_STR, pure: pure, timing: timing, init: init, open: open, relang: relang, reset: reset, sweep: sweep };
   root.PBBox = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof window !== 'undefined' ? window : this);

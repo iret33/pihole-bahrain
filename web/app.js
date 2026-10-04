@@ -938,6 +938,7 @@
   // The banner for a newer Sinko (or an update that is running or failed): opens My box, where the update is done.
   function renderUpdateBanner() {
     var b = $('updateBanner');
+    PBBox.sweep(M.state);                       // an update request nobody picks up is withdrawn after a while (see pb-box.js)
     var view = PBBox.pure.updateView(M.state, { now: serverNowSec(), current: pageVersion });
     var text = '';
     if (view.phase === 'available') text = t('updateReady', { v: view.latest });

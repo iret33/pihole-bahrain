@@ -320,6 +320,48 @@ def part_update(browser):
         expect(eventually(lambda: T(lang, "boxStalled") in live(page), 8), "[%s] a run that has said 'running' for over half an hour is called stuck" % lang)
         ctx.close()
 
+        # --- nobody on the box listens (the scheduler is not running): the request is withdrawn and the parent is told what to do
+        url, store = make_site()
+        offer_update(store)
+        ctx, page = open_page(browser, url, lang)
+        page.evaluate("() => { PBBox.timing.startLost = 1500; }")
+        open_box(page)
+        page.click("#boxUpdateBtn")
+        expect(eventually(lambda: T(lang, "boxStarting") in live(page)), "[%s] it starts by saying it is starting" % lang)
+        expect(eventually(lambda: store.state()["update"]["request"] is None, 15), "[%s] a request nobody picks up is withdrawn, so it cannot fire later by surprise" % lang)
+        expect(eventually(lambda: T(lang, "boxUpdateStuck") in box_text(page)), "[%s] and the card says to unplug the box and plug it back in" % lang)
+        expect(eventually(lambda: page.locator("#boxUpdateBtn").count() == 1 and not page.is_disabled("#boxUpdateBtn")) and T(lang, "boxAvailable", v="3.1.0") in live(page),
+               "[%s] with the card back at 'available', not a progress bar for ever: %r" % (lang, live(page)))
+        shot(page, "box-update-stuck-%s.png" % lang)
+        page.click("#boxDialog [data-act=boxClose]")
+        expect(eventually(lambda: page.inner_text("#updateBanner") == T(lang, "updateReady", v="3.1.0")), "[%s] and the main page is back to 'ready' instead of 'updating'" % lang)
+        ctx.close()
+        # the same from the main page alone: a request left by an earlier visit, the sheet never opened
+        url, store = make_site()
+        offer_update(store)
+        store.edit_state(lambda st: st["update"].update({"request": 1700000000000}))
+        ctx, page = open_page(browser, url, lang)
+        expect(eventually(lambda: page.is_visible("#updateBanner") and page.inner_text("#updateBanner") == T(lang, "updateRunning")), "[%s] the main page first believes the request is being worked on" % lang)
+        page.evaluate("() => { PBBox.timing.startLost = 1500; }")
+        time.sleep(2.0)
+        page.evaluate("() => document.dispatchEvent(new Event('visibilitychange'))")
+        expect(eventually(lambda: store.state()["update"]["request"] is None, 10), "[%s] and withdraws it once it has watched it go unanswered, without My box ever being opened" % lang)
+        expect(eventually(lambda: page.inner_text("#updateBanner") == T(lang, "updateReady", v="3.1.0")), "[%s] then offers the update again" % lang)
+        expect(eventually(lambda: T(lang, "boxUpdateStuck") in clean(page.inner_text("#toast"))), "[%s] and says what to do" % lang)
+        ctx.close()
+        # a request that IS picked up is left alone, however long the scheduler takes to finish
+        url, store = make_site()
+        sim = sim_for(store, run_seconds=None)
+        offer_update(store)
+        ctx, page = open_page(browser, url, lang)
+        page.evaluate("() => { PBBox.timing.startLost = 1000; }")
+        open_box(page)
+        page.click("#boxUpdateBtn")
+        eventually(lambda: store.state()["update"]["status"] == "running")
+        time.sleep(3.5)
+        expect(store.state()["update"]["status"] == "running" and T(lang, "boxUpdateStuck") not in box_text(page), "[%s] an update the scheduler is running is never withdrawn" % lang)
+        ctx.close()
+
         # --- check again: finds a newer version, or cannot reach the internet
         url, store = make_site()
         sim = sim_for(store, run_seconds=1.0)
@@ -382,7 +424,9 @@ def part_health(browser):
         expect("47" in r[2][1] and "°C" in r[2][1], "[%s] with the number: %r" % (lang, r[2][1]))
         expect("38" in r[3][1], "[%s] memory: %r" % (lang, r[3][1]))
         expect("Sara-iPad" in r[4][1], "[%s] the last device seen: %r" % (lang, r[4][1]))
-        expect(r[5][2] == T(lang, "boxClockOk"), "[%s] the box clock matches this phone: %r" % (lang, r[5]))
+        expect(r[5][2] == T(lang, "boxClockOk"), "[%s] the box clock agrees with this phone: %r" % (lang, r[5]))
+        expect(page.inner_text("#boxClockZone") == T(lang, "boxClockZone"), "[%s] and the card says bedtime follows the box's own time zone, which the box does not report" % lang)
+        expect("same" not in r[5][2].lower(), "[%s] without claiming the clocks show the same local time" % lang)
         expect(not ARABIC_INDIC_DIGITS.search(" ".join(x[1] for x in r)), "[%s] Latin digits" % lang)
         shot(page, "box-health-%s.png" % lang)
         ctx.close()
@@ -862,7 +906,7 @@ def part_screenshots(browser):
                 fh.write(b"old")
         done = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "make-screenshots.py"), "--out", out], capture_output=True, text=True, timeout=240)
         expect(done.returncode == 0, "make-screenshots.py succeeds, over the pictures of an earlier run %s" % (done.stderr[-300:] if done.returncode else ""))
-        want = {"panel-en.png": (780, 1688), "panel-ar.png": (780, 1688), "desktop-en.png": (1280, 900), "box-en.png": (780, 2360), "box-ar.png": (780, 2360)}
+        want = {"panel-en.png": (780, 1688), "panel-ar.png": (780, 1688), "desktop-en.png": (1280, 900), "box-en.png": (780, 3000), "box-ar.png": (780, 3000)}
         for name, size in want.items():
             path = os.path.join(out, name)
             with open(path, "rb") as fh:
