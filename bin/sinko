@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import fcntl
+import gzip
 import hashlib
 import http.client
 import ipaddress
@@ -54,6 +55,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 
 VERSION = "3.0.0"
 
@@ -167,7 +169,7 @@ def kid_groups(group_ids: dict, catalog: dict) -> list:
 # Runtime data: /var/lib/sinko (root only, never reachable from the page)
 # --------------------------------------------------------------------------- #
 HANDLED_KINDS = ("update", "check", "power")
-INSTALL_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+INSTALL_ID_RE = re.compile(r"^[0-9a-f]{32}\Z")
 RESULT_STATUSES = ("ok", "failed")
 
 
@@ -780,6 +782,763 @@ def in_schedule(sched: dict, now: dt.datetime) -> bool:
     if minute >= start:
         return js_today in days
     return minute < end and js_yesterday in days
+
+
+# --------------------------------------------------------------------------- #
+# Updates (docs/maintainers/architecture.md, "Update flow")
+# --------------------------------------------------------------------------- #
+DEFAULT_REPO_SLUG = "iret33/sinko"
+DEFAULT_REPO_URL = "https://github.com/iret33/sinko.git"
+RELEASE_ASSET = "sinko.tar.gz"
+MAX_DOWNLOAD = 20 * 1024 * 1024        # a release is a few MB; anything bigger is not ours
+MAX_UNPACKED = 100 * 1024 * 1024       # gzip can inflate a small download a thousandfold
+MAX_MEMBERS = 5000
+MIN_FREE_BYTES = 100 * 1024 * 1024
+CHECK_TIMEOUT = 10
+DOWNLOAD_TIMEOUT = 30                  # for each wait on the network ...
+DOWNLOAD_DEADLINE = 600                # ... and for a whole download
+INSTALL_TIMEOUT = 1800
+SELFCHECK_WAIT = 90                    # the installer has just restarted FTL and the scheduler: give them time
+REQUIRED_MEMBERS = ("sinko/VERSION", "sinko/install.sh", "sinko/bin/sinko")
+REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,100}\Z")      # never starts with "-": it reaches git's command line
+SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]{1,60}/[A-Za-z0-9_.-]{1,60}\Z")
+TAG_RE = re.compile(r"^v(\d{1,4}\.\d{1,4}\.\d{1,4})\Z")
+CACHE_RE = re.compile(r"^sinko-(\d{1,4}\.\d{1,4}\.\d{1,4})\.tar\.gz\Z")
+REPO_URL_RE = re.compile(r"^(?:https://github\.com/|git@github\.com:)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?\Z")
+
+
+class UpdateError(Exception):
+    """A failure with a message a parent can read: short, and never containing a secret."""
+
+
+class UpdateLocked(UpdateError):
+    """Another update or rollback is running."""
+
+
+def parse_version(text):
+    """(major, minor, patch) for 'X.Y.Z', else None."""
+    if isinstance(text, str) and SEMVER_RE.fullmatch(text):          # fullmatch: "$" alone lets a trailing newline through
+        return tuple(int(part) for part in text.split("."))
+    return None
+
+
+def is_newer(candidate, current) -> bool:
+    a, b = parse_version(candidate), parse_version(current)
+    return a is not None and b is not None and a > b
+
+
+def short_text(text, limit: int = 200) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def release_settings(conf=None) -> dict:
+    """Where releases come from. The environment beats /etc/sinko/config beats the built-in GitHub address."""
+    conf = read_config() if conf is None else conf
+
+    def pick(key: str) -> str:
+        return os.environ.get(key) or conf.get(key) or ""
+    repo = pick("SINKO_REPO") or DEFAULT_REPO_URL
+    slug = pick("SINKO_REPO_SLUG") or (REPO_URL_RE.match(repo).group(1) if REPO_URL_RE.match(repo) else "") \
+        or DEFAULT_REPO_SLUG
+    if not SLUG_RE.match(slug) or "." in slug.split("/") or ".." in slug.split("/"):
+        raise UpdateError("The update source in the settings (%s) is not a GitHub name like owner/name." % short_text(slug, 60))
+    base = (pick("SINKO_RELEASE_BASE") or "https://github.com/%s/releases" % slug).rstrip("/")
+    api = pick("SINKO_RELEASE_API") or "https://api.github.com/repos/%s/releases/latest" % slug
+    for url in (base, api):
+        if not url.startswith(("http://", "https://")):
+            raise UpdateError("The update address in the settings is not a web address.")
+    return {"slug": slug, "base": base, "api": api, "repo": repo, "ref": pick("SINKO_REF") or "latest"}
+
+
+def classify_ref(ref):
+    """('latest', None), ('tag', 'X.Y.Z') for vX.Y.Z, or ('branch', ref): the developer path (git)."""
+    if not isinstance(ref, str) or not REF_RE.match(ref) or ".." in ref:
+        raise UpdateError("'%s' is not a version name." % short_text(ref, 40))
+    if ref == "latest":
+        return "latest", None
+    tag = TAG_RE.match(ref)
+    return ("tag", tag.group(1)) if tag else ("branch", ref)
+
+
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow redirects (GitHub serves release files from another host), but never from https down to http."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old, new = urllib.parse.urlsplit(req.full_url).scheme, urllib.parse.urlsplit(newurl).scheme
+        if new not in ("http", "https") or (old == "https" and new != "https"):
+            raise urllib.error.HTTPError(req.full_url, code, "redirect to an insecure address refused", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def http_fetch(url, max_bytes, timeout=DOWNLOAD_TIMEOUT, deadline=DOWNLOAD_DEADLINE, dest=None):
+    """GET `url`. Returns the body, or writes it to the file `dest` and returns None.
+
+    A body over `max_bytes` is refused while it arrives, not after. `timeout` only limits each single wait, so a
+    server that sends a byte a second would hold the update lock for hours: `deadline` limits the whole transfer.
+    """
+    request = urllib.request.Request(url, headers={"User-Agent": "sinko/" + VERSION})
+    started = time.monotonic()
+    total = 0
+    chunks = []
+    out = None
+    try:
+        if dest:
+            out = open(dest, "wb")
+        with urllib.request.build_opener(_SafeRedirect).open(request, timeout=timeout) as resp:
+            read = getattr(resp, "read1", resp.read)         # read1 returns what has arrived; read() would wait for a full block
+            length = resp.headers.get("Content-Length")
+            if length and length.isdigit() and int(length) > max_bytes:
+                raise UpdateError("The download is larger than allowed.")
+            while True:
+                if time.monotonic() - started > deadline:
+                    raise UpdateError("The download took too long.")
+                chunk = read(65536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise UpdateError("The download is larger than allowed.")
+                if out:
+                    out.write(chunk)
+                else:
+                    chunks.append(chunk)
+    except UpdateError:
+        raise
+    except urllib.error.HTTPError as err:
+        err.close()
+        raise UpdateError("The server answered HTTP %s for %s." % (err.code, url.rsplit("/", 1)[-1][:60]))
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as err:
+        raise UpdateError("Could not download %s (%s)." % (url.rsplit("/", 1)[-1][:60],
+                                                          short_text(getattr(err, "reason", None) or err, 80)))
+    finally:
+        if out:
+            out.close()
+    return None if dest else b"".join(chunks)
+
+
+def pick_release(data):
+    """The newest usable release in GitHub's answer as {"version", "tag"}, or None.
+
+    Understands the object of /releases/latest and the list of /releases. Drafts and prereleases never count, and
+    neither does a tag that is not exactly vX.Y.Z.
+    """
+    best = None
+    for item in data if isinstance(data, list) else [data]:
+        if not isinstance(item, dict) or item.get("draft") or item.get("prerelease"):
+            continue
+        tag = item.get("tag_name")
+        match = TAG_RE.match(tag) if isinstance(tag, str) else None
+        if match and (best is None or parse_version(match.group(1)) > parse_version(best["version"])):
+            best = {"version": match.group(1), "tag": tag}
+    return best
+
+
+def notes_url(slug: str, tag: str):
+    """The release page, built from the configured repository, not copied from what a server said."""
+    url = "https://github.com/%s/releases/tag/%s" % (slug, tag)
+    return url if NOTES_RE.match(url) else None
+
+
+def fetch_latest_release(settings: dict, fetch=http_fetch):
+    body = fetch(settings["api"], 1 << 20, CHECK_TIMEOUT, 30)
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except ValueError:
+        raise UpdateError("The answer about the newest version was not understood.")
+    return pick_release(data)
+
+
+def check_for_update(conf=None, running: str = VERSION, fetch=http_fetch, ref=None):
+    """The release this box could update to, {"version", "tag", "notes"}, or None when it is up to date.
+
+    Raises UpdateError when GitHub cannot be asked. A box that follows a git branch (a developer box) is
+    never offered a release.
+    """
+    settings = release_settings(conf)
+    kind, value = classify_ref(ref or settings["ref"])
+    if kind == "branch":
+        return None
+    release = {"version": value, "tag": "v" + value} if kind == "tag" else fetch_latest_release(settings, fetch)
+    if release is None or not is_newer(release["version"], running):
+        return None
+    return dict(release, notes=notes_url(settings["slug"], release["tag"]))
+
+
+def parse_sha256(text: str) -> str:
+    """The hash in a `sha256sum` file: one line, `<64 hex>  sinko.tar.gz`."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    match = re.match(r"^([0-9A-Fa-f]{64})(?:\s+\*?(\S+))?$", lines[0]) if len(lines) == 1 else None
+    if not match or (match.group(2) and match.group(2) != RELEASE_ASSET):
+        raise UpdateError("The checksum file is not in the expected form.")
+    return match.group(1).lower()
+
+
+def sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 16), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def release_url(settings: dict, tag, asset: str) -> str:
+    if tag:
+        return "%s/download/%s/%s" % (settings["base"], tag, asset)
+    return "%s/latest/download/%s" % (settings["base"], asset)
+
+
+def download_release(settings: dict, tag, dest: str, fetch=http_fetch) -> None:
+    """Fetch sinko.tar.gz and its checksum, and keep the file at `dest` only if the two agree."""
+    try:
+        fetch(release_url(settings, tag, RELEASE_ASSET), MAX_DOWNLOAD, DOWNLOAD_TIMEOUT, DOWNLOAD_DEADLINE, dest=dest)
+        text = fetch(release_url(settings, tag, RELEASE_ASSET + ".sha256"), 4096, CHECK_TIMEOUT, 30)
+        try:
+            want = parse_sha256(text.decode("utf-8"))
+        except UnicodeDecodeError:
+            raise UpdateError("The checksum file is not in the expected form.")
+        if sha256_file(dest) != want:
+            raise UpdateError("The download does not match its checksum, so it was not installed.")
+    except BaseException:
+        try:
+            os.unlink(dest)
+        except OSError:
+            pass
+        raise
+
+
+class _CappedReader:
+    """Stops a tarball that unpacks to far more than it should before it fills the disk or the memory."""
+
+    def __init__(self, fh, limit: int):
+        self._fh = fh
+        self._left = limit
+
+    def read(self, size=-1):
+        size = self._left + 1 if size is None or size < 0 else min(size, self._left + 1)
+        data = self._fh.read(size)
+        self._left -= len(data)
+        if self._left < 0:
+            raise UpdateError("The download is not a valid Sinko release (it unpacks to too much data).")
+        return data
+
+
+def _not_a_release(why: str) -> UpdateError:
+    return UpdateError("The download is not a valid Sinko release (%s)." % why)
+
+
+def unpack_release(tar_path: str, dest: str) -> str:
+    """Unpack a release into the empty directory `dest` and return the version it carries.
+
+    Every entry is checked before it is written: only plain files and folders, only below sinko/, no absolute path,
+    no "..", and no link of any kind, so nothing can be written outside `dest` or through a link. (The release has
+    no links; this is stricter than "no link that leaves the tree" on purpose.) Done by hand instead of with
+    tarfile's `filter="data"`, which only exists from Python 3.12 (and in late 3.9-3.11 patch releases).
+    """
+    files = set()
+    total = 0
+    real_dest = os.path.realpath(dest)
+    try:
+        with open(tar_path, "rb") as raw, gzip.GzipFile(fileobj=raw) as gz, \
+                tarfile.open(fileobj=_CappedReader(gz, MAX_UNPACKED + MAX_MEMBERS * 1024 + (1 << 20)), mode="r|") as tar:
+            for count, member in enumerate(tar, 1):
+                if count > MAX_MEMBERS:
+                    raise _not_a_release("too many files")
+                if member.name.startswith("/"):
+                    raise _not_a_release("a file name starts with /")
+                parts = [p for p in member.name.split("/") if p not in ("", ".")]
+                if ".." in parts:
+                    raise _not_a_release("a file name contains ..")
+                if not parts and member.isdir():
+                    continue                                  # "./", the folder itself
+                if not parts or parts[0] != "sinko":
+                    raise _not_a_release("a file is outside the sinko folder")
+                target = os.path.join(dest, *parts)
+                if os.path.commonpath([real_dest, os.path.realpath(target)]) != real_dest:
+                    raise _not_a_release("a file would land outside the folder")
+                if member.isdir():
+                    os.makedirs(target, exist_ok=True)
+                    continue
+                if member.type not in (tarfile.REGTYPE, tarfile.AREGTYPE):
+                    raise _not_a_release("%s is a link or a special file" % short_text(member.name, 60))
+                key = "/".join(parts)
+                total += member.size
+                if key in files or total > MAX_UNPACKED:
+                    raise _not_a_release("a file appears twice or the files are too big")
+                files.add(key)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(fd, "wb") as out:
+                    shutil.copyfileobj(tar.extractfile(member), out, 1 << 16)
+                    os.fchmod(out.fileno(), 0o755 if member.mode & 0o111 else 0o644)    # never setuid, never group-writable
+    except UpdateError:
+        raise
+    except (tarfile.TarError, OSError, EOFError, zlib.error) as err:
+        raise _not_a_release(short_text(err, 80))
+    missing = [name for name in REQUIRED_MEMBERS if name not in files]
+    if missing:
+        raise _not_a_release("%s is missing" % missing[0])
+    top = os.path.join(dest, "sinko")
+    for root, _dirs, _names in os.walk(top):
+        os.chmod(root, 0o755)
+    version = read_version_file(top)
+    if version is None:
+        raise _not_a_release("its VERSION file is not a version number")
+    return version
+
+
+def read_version_file(tree: str):
+    try:
+        with open(os.path.join(tree, "VERSION"), encoding="ascii") as fh:
+            text = fh.read(64).strip()
+    except (OSError, ValueError):
+        return None
+    return text if parse_version(text) else None
+
+
+def install_source(top: str) -> str:
+    """Make `top` the tree /opt/sinko/src (the last downloaded source). The old tree is renamed aside first, so a
+    failure at any point leaves one complete tree behind."""
+    src = os.path.join(APP_DIR, "src")
+    old = src + ".old"
+    shutil.rmtree(old, ignore_errors=True)
+    if os.path.lexists(src):
+        os.rename(src, old)
+    try:
+        os.rename(top, src)
+    except OSError:
+        if os.path.lexists(old):
+            os.rename(old, src)
+        raise
+    shutil.rmtree(old, ignore_errors=True)
+    return src
+
+
+def cache_dir() -> str:
+    return os.path.join(state_dir(), "cache")
+
+
+def cache_file(version: str) -> str:
+    return os.path.join(cache_dir(), "sinko-%s.tar.gz" % version)
+
+
+def cached_versions() -> list:
+    """Versions stored for offline rollback, newest first."""
+    try:
+        names = os.listdir(cache_dir())
+    except OSError:
+        return []
+    found = [m.group(1) for m in (CACHE_RE.match(n) for n in names) if m]
+    return sorted(found, key=parse_version, reverse=True)
+
+
+def drop_cached(version: str) -> None:
+    try:
+        os.unlink(cache_file(version))
+    except OSError:
+        pass
+
+
+def prune_cache(installed: str) -> None:
+    """Keep two releases: the installed one, and the newest older one (the rollback target).
+
+    "Two newest by number" would throw away the installed release after a rollback, and the older one that a second
+    rollback needs.
+    """
+    versions = cached_versions()
+    keep = {installed}
+    older = [v for v in versions if is_newer(installed, v)]
+    newer = [v for v in versions if is_newer(v, installed)]
+    if older:
+        keep.add(older[0])
+    elif newer:
+        keep.add(newer[0])
+    for version in versions:
+        if version not in keep:
+            drop_cached(version)
+
+
+def run_installer(src: str, ref: str) -> int:
+    """The installer shipped in the release, told to use `src` as it is and never to ask anything."""
+    env = dict(os.environ, SINKO_SRC=src, SINKO_NONINTERACTIVE="1", SINKO_REF=ref)
+    try:
+        return subprocess.run(["bash", os.path.join(src, "install.sh")], env=env, cwd="/", stdin=subprocess.DEVNULL,
+                              timeout=INSTALL_TIMEOUT).returncode
+    except subprocess.TimeoutExpired:
+        return 124
+    except OSError:
+        return 127
+
+
+def run_installed_selfcheck(wait: float = SELFCHECK_WAIT):
+    """(ok, detail) from `sinko selfcheck` of the program that is installed NOW.
+
+    It must be a new process: this one still runs the old code, whose VERSION would not match the page the
+    installer has just put in place.
+    """
+    exe = os.path.join(APP_DIR, "bin", "sinko")
+    if not os.path.isfile(exe):
+        return False, "the installed program is missing"
+    try:
+        done = subprocess.run([sys.executable, exe, "selfcheck", "--wait", str(int(wait))], capture_output=True,
+                              text=True, timeout=wait + 120)
+    except (OSError, subprocess.SubprocessError) as err:
+        return False, short_text(err, 80)
+    if done.returncode == 0:
+        return True, ""
+    failed = [l.strip()[4:].strip() for l in done.stdout.splitlines() if l.strip().startswith("FAIL")]
+    return False, short_text(failed[0] if failed else (done.stderr.strip() or "it exited with an error"), 120)
+
+
+class Updater:
+    """`sinko update` and `sinko rollback`. Everything that touches the network or the machine can be replaced
+    (tests give it a local server and a fake installer)."""
+
+    def __init__(self, conf=None, out=print, fetch=http_fetch, installer=run_installer, selfcheck=None, clock=time.time):
+        self.conf = read_config() if conf is None else conf
+        self.out = out
+        self.fetch = fetch
+        self.installer = installer
+        self.selfcheck = selfcheck or run_installed_selfcheck
+        self.clock = clock
+
+    # ----- entry points -----
+    def check(self):
+        return check_for_update(self.conf, fetch=self.fetch)
+
+    def update(self, ref=None, force=False, confirm=None):
+        """Install the newest release (or `ref`). Returns the result dict that was also written to
+        update-result.json, or None when `confirm` said no. Raises UpdateLocked when a run is already going."""
+        lock = RunLock()
+        if not lock.acquire():
+            raise UpdateLocked("Another update is already running.")
+        current = VERSION
+        target = {"to": None}
+        try:
+            clear_update_result()                    # a result from an earlier run must never pass for this one
+            try:
+                outcome = self._update(ref, force, confirm, current, target)
+            except UpdateError as err:
+                outcome = ("failed", target["to"], str(err))
+            except Exception as err:                 # a bug or an odd machine must not leave the box half updated and silent
+                log.exception("update failed unexpectedly")
+                outcome = ("failed", target["to"], "The update stopped unexpectedly (%s)." % type(err).__name__)
+            if outcome is None:
+                return None
+            status, to_version, error = outcome
+            return write_update_result(status, current, to_version, short_text(error) if error else None, self.clock())
+        finally:
+            lock.release()
+
+    def rollback(self):
+        """Put the newest older release stored on this box back. Returns {"status", "from", "to", "error"}."""
+        lock = RunLock()
+        if not lock.acquire():
+            raise UpdateLocked("Another update is already running.")
+        try:
+            ensure_state_dir("cache")
+            older = [v for v in cached_versions() if is_newer(VERSION, v)]
+            if not older:
+                return {"status": "failed", "from": VERSION, "to": None,
+                        "error": "No earlier version is stored on this box."}
+            self.out("Going back from %s to %s ..." % (VERSION, older[0]))
+            ok, why = self._rollback_to(older[0], release_settings(self.conf)["ref"])
+            return {"status": "ok" if ok else "failed", "from": VERSION, "to": older[0],
+                    "error": None if ok else short_text(why)}
+        except UpdateError as err:
+            return {"status": "failed", "from": VERSION, "to": None, "error": str(err)}
+        finally:
+            lock.release()
+
+    # ----- the update itself -----
+    def _update(self, ref, force, confirm, current, target):
+        settings = release_settings(self.conf)
+        ref = ref or settings["ref"]
+        kind, value = classify_ref(ref)
+        self._clean_leftovers()
+        free = shutil.disk_usage(ensure_state_dir("cache")).free
+        if free < MIN_FREE_BYTES:
+            raise UpdateError("There is not enough free space on the box (%d MB are needed)." % (MIN_FREE_BYTES >> 20))
+        os.makedirs(APP_DIR, exist_ok=True)
+        if kind == "branch":
+            if confirm and not confirm(current, None):
+                return None
+            self.out("Fetching %s from %s ..." % (ref, settings["repo"]))
+            src, version = self._fetch_branch(ref, settings["repo"])
+            target["to"] = version
+        else:
+            release = self._resolve(kind, value, settings)
+            if release is None:
+                self.out("No release is published yet; Sinko %s stays." % current)
+                return "ok", current, None
+            if release["version"] and not force and not is_newer(release["version"], current):
+                if kind == "tag":
+                    self.out("Sinko %s is installed and %s is not newer (add --force to install it anyway)."
+                             % (current, release["tag"]))
+                else:
+                    self.out("Sinko %s is already the newest version." % current)
+                return "ok", current, None
+            target["to"] = release["version"]
+            if confirm and not confirm(current, release["version"]):
+                return None
+            self.out("Downloading Sinko %s ..." % (release["version"] or "(latest)"))
+            version, src = self._fetch_release(settings, release, current, force, target)
+            if src is None:
+                self.out("Sinko %s is already the newest version." % current)
+                return "ok", current, None
+        self._ensure_rollback_copy(settings, current)
+        self.out("Installing Sinko %s ..." % version)
+        ok, why = self._install_and_check(src, ref)
+        if ok:
+            prune_cache(version)
+            self.out("Sinko is now at version %s." % version)
+            return "ok", version, None
+        if version != current:
+            drop_cached(version)              # a release that failed here is no rollback target
+            self.out("%s Going back to %s ..." % (why, current))
+            back_ok, back_why = self._rollback_to(current, ref)
+        else:
+            back_ok, back_why = False, "it is the version that was just installed"
+        if back_ok:
+            error = "%s The previous version (%s) was put back." % (why, current)
+        elif back_why.startswith("no earlier copy"):
+            error = "%s There is no earlier copy on this box to go back to." % why
+        else:
+            error = "%s Going back to %s did not work either (%s): run sudo sinko doctor." % (why, current, back_why)
+        return "failed", version, error
+
+    def _resolve(self, kind, value, settings):
+        """{"version", "tag"} of the release to install; version None means "whatever /latest/ is" (see below)."""
+        if kind == "tag":
+            return {"version": value, "tag": "v" + value}
+        try:
+            return fetch_latest_release(settings, self.fetch)
+        except UpdateError as err:
+            # GitHub's API answers 60 requests an hour per address and is blocked on some networks, while the download
+            # address is not. The tarball names its own version, which is compared after unpacking.
+            self.out("Could not ask which version is newest (%s); trying the latest download directly." % err)
+            return {"version": None, "tag": None}
+
+    def _fetch_release(self, settings, release, current, force, target):
+        """Download, verify and unpack. Returns (version, installed source dir), or (version, None) if not newer."""
+        cache = ensure_state_dir("cache")
+        fd, tarball = tempfile.mkstemp(dir=cache, prefix=".dl-", suffix=".tar.gz")
+        os.close(fd)
+        stage = tempfile.mkdtemp(dir=APP_DIR, prefix=".stage-")
+        try:
+            download_release(settings, release["tag"], tarball, self.fetch)
+            self.out("Checking the download ...")
+            version = unpack_release(tarball, stage)
+            if release["version"] and version != release["version"]:
+                raise UpdateError("The download says it is version %s, not %s." % (version, release["version"]))
+            target["to"] = version
+            if not release["version"] and not force and not is_newer(version, current):
+                return version, None
+            os.replace(tarball, cache_file(version))
+            try:
+                return version, install_source(os.path.join(stage, "sinko"))
+            except BaseException:
+                if version != current:
+                    drop_cached(version)
+                raise
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
+            try:
+                os.unlink(tarball)
+            except OSError:
+                pass
+
+    def _fetch_branch(self, ref, repo):
+        """The developer path: git clone/fetch of the configured repository. Returns (source dir, its version)."""
+        if repo.startswith("-"):
+            raise UpdateError("The update source in the settings is not valid.")
+        src = os.path.join(APP_DIR, "src")
+        env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+
+        def git(*args):
+            try:
+                subprocess.run(["git"] + list(args), check=True, env=env, stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, timeout=600)
+            except subprocess.CalledProcessError as err:
+                raise UpdateError("git could not fetch %s (%s)." % (ref, short_text(err.stderr.strip(), 100)))
+            except (OSError, subprocess.SubprocessError) as err:
+                raise UpdateError("git could not run (%s)." % short_text(err, 80))
+        if os.path.isdir(os.path.join(src, ".git")):
+            git("-C", src, "fetch", "--quiet", "--depth", "1", "origin", ref)
+            git("-C", src, "checkout", "--quiet", "--force", "FETCH_HEAD")
+        else:
+            stage = tempfile.mkdtemp(dir=APP_DIR, prefix=".stage-")
+            try:
+                git("clone", "--quiet", "--depth", "1", "--branch", ref, "--", repo, os.path.join(stage, "sinko"))
+                install_source(os.path.join(stage, "sinko"))
+            finally:
+                shutil.rmtree(stage, ignore_errors=True)
+        for name in REQUIRED_MEMBERS:
+            if not os.path.isfile(os.path.join(src, name.split("/", 1)[1])):
+                raise UpdateError("The fetched source has no %s." % name.split("/", 1)[1])
+        version = read_version_file(src)
+        if version is None:
+            raise UpdateError("The fetched source has no valid VERSION file.")
+        return src, version
+
+    def _ensure_rollback_copy(self, settings, current):
+        """The installed release is never in the cache on the first update (the installer put it there, not us):
+        fetch it again now, while the network is known to work. Without it a failed update cannot be undone."""
+        if os.path.isfile(cache_file(current)):
+            return
+        cache = ensure_state_dir("cache")
+        fd, tarball = tempfile.mkstemp(dir=cache, prefix=".dl-", suffix=".tar.gz")
+        os.close(fd)
+        try:
+            download_release(settings, "v" + current, tarball, self.fetch)
+            os.replace(tarball, cache_file(current))
+        except UpdateError as err:
+            self.out("Note: no copy of the current version is stored and it could not be fetched (%s); "
+                     "an update that fails could not be undone automatically." % err)
+        finally:
+            try:
+                os.unlink(tarball)
+            except OSError:
+                pass
+
+    def _install_and_check(self, src, ref):
+        """Run the installer on `src`, then the self-check of what it installed. Returns (ok, reason)."""
+        try:
+            rc = self.installer(src, ref)
+        except Exception:
+            log.exception("could not run the installer")
+            return False, "The installer could not be started."
+        if rc != 0:
+            return False, "The installer stopped with an error (exit status %s)." % rc
+        self.out("Checking the installation ...")
+        try:
+            ok, detail = self.selfcheck()
+        except Exception:
+            log.exception("self-check could not run")
+            ok, detail = False, "it could not run"
+        if not ok:
+            return False, "The new version did not pass its own check (%s)." % (detail or "no reason given")
+        return True, ""
+
+    def _rollback_to(self, version, ref):
+        """Reinstall a stored release. Returns (ok, reason)."""
+        path = cache_file(version)
+        if not os.path.isfile(path):
+            return False, "no earlier copy is stored on this box"
+        os.makedirs(APP_DIR, exist_ok=True)
+        stage = tempfile.mkdtemp(dir=APP_DIR, prefix=".stage-")
+        try:
+            if unpack_release(path, stage) != version:
+                return False, "the stored copy is damaged"
+            src = install_source(os.path.join(stage, "sinko"))
+        except UpdateError as err:
+            return False, str(err)
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
+        ok, why = self._install_and_check(src, ref)
+        return ok, "" if ok else why
+
+    @staticmethod
+    def _clean_leftovers():
+        """Staging folders and half downloads of a run that was cut off (power loss, killed service)."""
+        for pattern_dir, prefix in ((APP_DIR, ".stage-"), (cache_dir(), ".dl-")):
+            try:
+                names = os.listdir(pattern_dir)
+            except OSError:
+                continue
+            for name in names:
+                if name.startswith(prefix):
+                    path = os.path.join(pattern_dir, name)
+                    if os.path.isdir(path) and not os.path.islink(path):
+                        shutil.rmtree(path, ignore_errors=True)
+                    else:
+                        try:
+                            os.unlink(path)
+                        except OSError:
+                            pass
+
+
+# --------------------------------------------------------------------------- #
+# Self-check: "did the update leave a working box?" (fast, no DNS probing)
+# --------------------------------------------------------------------------- #
+def webroot() -> str:
+    if os.environ.get("SINKO_WEBROOT"):
+        return os.environ["SINKO_WEBROOT"]
+    value, err = ftl_try("webserver.paths.webroot")
+    return value if value and err is None else "/var/www/html"
+
+
+def unit_active(name: str) -> bool:
+    try:
+        return subprocess.run(["systemctl", "is-active", "--quiet", name], timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def selfcheck_round(catalog: dict) -> list:
+    """[(ok, text)], one per check."""
+    results = []
+
+    def add(ok: bool, text: str) -> None:
+        results.append((bool(ok), text))
+    api = None
+    try:
+        api = Api()
+        api.login()
+        add(True, "Pi-hole API reachable, signed in with the CLI password")
+    except (ApiError, OSError, ValueError) as err:
+        api = None
+        add(False, "Pi-hole API reachable, signed in with the CLI password (%s)" % short_text(err, 80))
+    groups = lists = None
+    if api is not None:
+        try:
+            groups, lists = api.group_map(), api.lists()
+        except (ApiError, OSError, ValueError) as err:
+            groups = None
+            reason = "could not be read: %s" % short_text(err, 60)
+    else:
+        reason = "needs the Pi-hole API"
+    if groups is not None:
+        wanted = [G_KIDS, G_GUARD, G_OFFLINE, G_PAUSED, G_STATE] + [svc_group(s["id"]) for s in catalog["services"]]
+        missing = [n for n in wanted if n not in groups]
+        add(not missing, "all groups present" + (" (missing: %s)" % ", ".join(missing[:3]) if missing else ""))
+        registered = {l.get("comment") for l in lists}
+        absent = [i for i in [s["id"] for s in catalog["services"]] + ["guard"] if LIST_COMMENT_PREFIX + i not in registered]
+        add(not absent, "every list registered" + (" (missing: %s)" % ", ".join(absent[:3]) if absent else ""))
+    else:
+        add(False, "all groups present (%s)" % reason)
+        add(False, "every list registered (%s)" % reason)
+    if api is not None:
+        try:
+            api.logout()
+        except (ApiError, OSError, ValueError):
+            pass
+    add(unit_active("sinko"), "scheduler service is running")
+    root = webroot()
+    absent = [n for n in ("index.html", "pb/app.js", "pb/version.txt") if not os.path.isfile(os.path.join(root, n))]
+    add(not absent, "page files installed in %s%s" % (root, " (missing: %s)" % ", ".join(absent) if absent else ""))
+    try:
+        with open(os.path.join(root, "pb", "version.txt"), encoding="utf-8") as fh:
+            shown = fh.read().strip()
+    except OSError:
+        shown = None
+    add(shown == VERSION, "page and program are the same version (page: %s, program: %s)" % (shown or "none", VERSION))
+    return results
+
+
+def run_selfcheck(wait: float = 0, out=print, sleep=time.sleep, clock=time.monotonic, catalog=None) -> int:
+    """Print one line per check; the exit status is 1 if any failed. With `wait`, a failing round is repeated until
+    it passes or the time is up: right after an install, FTL and the scheduler are still starting."""
+    catalog = catalog or load_catalog()
+    deadline = clock() + max(0.0, wait)
+    while True:
+        results = selfcheck_round(catalog)
+        if all(ok for ok, _ in results) or clock() >= deadline:
+            break
+        sleep(3)
+    for ok, text in results:
+        out("  " + ("ok" if ok else "FAIL").ljust(6) + text)
+    return 0 if all(ok for ok, _ in results) else 1
 
 
 # --------------------------------------------------------------------------- #
@@ -2025,19 +2784,104 @@ def cmd_configure(args) -> int:
     return 0
 
 
+def patch_state(api: Api, mutate) -> bool:
+    """Read the shared state, let `mutate(state)` change what the caller owns, and write it back only if it changed
+    (every write makes Pi-hole reload). False when nothing was written."""
+    groups = api.group_map()
+    if G_STATE not in groups:
+        return False
+    state = parse_state(groups[G_STATE].get("comment"))
+    before = json.dumps(state, sort_keys=True)
+    mutate(state)
+    if json.dumps(state, sort_keys=True) == before:
+        return False
+    api.put_group(G_STATE, json.dumps(state, separators=(",", ":")), False)
+    return True
+
+
+def note_rollback(undone: str, restored: str) -> None:
+    """After a rollback by hand, tell the scheduler that `undone` is not wanted: its auto-update rule skips a release
+    that failed in the last 7 days, so the box does not install the same release again the next night."""
+    def mark(state):
+        update = state["update"]
+        update.update(status="failed", to=undone, at=time.time(), error="Went back to %s by hand." % restored)
+        update["from"] = restored
+    try:
+        api = Api()
+        api.login()
+        try:
+            patch_state(api, mark)
+        finally:
+            api.logout()
+    except (ApiError, OSError, ValueError) as err:
+        log.warning("could not record the rollback in the shared state: %s", err)
+
+
 def cmd_update(args) -> int:
     conf = read_config()
-    src = os.path.join(APP_DIR, "src")
-    repo = conf.get("SINKO_REPO", "https://github.com/iret33/sinko.git")
-    ref = args.ref or conf.get("SINKO_REF", "master")
-    if not os.path.isdir(os.path.join(src, ".git")):
-        subprocess.run(["rm", "-rf", src], check=True)
-        subprocess.run(["git", "clone", "--quiet", "--depth", "1", "--branch", ref, repo, src], check=True)
-    else:
-        subprocess.run(["git", "-C", src, "fetch", "--quiet", "--depth", "1", "origin", ref], check=True)
-        subprocess.run(["git", "-C", src, "checkout", "--quiet", "--force", "FETCH_HEAD"], check=True)
-    env = dict(os.environ, SINKO_REF=ref, SINKO_NONINTERACTIVE="1")
-    return subprocess.run(["bash", os.path.join(src, "install.sh")], env=env).returncode
+    updater = Updater(conf)
+    try:
+        ref = args.ref or release_settings(conf)["ref"]
+        kind, _ = classify_ref(ref)
+    except UpdateError as err:
+        print("sinko: %s" % err, file=sys.stderr)
+        return 1
+    if args.check:
+        if kind == "branch":
+            print("This box follows the developer branch '%s': updates are fetched with git, there is no release to check." % ref)
+            return 0
+        try:
+            release = check_for_update(conf, fetch=updater.fetch, ref=ref)
+        except UpdateError as err:
+            print("sinko: could not check for updates: %s" % err, file=sys.stderr)
+            return 1
+        if release:
+            print("Update available: Sinko %s (this box has %s). Install it with: sudo sinko update"
+                  % (release["version"], VERSION))
+        else:
+            print("Sinko %s is the newest version." % VERSION)
+        return 0
+    asked = not (args.yes or args.from_panel)
+    if asked and not sys.stdin.isatty():
+        print("sinko: run 'sudo sinko update --yes' to update without being asked.", file=sys.stderr)
+        return 1
+
+    def confirm(current, to_version):
+        try:
+            answer = input("Update Sinko from %s to %s? [y/N] " % (current, to_version or "the latest version of " + ref))
+        except EOFError:
+            return False
+        return answer.strip().lower() in ("y", "yes")
+    try:
+        result = updater.update(ref=args.ref, force=args.force, confirm=confirm if asked else None)
+    except UpdateLocked as err:
+        print("sinko: %s" % err, file=sys.stderr)
+        return 1
+    if result is None:
+        print("Nothing was changed.")
+        return 1
+    if result["status"] == "ok":
+        return 0
+    print("sinko: the update failed. %s" % result["error"], file=sys.stderr)
+    return 1
+
+
+def cmd_rollback(args) -> int:
+    try:
+        result = Updater().rollback()
+    except UpdateLocked as err:
+        print("sinko: %s" % err, file=sys.stderr)
+        return 1
+    if result["status"] != "ok":
+        print("sinko: could not go back. %s" % result["error"], file=sys.stderr)
+        return 1
+    print("Sinko is back at version %s." % result["to"])
+    note_rollback(result["from"], result["to"])
+    return 0
+
+
+def cmd_selfcheck(args) -> int:
+    return run_selfcheck(args.wait)
 
 
 def cmd_password_state(args) -> int:
@@ -2088,8 +2932,16 @@ def main(argv=None) -> int:
     p.add_argument("--disable-web", action="store_true", help="turn webserver.serve_all off (uninstall)")
     p.set_defaults(fn=cmd_configure)
     p = sub.add_parser("update", help="update to the latest version")
-    p.add_argument("--ref", default=None, help="git branch or tag (default from config)")
+    p.add_argument("--check", action="store_true", help="only say whether a newer version exists")
+    p.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+    p.add_argument("--ref", default=None, help="latest, a release such as v3.1.0, or a branch (default from the settings)")
+    p.add_argument("--force", action="store_true", help="install even if that version is not newer")
+    p.add_argument("--from-panel", action="store_true", help=argparse.SUPPRESS)      # started by the scheduler
     p.set_defaults(fn=cmd_update)
+    sub.add_parser("rollback", help="go back to the previous version stored on this box").set_defaults(fn=cmd_rollback)
+    p = sub.add_parser("selfcheck", help="quick check that the installation works (used after an update)")
+    p.add_argument("--wait", type=float, default=0, help="keep trying for this many seconds while services start")
+    p.set_defaults(fn=cmd_selfcheck)
     sub.add_parser("password-state", help=argparse.SUPPRESS).set_defaults(fn=cmd_password_state)
     p = sub.add_parser("diagnose", help="read-only report on why a service is not blocked")
     p.add_argument("services", nargs="*", help="service ids to test (default: youtube instagram)")
