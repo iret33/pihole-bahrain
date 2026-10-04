@@ -5,9 +5,7 @@ import datetime as dt
 import importlib.machinery
 import importlib.util
 import json
-import logging
 import os
-import socket
 import stat
 import subprocess
 import tempfile
@@ -1143,6 +1141,68 @@ class TickDoesNotWaitTests(Fixture):
             pb.cmd_run(None)
         self.assertNotIn("maintenance", calls)
         self.assertGreaterEqual(len(calls), 2)
+
+
+class OneTickTests(Fixture):
+    """Everything the page can ask for at once, and a restart in the middle of it."""
+
+    def everything_at_once(self):
+        self.ip = "192.168.1.77"
+        self.found = self.release("3.1.0")
+        self.set_state(lambda s: s["update"].update(request=11, checkRequest=12))
+        self.advance(200)                                  # the first check and the first address look are due
+
+    def test_an_update_request_a_check_request_and_an_address_change_in_one_tick(self):
+        self.everything_at_once()
+        actions = self.settle()
+        self.assertIn("update requested by the page", actions)
+        self.assertIn("check requested by the page", actions)
+        self.assertIn("address changed from 192.168.1.5 to 192.168.1.77", actions)
+        self.assertEqual(self.runner_calls, ["running"])
+        self.assertEqual(len(self.check_calls), 1)
+        self.assertEqual([c[0] for c in self.address_calls], ["192.168.1.77"])
+        u = self.state()["update"]
+        self.assertEqual((u["status"], u["request"], u["checkRequest"], u["latest"]), ("running", None, None, "3.1.0"))
+        self.assertEqual(pb.load_handled(), {"update": 11, "check": 12})
+
+    def test_a_power_request_in_the_same_tick_waits_for_the_update_to_finish(self):
+        self.everything_at_once()
+        self.set_state(lambda s: s["power"].update(request=13, action="reboot"))
+        self.settle()
+        self.assertEqual(self.power_calls, [], "never reboot in the middle of an installation")
+        self.assertEqual(self.state()["power"]["request"], 13)
+        self.set_state(lambda s: s["update"].update(status="ok"))
+        self.settle()
+        self.assertEqual(self.power_calls, ["reboot"])
+
+    def test_after_a_restart_nothing_that_was_handled_happens_again(self):
+        self.everything_at_once()
+        self.settle()
+        self.set_state(lambda s: s["update"].update(status="ok", at=0))
+        self.set_state(lambda s: s["power"].update(request=13, action="reboot"))
+        self.settle()
+        self.assertEqual((len(self.runner_calls), len(self.check_calls), self.power_calls), (1, 1, ["reboot"]))
+        # The service restarts (the installer does that). The page's markers are still in the state, because the box
+        # went down before the clearing reached Pi-hole; the handled markers survive on disk.
+        self.set_state(lambda s: s["update"].update(request=11, checkRequest=12, status="idle"))
+        self.set_state(lambda s: s["power"].update(request=13, action="reboot"))
+        fresh = pb.Maintenance(self.api, config_path=self.config_path, monotonic=lambda: self.mono, job_factory=InlineJob,
+                               clock_ok=lambda: True, check=self.fake_check, start_runner=self.fake_runner,
+                               power=self.fake_power, default_ip=lambda: "192.168.1.77", apply_address=self.fake_apply,
+                               ping=self.fake_ping, body=lambda: "BODY", jitter=self.fake_jitter)
+        for _ in range(3):
+            fresh.run(self.now)
+        self.assertEqual((len(self.runner_calls), self.power_calls), (1, ["reboot"]), "no second update, no second reboot")
+        u = self.state()["update"]
+        self.assertEqual((u["request"], u["checkRequest"], self.state()["power"]["request"]), (None, None, None),
+                         "the stale markers are cleaned up")
+
+    def test_a_new_marker_after_a_restart_is_a_new_request(self):
+        self.everything_at_once()
+        self.settle()
+        self.set_state(lambda s: s["update"].update(request=21, status="ok", at=0))
+        self.settle()
+        self.assertEqual(len(self.runner_calls), 2)
 
 
 class EverythingFailsTests(Fixture):

@@ -6,7 +6,6 @@ import importlib.util
 import io
 import json
 import os
-import re
 import stat
 import tempfile
 import time

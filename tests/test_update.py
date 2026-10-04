@@ -2,7 +2,6 @@
 `sinko update|rollback|selfcheck` commands. Network access goes to a local HTTP server (tests/fake_release.py); the
 installer and the installed program are small fakes inside the fake release, and they really run."""
 import contextlib
-import hashlib
 import importlib.machinery
 import importlib.util
 import io
@@ -14,7 +13,6 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import threading
 import time
 import unittest
 import urllib.error
