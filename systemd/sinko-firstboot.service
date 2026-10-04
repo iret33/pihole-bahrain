@@ -1,0 +1,19 @@
+[Unit]
+Description=Sinko first start (this box makes its own keys, name and address)
+Documentation=https://github.com/iret33/sinko
+# Installed on every box, enabled only on the ready-made image (tools/seal.sh), and it only runs while the flag file
+# exists: the script removes the flag when everything worked, so it runs once.
+ConditionPathExists=/var/lib/sinko/firstboot
+After=local-fs.target pihole-FTL.service network-online.target
+Wants=network-online.target
+# The SSH server must find its new host keys, and the scheduler must not start before the counter's old id is gone.
+Before=ssh.service sshd.service ssh.socket sinko.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/sinko/tools/firstboot.sh
+# A cable that is not plugged in yet is not a failure: the script ends well and the flag stays for the next start.
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
