@@ -1,4 +1,4 @@
-! Title: pihole-bahrain / xbox
+! Title: nay / xbox
 ! Format: Adblock-style, one ||domain^ per line
 ||gamepass.com^
 ||xbox-global.ifs.windows.com^

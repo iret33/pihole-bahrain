@@ -1,4 +1,4 @@
-! Title: pihole-bahrain / tiktok
+! Title: nay / tiktok
 ! Format: Adblock-style, one ||domain^ per line
 ||amemv.com^
 ||bdurl.com^

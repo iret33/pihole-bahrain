@@ -1,4 +1,4 @@
-! Title: pihole-bahrain / minecraft
+! Title: nay / minecraft
 ! Format: Adblock-style, one ||domain^ per line
 ||minecraft-services.net^
 ||minecraft.net^

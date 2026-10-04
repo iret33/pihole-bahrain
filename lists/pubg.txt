@@ -1,4 +1,4 @@
-! Title: pihole-bahrain / pubg
+! Title: nay / pubg
 ! Format: Adblock-style, one ||domain^ per line
 ||gpubgm.com^
 ||igamecj.com^

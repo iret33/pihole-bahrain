@@ -1,4 +1,4 @@
-! Title: pihole-bahrain / youtube
+! Title: nay / youtube
 ! Format: Adblock-style, one ||domain^ per line
 ||googlevideo.com^
 ||wide-youtube.l.google.com^

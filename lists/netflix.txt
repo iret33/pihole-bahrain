@@ -1,4 +1,4 @@
-! Title: pihole-bahrain / netflix
+! Title: nay / netflix
 ! Format: Adblock-style, one ||domain^ per line
 ||netflix.ca^
 ||netflix.com.edgesuite.net^

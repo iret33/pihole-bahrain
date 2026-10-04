@@ -1,4 +1,4 @@
-! Title: pihole-bahrain / telegram
+! Title: nay / telegram
 ! Format: Adblock-style, one ||domain^ per line
 ||cdn-telegram.org^
 ||t.me^

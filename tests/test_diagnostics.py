@@ -17,7 +17,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 LISTS = os.path.join(ROOT, "lists")
 
-loader = importlib.machinery.SourceFileLoader("pb", os.path.join(ROOT, "bin", "pihole-bahrain"))
+loader = importlib.machinery.SourceFileLoader("pb", os.path.join(ROOT, "bin", "nay"))
 spec = importlib.util.spec_from_loader("pb", loader)
 pb = importlib.util.module_from_spec(spec)
 loader.exec_module(pb)
@@ -434,13 +434,13 @@ class SystemProbeTests(unittest.TestCase):
                  "wlan0\t00000000\t0A00A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0\n"
                  "eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n"
                  "eth0\t0001A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0\n")
-        probe, env = self.probe_with(PB_ROUTE_FILE=route)
+        probe, env = self.probe_with(NAY_ROUTE_FILE=route)
         with env:
             self.assertEqual(probe.default_gateway(), "192.168.1.1", "lowest metric wins")
-        probe, env = self.probe_with(PB_ROUTE_FILE="Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\n")
+        probe, env = self.probe_with(NAY_ROUTE_FILE="Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\n")
         with env:
             self.assertIsNone(probe.default_gateway())
-        with mock.patch.dict(os.environ, {"PB_ROUTE_FILE": "/nonexistent"}):
+        with mock.patch.dict(os.environ, {"NAY_ROUTE_FILE": "/nonexistent"}):
             self.assertIsNone(pb.SystemProbe().default_gateway())
 
     def test_ipv6_state_from_proc(self):
@@ -451,18 +451,18 @@ class SystemProbeTests(unittest.TestCase):
                   "fe800000000000000000000000000001 00000400 00000001 00000000 00000003 eth0\n"
                   "00000000000000000000000000000000 00 00000000000000000000000000000000 00 "
                   "00000000000000000000000000000000 ffffffff 00000001 00000000 00200200 lo\n")
-        probe, env = self.probe_with(PB_IF_INET6_FILE=inet6, PB_IPV6_ROUTE_FILE=routes)
+        probe, env = self.probe_with(NAY_IF_INET6_FILE=inet6, NAY_IPV6_ROUTE_FILE=routes)
         with env:
             self.assertIn(("2001:db8::5", 0), probe.ipv6_addresses())
             self.assertIn(("fe80::a00:0:0:1", 0x20), probe.ipv6_addresses())
             self.assertTrue(probe.ipv6_default_route())
             self.assertIn("2001:db8::5", probe.own_addresses())
-        probe, env = self.probe_with(PB_IPV6_ROUTE_FILE=routes.splitlines()[1] + "\n")     # only the reject route on lo
+        probe, env = self.probe_with(NAY_IPV6_ROUTE_FILE=routes.splitlines()[1] + "\n")     # only the reject route on lo
         with env:
             self.assertFalse(probe.ipv6_default_route())
 
     def test_ftl_log_tail_reads_only_the_end(self):
-        probe, env = self.probe_with(PB_FTL_LOG="old line\n" * 100000 + "Rate-limiting 10.0.0.1 for at least 5 seconds\n")
+        probe, env = self.probe_with(NAY_FTL_LOG="old line\n" * 100000 + "Rate-limiting 10.0.0.1 for at least 5 seconds\n")
         with env:
             tail = probe.ftl_log_tail()
         self.assertLess(len(tail), 600 * 1024)
@@ -506,7 +506,7 @@ class DiagnoseBase(Base):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.gdb, self.fdb = os.path.join(tmp.name, "gravity.db"), os.path.join(tmp.name, "pihole-FTL.db")
-        env = mock.patch.dict(os.environ, {"PB_GRAVITY_DB": self.gdb, "PB_FTL_DB": self.fdb, "PB_SQL_BACKEND": "python"})
+        env = mock.patch.dict(os.environ, {"NAY_GRAVITY_DB": self.gdb, "NAY_FTL_DB": self.fdb, "NAY_SQL_BACKEND": "python"})
         env.start()
         self.addCleanup(env.stop)
         lists = mock.patch.object(pb, "LISTS_DIR", LISTS)         # where the installed service lists would be
@@ -698,14 +698,14 @@ class SqlAccessTests(unittest.TestCase):
         def fake_run(argv, **kw):
             calls.append(argv)
             return subprocess.CompletedProcess(argv, 0, stdout='[{"n": 2}]\n', stderr="")
-        env = {k: v for k, v in os.environ.items() if k != "PB_SQL_BACKEND"}
+        env = {k: v for k, v in os.environ.items() if k != "NAY_SQL_BACKEND"}
         with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(pb.shutil, "which", return_value="/usr/bin/pihole-FTL"), \
                 mock.patch.object(pb.subprocess, "run", fake_run):
             self.assertEqual(pb.sql_rows("/etc/pihole/gravity.db", "SELECT 2 AS n"), [{"n": 2}])
         self.assertEqual(calls[0][:5], ["/usr/bin/pihole-FTL", "sqlite3", "-readonly", "-json", "/etc/pihole/gravity.db"])
 
     def test_empty_output_means_no_rows_and_errors_are_reported(self):
-        env = {k: v for k, v in os.environ.items() if k != "PB_SQL_BACKEND"}
+        env = {k: v for k, v in os.environ.items() if k != "NAY_SQL_BACKEND"}
         with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(pb.shutil, "which", return_value="/x/pihole-FTL"):
             with mock.patch.object(pb.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout="", stderr="")):
                 self.assertEqual(pb.sql_rows("db", "SELECT 1 WHERE 0"), [])

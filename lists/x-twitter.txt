@@ -1,4 +1,4 @@
-! Title: pihole-bahrain / x-twitter
+! Title: nay / x-twitter
 ! Format: Adblock-style, one ||domain^ per line
 ||ads-twitter.com^
 ||cms-twdigitalassets.com^

@@ -1,4 +1,4 @@
-! Title: pihole-bahrain / chatgpt
+! Title: nay / chatgpt
 ! Format: Adblock-style, one ||domain^ per line
 ||chatgpt.com^
 ||oaistatic.com^

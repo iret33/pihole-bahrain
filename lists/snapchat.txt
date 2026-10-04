@@ -1,4 +1,4 @@
-! Title: pihole-bahrain / snapchat
+! Title: nay / snapchat
 ! Format: Adblock-style, one ||domain^ per line
 ||impala-media-production.s3.amazonaws.com^
 ||sc-cdn.net^

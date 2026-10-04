@@ -1,4 +1,4 @@
-! Title: pihole-bahrain / instagram
+! Title: nay / instagram
 ! Format: Adblock-style, one ||domain^ per line
 ||cdninstagram.com^
 ||api.facebook.com^

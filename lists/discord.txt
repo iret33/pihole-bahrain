@@ -1,4 +1,4 @@
-! Title: pihole-bahrain / discord
+! Title: nay / discord
 ! Format: Adblock-style, one ||domain^ per line
 ||airhorn.solutions^
 ||airhornbot.com^

@@ -1,4 +1,4 @@
-! Title: pihole-bahrain / fortnite
+! Title: nay / fortnite
 ! Format: Adblock-style, one ||domain^ per line
 ||epicgames.com^
 ||epicgames.dev^

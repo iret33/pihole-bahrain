@@ -1,9 +1,9 @@
-/* Family Internet — parent page for pihole-bahrain.
+/* Nay — parent page for nay.
  *
  * Talks only to the local Pi-hole v6 API (same origin), signed in with the
  * Pi-hole admin password. Blocking is done by enabling/disabling Pi-hole
- * groups (see bin/pihole-bahrain for the model). Timers and bedtime are stored
- * in the "pb-state" group and enforced by the pihole-bahrain service on the Pi,
+ * groups (see bin/nay for the model). Timers and bedtime are stored
+ * in the "pb-state" group and enforced by the nay service on the Pi,
  * so they keep working after this page is closed.
  */
 'use strict';
@@ -22,7 +22,7 @@
   // ------------------------------------------------------------------ strings
   var STR = {
     en: {
-      appName: 'Family Internet', loginHint: 'Sign in with the parent password chosen during setup.', password: 'Password',
+      appName: 'Nay', loginHint: 'Sign in with the parent password chosen during setup.', password: 'Password',
       totp: '6-digit code from your authenticator app', signIn: 'Sign in', signOut: 'Sign out',
       wrongPassword: 'That password is not right. Try again.', wrongTotp: 'Enter the password and the 6-digit code.',
       noConnection: 'Cannot reach the family box. Check that it is switched on and connected.',
@@ -63,8 +63,8 @@
       homeworkOn: 'Homework mode on', freeOn: 'Free time started', breakOn: 'Offline break started', timerEnded: 'Timer ended',
       internetOff: 'Internet turned off', internetOn: 'Internet turned on',
       nowBlocked: '{n} blocked', nowAllowed: '{n} allowed', allAllowed: 'All apps allowed', allBlocked: 'All apps blocked',
-      schedulerDown: 'The timer on the box is not running. On the Pi, run: sudo systemctl restart pihole-bahrain',
-      notInstalled: 'Setup is not finished on this box. On the Pi, run: sudo pihole-bahrain setup',
+      schedulerDown: 'The timer on the box is not running. On the Pi, run: sudo systemctl restart nay',
+      notInstalled: 'Setup is not finished on this box. On the Pi, run: sudo nay setup',
       failed: 'That did not work: {e}', sessionEnded: 'Your session ended. Sign in again.',
       days: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'],
       daysLong: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'],
@@ -115,8 +115,8 @@
       homeworkOn: 'تم تفعيل وقت الدراسة', freeOn: 'بدأ الوقت الحر', breakOn: 'بدأت الاستراحة', timerEnded: 'انتهى المؤقت',
       internetOff: 'تم إيقاف الإنترنت', internetOn: 'تم تشغيل الإنترنت',
       nowBlocked: 'تم حظر {n}', nowAllowed: 'تم السماح بـ {n}', allAllowed: 'تم السماح بكل التطبيقات', allBlocked: 'تم حظر كل التطبيقات',
-      schedulerDown: 'المؤقت على صندوق العائلة لا يعمل. نفّذ على الصندوق: sudo systemctl restart pihole-bahrain',
-      notInstalled: 'الإعداد غير مكتمل على صندوق العائلة. نفّذ على الصندوق: sudo pihole-bahrain setup',
+      schedulerDown: 'المؤقت على صندوق العائلة لا يعمل. نفّذ على الصندوق: sudo systemctl restart nay',
+      notInstalled: 'الإعداد غير مكتمل على صندوق العائلة. نفّذ على الصندوق: sudo nay setup',
       failed: 'لم تنجح العملية: {e}', sessionEnded: 'انتهت الجلسة. سجّل الدخول مجددًا.',
       days: ['أحد', 'اثنين', 'ثلاثاء', 'أربعاء', 'خميس', 'جمعة', 'سبت'],
       daysLong: ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'],
@@ -438,7 +438,7 @@
   // Pi-hole (FTL) picks a client's groups from the client rows whose IP or subnet contains the
   // address a query comes from (longest prefix wins, highest id on a tie) and only then looks at
   // the device's MAC row. So an IP or subnet row silently overrides a child's MAC row.
-  // Same logic as shadowing_rows() in bin/pihole-bahrain.
+  // Same logic as shadowing_rows() in bin/nay.
   function parseIpv4(s) {
     var m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s);
     if (!m) return null;

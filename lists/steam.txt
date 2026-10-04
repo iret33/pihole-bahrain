@@ -1,4 +1,4 @@
-! Title: pihole-bahrain / steam
+! Title: nay / steam
 ! Format: Adblock-style, one ||domain^ per line
 ||s.team^
 ||steam.com^

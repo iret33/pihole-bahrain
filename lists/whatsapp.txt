@@ -1,4 +1,4 @@
-! Title: pihole-bahrain / whatsapp
+! Title: nay / whatsapp
 ! Format: Adblock-style, one ||domain^ per line
 ||wa.me^
 ||whatsapp-plus.info^
