@@ -3105,6 +3105,7 @@ class Maintenance:
             up = state["update"]
             if up["status"] == "running" and not RunLock.is_held():
                 up["status"], up["error"], up["at"] = "failed", "The update could not be started.", epoch
+                up["rolledBack"] = None            # nothing was installed and nothing was checked: not known, so not claimed
         self._change(failed)
 
     # ----- power -----

@@ -365,6 +365,7 @@ class UpdateRequestTests(Fixture):
         u = self.state()["update"]
         self.assertEqual(u["status"], "failed")
         self.assertEqual(u["error"], "The update could not be started.")
+        self.assertIsNone(u["rolledBack"], "nothing was installed and nothing was checked: not claimed either way")
 
     def test_a_runner_start_that_raises_is_reported_as_failed(self):
         self.runner_ok = OSError("no systemd")
