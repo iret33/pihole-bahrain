@@ -63,7 +63,8 @@ visibly.
 
 Flat teal, the mark and "Sinko" on one baseline, the English tagline and the Arabic one under them, and very faint
 rings echoing the arcs. Text is set in Plex (inlined as data into a temporary page, so nothing is fetched). The script
-refuses to write the PNG if the fonts do not load, or if either tagline fell back to another font.
+refuses to write the PNG if the fonts do not load, or if any character of either tagline is painted by a different
+font (it asks Chromium which fonts painted each line; a single fallback glyph would break the Arabic joining).
 The Arabic tagline renders joined and right to left. Keep the important content inside the middle 1200 x 600: some
 sites crop the card a little.
 

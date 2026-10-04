@@ -413,18 +413,23 @@ def render():
                     fh.write(social_html())
                 page.goto("file://" + html)
                 page.evaluate("document.fonts.ready.then(() => 1)")
-                # A missing glyph would silently fall back to some other Arabic font that also joins, so prove that
-                # Plex is the face in use for both taglines.
+                # A character Plex lacks is drawn from some other font, which also breaks the joining of an Arabic
+                # word and still looks plausible. So ask the browser which fonts painted each tagline.
                 faces = page.evaluate("Array.from(document.fonts).map(f => f.status)")
                 if not faces or any(s != "loaded" for s in faces):
                     raise SystemExit("make-brand: the Plex fonts did not load (%s)" % faces)
-                widths = page.evaluate("""() => {
-                    const c = document.createElement('canvas').getContext('2d');
-                    const w = (font, text) => { c.font = font; return c.measureText(text).width; };
-                    return ['%s', '%s'].map((t, i) => [w('600 50px "Plex Arabic", monospace', t), w('600 50px monospace', t)]);
-                }""" % (TAGLINE_EN, TAGLINE_AR))
-                if any(abs(a - b) < 1 for a, b in widths):
-                    raise SystemExit("make-brand: a tagline fell back to another font (%s)" % widths)
+                cdp = page.context.new_cdp_session(page)
+                cdp.send("DOM.enable")
+                cdp.send("CSS.enable")
+                document = cdp.send("DOM.getDocument")["root"]["nodeId"]
+                for selector in ("p.en", "p.ar"):
+                    node = cdp.send("DOM.querySelector", {"nodeId": document, "selector": selector})["nodeId"]
+                    used = cdp.send("CSS.getPlatformFontsForNode", {"nodeId": node})["fonts"]
+                    # the name is the font file's own ("IBM Plex Sans Arabic SemiBold"), not the CSS family
+                    other = [f["familyName"] for f in used if not f.get("isCustomFont") or "Plex" not in f["familyName"]]
+                    if not used or other:
+                        raise SystemExit("make-brand: the %s tagline is not set entirely in Plex (also: %s)"
+                                         % (selector, ", ".join(other) or "nothing was painted"))
                 page.screenshot(path=os.path.join(IMG, "social-preview.png"))
             page.close()
         finally:
