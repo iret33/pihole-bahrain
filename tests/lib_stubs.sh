@@ -129,7 +129,9 @@ case "$cmd" in
   start|restart) for u in "${units[@]}"; do touch "$WORK/units/$(norm "$u").active"; done
                  # $WORK/ftl-makes-cert: Pi-hole's FTL writes its HTTPS key and certificate when it starts without them.
                  if [[ -e "$WORK/ftl-makes-cert" && " ${units[*]} " == *" pihole-FTL.service "* ]]; then
-                   mkdir -p "$ROOT/etc/pihole"; echo "BEGIN PRIVATE KEY $RANDOM$RANDOM" >"$ROOT/etc/pihole/tls.pem"; echo "certificate" >"$ROOT/etc/pihole/tls.crt"
+                   mkdir -p "$ROOT/etc/pihole"
+                   printf -- '-----BEGIN EC PRIVATE KEY-----\n%s\n-----END EC PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\ncert\n-----END CERTIFICATE-----\n' "$RANDOM$RANDOM" >"$ROOT/etc/pihole/tls.pem"
+                   echo "certificate" >"$ROOT/etc/pihole/tls.crt"
                  fi ;;
   stop) # $WORK/ftl-stop-fails: Pi-hole's FTL cannot be stopped.
         if [[ -e "$WORK/ftl-stop-fails" && " ${units[*]} " == *" pihole-FTL.service "* ]]; then exit 1; fi

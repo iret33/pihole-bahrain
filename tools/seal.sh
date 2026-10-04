@@ -231,12 +231,17 @@ wifi_files() {
   for f in "$R"/etc/wpa_supplicant/*.conf; do
     if [[ -f "$f" ]] && grep -qE '^[[:space:]]*network[[:space:]]*=' "$f"; then printf '%s\n' "$f"; fi
   done
+  # Armbian's headless first-start file (the .off copy is what it leaves after it has been used) with a Wi-Fi key in it.
+  for f in "$R"/boot/armbian_first_run.txt "$R"/boot/armbian_first_run.txt.off; do
+    if [[ -f "$f" ]] && grep -qE "^[[:space:]]*FR_net_wifi_key=['\"]?[^'\"[:space:]]" "$f"; then printf '%s\n' "$f"; fi
+  done
   return 0
 }
 # Files that still carry a network secret after the Wi-Fi networks are gone.
 leftover_secrets() {
   grep -rIlsE '^[[:space:]]*(psk|wep-key[0-9]|password|leap-password)[[:space:]]*[=:]|wpa-psk|wpa_psk' \
     "$R/etc/netplan" "$R/etc/NetworkManager/system-connections" "$R/etc/wpa_supplicant" "$R/etc/network/interfaces" "$R/etc/network/interfaces.d" 2>/dev/null || true
+  grep -Ils "^[[:space:]]*FR_net_wifi_key=['\"]?[^'\"[:space:]]" "$R"/boot/armbian_first_run.txt* 2>/dev/null || true
 }
 
 build_plan() {

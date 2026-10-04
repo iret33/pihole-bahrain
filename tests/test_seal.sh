@@ -83,6 +83,9 @@ make_golden() {
   printf '[connection]\nid=Wired\ntype=ethernet\n' >"$ROOT/etc/NetworkManager/system-connections/Wired.nmconnection"
   printf 'ctrl_interface=/run/wpa_supplicant\nnetwork={\n  ssid="HomeNet"\n  psk="seller-wifi-pass"\n}\n' >"$ROOT/etc/wpa_supplicant/wpa_supplicant.conf"
   echo "nm-secret-key" >"$ROOT/var/lib/NetworkManager/secret_key"
+  mkdir -p "$ROOT/boot"
+  printf "FR_net_wifi_enabled=1\nFR_net_wifi_ssid='HomeNet'\nFR_net_wifi_key='seller-wifi-pass'\n" >"$ROOT/boot/armbian_first_run.txt.off"
+  printf "FR_net_wifi_enabled=0\nFR_net_wifi_key=''\n" >"$ROOT/boot/armbian_first_run.txt.template"
   # Armbian keeps /var/log in memory and the card's own copy in /var/log.hdd: rotated logs only ever exist there.
   mkdir -p "$ROOT/var/log.hdd/pihole"
   echo "card syslog" >"$ROOT/var/log.hdd/syslog"; echo "card older" >"$ROOT/var/log.hdd/syslog.1"; echo gz >"$ROOT/var/log.hdd/auth.log.2.gz"
@@ -127,7 +130,8 @@ for shown in "Sara, Omar" "pihole-FTL.db" "ssh_host_ed25519_key" "$ROOT/root/.ba
              "Set the host name to sinko" "hardware watchdog" "anonymous-counter" "welcome screen" "random-seed" \
              "tls.pem" "tls_ca.crt" "config_backups" "gravity_old.db" "gravity_backups" "pihole-tmp.db" "two-factor secret" "application password" \
              "getty@.service.d/override.conf" "serial-getty@.service.d/override.conf" "30-wifis-dhcp.yaml" "HomeNet.nmconnection" \
-             "wpa_supplicant.conf" "secret_key" "$ROOT/var/log.hdd" "Write zeros over the free space" "Lock the root password"; do
+             "wpa_supplicant.conf" "secret_key" "$ROOT/var/log.hdd" "Write zeros over the free space" "Lock the root password" \
+             "armbian_first_run.txt.off"; do
   grep -qF -- "$shown" "$WORK/dry.out" || { cat "$WORK/dry.out"; fail "the plan does not show: $shown"; }
 done
 grep -q "Dry run: nothing was changed" "$WORK/dry.out" || fail "the dry run does not say it changed nothing"
@@ -234,11 +238,13 @@ done
 echo "    the console no longer logs in without a password (the other getty settings stay); saved Wi-Fi networks and their keys are gone (the wired setup stays)"
 [[ ! -e "$ROOT/etc/systemd/system/getty@.service.d/override.conf" && ! -e "$ROOT/etc/systemd/system/serial-getty@.service.d/override.conf" ]] || fail "the automatic root login on the console is still there"
 [[ -f "$ROOT/etc/systemd/system/getty@tty1.service.d/keep.conf" ]] || fail "a getty drop-in that has no autologin was removed"
-for wifi in etc/netplan/30-wifis-dhcp.yaml etc/NetworkManager/system-connections/HomeNet.nmconnection etc/wpa_supplicant/wpa_supplicant.conf var/lib/NetworkManager/secret_key; do
+for wifi in etc/netplan/30-wifis-dhcp.yaml etc/NetworkManager/system-connections/HomeNet.nmconnection etc/wpa_supplicant/wpa_supplicant.conf \
+            var/lib/NetworkManager/secret_key boot/armbian_first_run.txt.off; do
   [[ ! -e "$ROOT/$wifi" ]] || fail "$wifi is still there"
 done
+[[ -f "$ROOT/boot/armbian_first_run.txt.template" ]] || fail "Armbian's empty first-start template was removed"
 [[ -f "$ROOT/etc/netplan/10-dhcp-all-interfaces.yaml" && -f "$ROOT/etc/NetworkManager/system-connections/Wired.nmconnection" ]] || fail "the wired network setup was removed"
-grep -rq "seller-wifi-pass" "$ROOT/etc" && fail "the seller's Wi-Fi password is still in a file"
+grep -rq "seller-wifi-pass" "$ROOT/etc" "$ROOT/boot" && fail "the seller's Wi-Fi password is still in a file"
 echo "    zeros are written over the free space by default (deleting only frees blocks), after a sync, and again synced"
 dd_line="$(grep -n "^dd if=/dev/zero of=$ROOT/.sinko-zerofill " "$WORK/calls.log" | head -1 | cut -d: -f1)"
 [[ -n "$dd_line" ]] || fail "no zeros were written by default"
