@@ -3,7 +3,7 @@ branding, on the real parent page against the mock Pi-hole (tests/mock_pihole.py
 
     python3 tests/box_smoke.py [--shots DIR] [--only PART]        (needs: pip install playwright && playwright install chromium)
 
-Parts: structure, update, health, network, password, backup, power, counter, about, firstrun, banner, branding. The scheduler on
+Parts: structure, update, health, network, password, backup, power, counter, about, firstrun, banner, branding, motion, screenshots. The scheduler on
 the box is played by mock_pihole.SchedulerSim, which handles the request markers the page writes the way the architecture says.
 """
 import argparse
@@ -852,9 +852,33 @@ def part_motion(browser):
     ctx.close()
 
 
+def part_screenshots(browser):
+    """tools/make-screenshots.py writes the documentation pictures and can be run again over its own output."""
+    import struct
+    import subprocess
+    with tempfile.TemporaryDirectory() as out:
+        for name in ("panel-en.png", "box-ar.png"):                 # pictures from an earlier run: they are simply replaced
+            with open(os.path.join(out, name), "wb") as fh:
+                fh.write(b"old")
+        done = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "make-screenshots.py"), "--out", out], capture_output=True, text=True, timeout=240)
+        expect(done.returncode == 0, "make-screenshots.py succeeds, over the pictures of an earlier run %s" % (done.stderr[-300:] if done.returncode else ""))
+        want = {"panel-en.png": (780, 1688), "panel-ar.png": (780, 1688), "desktop-en.png": (1280, 900), "box-en.png": (780, 2360), "box-ar.png": (780, 2360)}
+        for name, size in want.items():
+            path = os.path.join(out, name)
+            with open(path, "rb") as fh:
+                head = fh.read(24)
+            got = struct.unpack(">II", head[16:24]) if head[:8] == b"\x89PNG\r\n\x1a\n" else None
+            expect(got == size, "%s is a PNG of %s (got %s)" % (name, size, got))
+        with open(os.path.join(out, "live-en.png"), "rb") as fh:
+            head = fh.read(24)
+        w, h = struct.unpack(">II", head[16:24])
+        expect(head[:8] == b"\x89PNG\r\n\x1a\n" and w >= 700 and h > 1200, "live-en.png is the live picture card (%dx%d)" % (w, h))
+        expect(sorted(os.listdir(out)) == sorted(list(want) + ["live-en.png"]), "and nothing else is written: %s" % sorted(os.listdir(out)))
+
+
 PARTS = [("structure", part_structure), ("update", part_update), ("health", part_health), ("network", part_network), ("password", part_password),
          ("backup", part_backup), ("power", part_power), ("counter", part_counter), ("about", part_about), ("firstrun", part_firstrun),
-         ("banner", part_banner), ("branding", part_branding), ("motion", part_motion)]
+         ("banner", part_banner), ("branding", part_branding), ("motion", part_motion), ("screenshots", part_screenshots)]
 
 with sync_playwright() as p:
     browser = p.chromium.launch()

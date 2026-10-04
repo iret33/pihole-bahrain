@@ -249,7 +249,8 @@
       return { phase: 'running', to: u.to || u.latest, from: u.from };
     }
     if (u.request !== null) return { phase: 'starting', to: u.latest };
-    if (u.status === 'failed' && age < FAILED_SHOWN_SEC && (!u.latest || u.latest === u.to)) {
+    // A failure counts for the version on offer (or when nobody knows which version it was): not for an older one that has been superseded.
+    if (u.status === 'failed' && age < FAILED_SHOWN_SEC && (!u.latest || !u.to || u.latest === u.to)) {
       return { phase: 'failed', error: u.error, to: u.to, from: u.from, latest: newer ? u.latest : null, notes: u.notes };
     }
     if (u.status === 'ok' && age < OK_SHOWN_SEC) return { phase: 'ok', to: u.to };
@@ -1030,7 +1031,8 @@
     if (!ui.pwCodeField.hidden) login.totp = Number(code);
     // 1. Prove the current password the way signing in does. That opens a second session, which is deleted again right away.
     env.call('POST', '/api/auth', login, { noSid: true, quiet401: true }).then(function (j) {
-      var vsid = j && j.session && j.session.sid;
+      if (!(j && j.session && j.session.valid)) { var bad = new Error('password'); bad.status = 401; bad.body = j; throw bad; }
+      var vsid = j.session.sid;
       return (vsid ? quiet('DELETE', '/api/auth', undefined, { sid: vsid }).catch(function () {}) : Promise.resolve());
     }).then(function () {
       // 2. Set the new one. Pi-hole ends every session when the password changes, including this one.

@@ -53,6 +53,7 @@ test('update card: the result of an attempt is shown for a while, a failure for 
   assert.equal(view({ status: 'failed', to: '3.1.0', latest: '3.1.0', at: NOW - 8 * 86400 }).phase, 'available', 'after a week it is just an update on offer');
   assert.equal(view({ status: 'failed', to: '3.1.0', latest: '3.2.0', at: NOW - 3600 }).phase, 'available', 'a failure of an older version is not the story now');
   assert.equal(view({ status: 'failed', to: '3.1.0', at: NOW - 3600 }, '3.0.0').phase, 'failed', 'failed and nothing else on offer');
+  assert.equal(view({ status: 'failed', latest: '3.1.0', at: NOW - 3600 }).phase, 'failed', 'a failure that never learned which version it was still counts for the one on offer');
 });
 
 test('temperature in plain words, whatever unit Pi-hole uses', () => {
