@@ -250,7 +250,7 @@ class StatusTests(Pihole):
         self.assertEqual(status["update"], {"auto": True, "latest": "3.1.0",
                                             "notes": "https://github.com/iret33/sinko/releases/tag/v3.1.0",
                                             "checked": 1700000000.0, "status": "failed", "from": None, "to": None,
-                                            "at": 1700000100.0, "error": "x"})
+                                            "at": 1700000100.0, "error": "x", "rolledBack": None})
         self.assertEqual(status["telemetry"], {"on": True})
 
     def test_the_pages_request_markers_are_not_part_of_the_picture(self):
