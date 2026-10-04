@@ -26,6 +26,9 @@
 #   SINKO_SRC             a folder with an already extracted release: nothing is downloaded
 #                      (used by "sinko update", "sinko rollback", image builds and tests)
 #   SINKO_RELEASE_BASE    where releases are downloaded from, default https://github.com/<slug>/releases
+#   SINKO_TELEMETRY       1 = count this box in the anonymous number of Sinko boxes online, 0 = do not.
+#                      Interactive installs ask (default no). Not asked and not set: nothing is saved
+#                      and the parent page asks later. What is sent: docs/privacy.md
 #   SINKO_NONINTERACTIVE  1 = never prompt
 set -Eeuo pipefail
 shopt -s inherit_errexit   # also stop on failures inside $(…), e.g. a failed download
@@ -92,6 +95,7 @@ main() {
   VERSION="$(cat "$SRC/VERSION" 2>/dev/null || echo unknown)"
   ok "Installing version $VERSION from $SRC"
 
+  ask_telemetry             # first, so that whoever is at the keyboard can leave after the questions
   detect_network
   install_pihole
   detect_legacy
@@ -195,7 +199,7 @@ need_internet() {
 
 # ------------------------------------------------------------------ settings
 # What can be saved in /etc/sinko/config (and be overridden by an environment variable of the same name).
-SETTING_KEYS="HOSTNAME LISTS_BASE REPO REPO_SLUG REF IP RELEASE_BASE"
+SETTING_KEYS="HOSTNAME LISTS_BASE REPO REPO_SLUG REF IP RELEASE_BASE TELEMETRY TELEMETRY_URL"
 declare -A ENVV=() SAVED=() LEGACY=()   # environment, /etc/sinko/config, /etc/pihole-bahrain/config
 
 # Reads the KEY=value lines of a settings file (shell syntax, as write_settings writes it) into the associative array
@@ -311,6 +315,42 @@ load_settings() {
   SINKO_RELEASE_BASE="${SINKO_RELEASE_BASE%/}"
   [[ "$SINKO_RELEASE_BASE" =~ ^https?://[A-Za-z0-9._~:/@+%=-]+$ ]] \
     || die "SINKO_RELEASE_BASE '$SINKO_RELEASE_BASE' is not a web address (https://…)"
+
+  # The anonymous counter: 1 (count this box), 0 (do not) or empty (nobody has been asked yet: the page asks later).
+  # An answer given earlier is kept; only a variable or the question below changes it.
+  if v="$(env_value TELEMETRY)"; then
+    [[ "$v" == 1 || "$v" == 0 ]] || die "SINKO_TELEMETRY must be 1 (count this box) or 0 (do not)."
+    SINKO_TELEMETRY="$v"
+  else
+    v="$(saved_value TELEMETRY || true)"
+    if [[ "$v" == 1 || "$v" == 0 ]]; then SINKO_TELEMETRY="$v"; else SINKO_TELEMETRY=""; fi
+  fi
+  # Where the counter lives. Empty = the CLI's built-in address; never invented here, only kept or given.
+  SINKO_TELEMETRY_URL="$(env_value TELEMETRY_URL || saved_value TELEMETRY_URL || true)"
+  [[ -z "$SINKO_TELEMETRY_URL" || "$SINKO_TELEMETRY_URL" =~ ^https?://[A-Za-z0-9._~:/@+%=-]+$ ]] \
+    || die "SINKO_TELEMETRY_URL '$SINKO_TELEMETRY_URL' is not a web address (https://…)"
+}
+
+# Interactive installs ask once whether this box may be counted. Nobody asked (no terminal, SINKO_NONINTERACTIVE=1)
+# or no answer given (Ctrl-D): nothing is saved, and the parent page asks later.
+ask_telemetry() {
+  [[ -z "$SINKO_TELEMETRY" ]] || return 0
+  can_prompt || return 0
+  local answer
+  step "Anonymous counter (optional)"
+  printf '  Sinko can add this box to a public count of how many Sinko boxes are online. It sends only a random number,\n'
+  printf '  the version and the kind of device, never names, addresses, websites or anything about your family.\n'
+  printf '  What is sent, exactly: docs/privacy.md (https://github.com/%s/blob/master/docs/privacy.md)\n' "$SINKO_REPO_SLUG"
+  printf '  Count this box in the anonymous number of Sinko boxes online? [y/N] '
+  if ! read -r answer <"$TTY_DEV"; then
+    printf '\n'
+    warn "No answer: the parent page will ask later."
+    return 0
+  fi
+  case "$answer" in
+    [Yy]|[Yy][Ee][Ss]) SINKO_TELEMETRY=1; ok "This box will be counted. Change it any time on the parent page (My box)." ;;
+    *) SINKO_TELEMETRY=0; ok "This box will not be counted. Change it any time on the parent page (My box)." ;;
+  esac
 }
 
 # ------------------------------------------------------------------ getting the code
@@ -692,6 +732,9 @@ write_settings() {
     printf 'SINKO_REPO_SLUG=%q\n' "$SINKO_REPO_SLUG"
     printf 'SINKO_REF=%q\n' "$SINKO_REF"
     printf 'SINKO_IP=%q\n' "$IPV4"
+    # Only what somebody answered or set: no answer is not "no".
+    if [[ -n "$SINKO_TELEMETRY" ]]; then printf 'SINKO_TELEMETRY=%q\n' "$SINKO_TELEMETRY"; fi
+    if [[ -n "$SINKO_TELEMETRY_URL" ]]; then printf 'SINKO_TELEMETRY_URL=%q\n' "$SINKO_TELEMETRY_URL"; fi
   } >"$tmp"
   chmod 644 "$tmp"
   mv "$tmp" "$CONF_FILE"

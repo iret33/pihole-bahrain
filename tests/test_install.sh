@@ -143,6 +143,53 @@ grep -qF "$pw2" "$WORK/pw2.out" && fail "generated password was printed to stdou
 [[ "$(stat -c %a "$LOG")" == 600 ]] || fail "install log mode changed"
 set_auth true
 
+echo "--- the counter question: asked once, only when somebody can answer, nothing saved when nobody was asked"
+conf="$ROOT/etc/sinko/config"
+forget_answer() { sed -i '/^SINKO_TELEMETRY=/d' "$conf"; }
+forget_answer
+bash "$REPO/install.sh" >"$WORK/t1.out" 2>&1 || { cat "$WORK/t1.out"; fail "non-interactive run failed"; }
+grep -q '^SINKO_TELEMETRY=' "$conf" && fail "an answer was saved although nobody was asked"
+grep -q "Count this box" "$WORK/t1.out" && fail "a non-interactive run asked the question"
+echo y >"$WORK/answer"
+SINKO_TTY="$WORK/answer" bash "$REPO/install.sh" >"$WORK/t2.out" 2>&1 || fail "run with SINKO_NONINTERACTIVE=1 failed"
+grep -q "Count this box" "$WORK/t2.out" && fail "SINKO_NONINTERACTIVE=1 did not stop the question"
+grep -q '^SINKO_TELEMETRY=' "$conf" && fail "an answer was saved although SINKO_NONINTERACTIVE=1"
+echo "    SINKO_TELEMETRY=1|0 answers without asking and is saved"
+SINKO_TELEMETRY=1 bash "$REPO/install.sh" >"$WORK/t3.out" 2>&1 || fail "run with SINKO_TELEMETRY=1 failed"
+grep -q '^SINKO_TELEMETRY=1$' "$conf" || fail "SINKO_TELEMETRY=1 was not saved"
+grep -q "Count this box" "$WORK/t3.out" && fail "asked although SINKO_TELEMETRY was given"
+echo "    an answer already saved survives later non-interactive runs (updates)"
+bash "$REPO/install.sh" >"$WORK/t4.out" 2>&1 || fail "update run failed"
+grep -q '^SINKO_TELEMETRY=1$' "$conf" || fail "the saved answer was lost by an update"
+SINKO_TELEMETRY=0 bash "$REPO/install.sh" >"$WORK/t5.out" 2>&1 || fail "run with SINKO_TELEMETRY=0 failed"
+grep -q '^SINKO_TELEMETRY=0$' "$conf" || fail "SINKO_TELEMETRY=0 did not replace the answer"
+if SINKO_TELEMETRY=maybe bash "$REPO/install.sh" >"$WORK/t6.out" 2>&1; then fail "SINKO_TELEMETRY=maybe accepted"; fi
+grep -q "SINKO_TELEMETRY must be 1" "$WORK/t6.out" || fail "no message for a bad SINKO_TELEMETRY"
+echo "    interactive: asked with a description and a pointer to docs/privacy.md; default is no"
+forget_answer
+echo y >"$WORK/answer"
+env -u SINKO_NONINTERACTIVE SINKO_TTY="$WORK/answer" bash "$REPO/install.sh" >"$WORK/t7.out" 2>&1 || { cat "$WORK/t7.out"; fail "interactive run failed"; }
+grep -q "Count this box in the anonymous number of Sinko boxes online? \[y/N\]" "$WORK/t7.out" || fail "the question was not asked"
+grep -q "docs/privacy.md" "$WORK/t7.out" || fail "no pointer to docs/privacy.md"
+grep -q '^SINKO_TELEMETRY=1$' "$conf" || fail "the answer yes was not saved"
+env -u SINKO_NONINTERACTIVE SINKO_TTY="$WORK/answer" bash "$REPO/install.sh" >"$WORK/t8.out" 2>&1 || fail "second interactive run failed"
+grep -q "Count this box" "$WORK/t8.out" && fail "asked again although the box was already answered"
+forget_answer
+echo >"$WORK/answer"                                   # just Enter
+env -u SINKO_NONINTERACTIVE SINKO_TTY="$WORK/answer" bash "$REPO/install.sh" >"$WORK/t9.out" 2>&1 || fail "run answering with Enter failed"
+grep -q '^SINKO_TELEMETRY=0$' "$conf" || fail "Enter (the default) did not save no"
+forget_answer
+: >"$WORK/answer"                                      # the terminal gives no answer at all (Ctrl-D)
+env -u SINKO_NONINTERACTIVE SINKO_TTY="$WORK/answer" bash "$REPO/install.sh" >"$WORK/t10.out" 2>&1 || fail "run without an answer failed"
+grep -q '^SINKO_TELEMETRY=' "$conf" && fail "a missing answer was saved as an answer"
+grep -q "No answer" "$WORK/t10.out" || fail "no hint that the page asks later"
+echo "    a counter address that was set is kept, and must be a web address"
+SINKO_TELEMETRY_URL=https://counter.example.org bash "$REPO/install.sh" >"$WORK/t11.out" 2>&1 || fail "run with SINKO_TELEMETRY_URL failed"
+bash "$REPO/install.sh" >"$WORK/t12.out" 2>&1 || fail "update failed"
+grep -q '^SINKO_TELEMETRY_URL=https://counter.example.org$' "$conf" || fail "SINKO_TELEMETRY_URL was not kept"
+if SINKO_TELEMETRY_URL='javascript:alert(1)' bash "$REPO/install.sh" >"$WORK/t13.out" 2>&1; then fail "a bad SINKO_TELEMETRY_URL was accepted"; fi
+sed -i '/^SINKO_TELEMETRY_URL=/d' "$conf"
+
 echo "--- uninstall"
 bash "$ROOT/opt/sinko/uninstall.sh" >"$WORK/un.out" 2>&1 || { cat "$WORK/un.out"; fail "uninstall failed"; }
 [[ ! -e "$ROOT/opt/sinko" && ! -e "$ROOT/var/www/html/pb" && ! -e "$ROOT/etc/sinko" ]] || fail "files left behind"
