@@ -406,4 +406,35 @@ printf '#!/bin/sh\nexit 0\n' >"$ROOT/opt/sinko/bin/sinko"; chmod +x "$ROOT/opt/s
 bash "$REPO/uninstall.sh" >"$WORK/un2.out" 2>&1 || { cat "$WORK/un2.out"; fail "uninstall of a partial installation failed"; }
 [[ -L "$ROOT/usr/local/bin/pihole-bahrain" ]] || fail "uninstall removed a link that is not ours"
 [[ ! -e "$ROOT/opt/sinko" ]] || fail "the partial installation was not removed"
+
+echo "--- uninstall when Sinko's objects cannot be taken out of Pi-hole: nothing is removed, the scheduler runs again, the message says what to do"
+# A program whose "remove" fails, like one that cannot reach Pi-hole's API (the test setup shows what it looks like on a real box).
+mkdir -p "$ROOT/opt/sinko/bin" "$ROOT/etc/sinko" "$ROOT/var/lib/sinko" "$ROOT/var/www/html/pb" "$ROOT/etc/systemd/system"
+cat >"$ROOT/opt/sinko/bin/sinko" <<EOF
+#!/bin/sh
+echo "\$@" >>"$WORK/program.calls"
+[ "\$1" = remove ] && { echo "sinko: Pi-hole does not answer" >&2; exit 1; }
+exit 0
+EOF
+chmod +x "$ROOT/opt/sinko/bin/sinko"
+echo '<meta name="generator" content="sinko">' >"$ROOT/var/www/html/index.html"
+touch "$ROOT/etc/systemd/system/sinko.service" "$ROOT/var/lib/sinko/firstboot" "$WORK/units/sinko.service.enabled" "$WORK/units/sinko.service.active"
+: >"$WORK/calls.log"; : >"$WORK/program.calls"
+if bash "$REPO/uninstall.sh" >"$WORK/un3.out" 2>&1; then cat "$WORK/un3.out"; fail "uninstall went on although Sinko's objects are still in Pi-hole"; fi
+grep -q "Sinko was NOT removed" "$WORK/un3.out" || { cat "$WORK/un3.out"; fail "no message that nothing was removed"; }
+grep -q -- "--force" "$WORK/un3.out" || fail "the message does not say how to go on anyway"
+grep -q "children's internet may stay off" "$WORK/un3.out" || fail "the message does not say that the children's internet may stay off"
+[[ -x "$ROOT/opt/sinko/bin/sinko" && -d "$ROOT/var/www/html/pb" && -f "$ROOT/etc/systemd/system/sinko.service" && -d "$ROOT/etc/sinko" \
+   && -f "$ROOT/var/lib/sinko/firstboot" ]] || fail "files were removed although Pi-hole still has Sinko's objects"
+grep -q 'generator" content="sinko"' "$ROOT/var/www/html/index.html" || fail "the page was removed although Pi-hole still has Sinko's objects"
+[[ -e "$WORK/units/sinko.service.enabled" && -e "$WORK/units/sinko.service.active" ]] || fail "the scheduler was left stopped or disabled after the failure"
+grep -q 'systemctl disable' "$WORK/calls.log" && fail "a unit was disabled although nothing was removed"
+grep -qx 'configure --remove-hostname --disable-web' "$WORK/program.calls" && fail "Pi-hole's settings were changed although the removal failed"
+echo "    --force removes the files anyway, and says what is left in Pi-hole"
+: >"$WORK/program.calls"
+bash "$REPO/uninstall.sh" --force >"$WORK/un4.out" 2>&1 || { cat "$WORK/un4.out"; fail "uninstall --force failed"; }
+grep -q "WARNING: Sinko's groups" "$WORK/un4.out" || fail "--force did not warn about what is left in Pi-hole"
+[[ ! -e "$ROOT/opt/sinko" && ! -e "$ROOT/var/lib/sinko" && ! -e "$ROOT/var/www/html/pb" && ! -e "$ROOT/etc/systemd/system/sinko.service" ]] || fail "--force did not remove the files"
+if bash "$REPO/uninstall.sh" --bogus >"$WORK/un5.out" 2>&1; then fail "an unknown option was accepted"; fi
+grep -q "unknown option" "$WORK/un5.out" || fail "no message for an unknown option"
 echo "installer tests passed"
