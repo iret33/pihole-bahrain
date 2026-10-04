@@ -2553,7 +2553,7 @@ def telemetry_url(conf=None) -> str:
         return ""
     if not url or not host or parts.username or parts.password or parts.query or parts.fragment:
         return ""
-    if parts.scheme == "https" or (parts.scheme == "http" and host in ("127.0.0.1", "localhost", "::1")):
+    if parts.scheme == "https" or (parts.scheme == "http" and host in LOOPBACK_HOSTS):
         return url.rstrip("/")
     return ""
 
@@ -4870,7 +4870,7 @@ def main(argv=None) -> int:
     p.add_argument("--from-panel", action="store_true", help=argparse.SUPPRESS)      # started by the scheduler
     p.set_defaults(fn=cmd_update)
     sub.add_parser("rollback", help="go back to the previous version stored on this box").set_defaults(fn=cmd_rollback)
-    p = sub.add_parser("selfcheck", help="quick check that the installation works (used after an update)")
+    p = sub.add_parser("selfcheck", help="check that the installation works (used after every update; the scheduler must have run for 20 seconds)")
     p.add_argument("--wait", type=float, default=0, help="keep trying for this many seconds while services start")
     p.set_defaults(fn=cmd_selfcheck)
     sub.add_parser("password-state", help=argparse.SUPPRESS).set_defaults(fn=cmd_password_state)
