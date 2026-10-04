@@ -1,9 +1,17 @@
 {
   "name": "Sinko",
-  "short_name": "Family",
+  "short_name": "Sinko",
+  "description": "Block apps, set homework time and bedtime for your children's devices, from your phone.",
+  "lang": "en",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#F1F4F2",
   "theme_color": "#0F766E",
-  "icons": [{ "src": "/pb/icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+  "icons": [
+    { "src": "/pb/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/pb/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/pb/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/pb/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
 }
