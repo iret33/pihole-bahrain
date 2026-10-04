@@ -102,6 +102,15 @@ ls "$ROOT"/opt/sinko/.download.* >/dev/null 2>&1 && fail "the temporary download
 [[ "$(find "$ROOT/opt/sinko/tools" -type f | wc -l)" == 2 ]] || fail "something other than seal.sh and firstboot.sh is in /opt/sinko/tools"
 [[ -f "$ROOT/etc/systemd/system/sinko-firstboot.service" && ! -e "$WORK/units/sinko-firstboot.service.enabled" ]] || fail "the first-start unit must be installed, not enabled"
 
+echo "--- a password given to the one-liner survives the start of the downloaded installer, and is in no program's environment"
+rm -f "$WORK/password-in-env"
+run_install pw-oneliner SINKO_RELEASE_BASE="$BASE" SINKO_PASSWORD="Oneliner-Pass-2024" || { cat "$WORK/pw-oneliner.out"; fail "the one-liner with a password failed"; }
+grep -q "Starting the installer from the downloaded version" "$WORK/pw-oneliner.out" || fail "test setup: the downloaded installer was not started"
+mock_password_works "Oneliner-Pass-2024" || fail "the password given to the one-liner did not reach Pi-hole (lost when the downloaded installer was started?)"
+[[ ! -e "$WORK/password-in-env" ]] || { cat "$WORK/password-in-env"; fail "SINKO_PASSWORD was in the environment of a program the installer started"; }
+grep -qF "Oneliner-Pass-2024" "$WORK/pw-oneliner.out" "$ROOT/var/log/sinko-install.log" && fail "the password reached the output or the log"
+mock_set_password test                       # the password the rest of this file signs in with
+
 echo "--- a failed download does not damage the installed program or its source"
 echo marker >"$ROOT/opt/sinko/src/marker"
 if run_install failed-update SINKO_RELEASE_BASE="http://127.0.0.1:1/releases"; then fail "install from an unreachable server succeeded"; fi
