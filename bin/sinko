@@ -30,30 +30,38 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import fcntl
+import hashlib
 import http.client
 import ipaddress
 import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import signal
 import socket
 import ssl
+import stat
 import struct
 import subprocess
 import sys
+import tarfile
+import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.2.0"
+VERSION = "3.0.0"
 
 APP_DIR = os.environ.get("SINKO_APP_DIR", "/opt/sinko")
 LISTS_DIR = os.path.join(APP_DIR, "lists")
 CONFIG_FILE = os.environ.get("SINKO_CONFIG_FILE", "/etc/sinko/config")
 DEFAULT_LISTS_BASE = "https://raw.githubusercontent.com/iret33/sinko/master/lists"
+DEFAULT_STATE_DIR = "/var/lib/sinko"
 CLI_PW_FILE = os.environ.get("SINKO_CLI_PW_FILE", "/etc/pihole/cli_pw")
 
 G_KIDS = "pb-kids"          # marker: membership == "this is a kid device"
@@ -125,6 +133,10 @@ def read_config(path: str = CONFIG_FILE) -> dict:
                 conf[key.strip()] = value.strip().strip("'\"")
     except FileNotFoundError:
         pass
+    # A box that was installed as pihole-bahrain (<= 2.2.x) still has PB_* keys until the installer rewrites the
+    # file; its answers (hostname, address, list source, ref) must not be lost in between.
+    for key in [k for k in conf if k.startswith("PB_")]:
+        conf.setdefault("SINKO_" + key[3:], conf[key])
     return conf
 
 
@@ -149,6 +161,199 @@ def kid_groups(group_ids: dict, catalog: dict) -> list:
     """Every group a kid device must belong to (except pb-paused)."""
     names = [G_KIDS, G_GUARD, G_OFFLINE] + [svc_group(s["id"]) for s in catalog["services"]]
     return [DEFAULT_GROUP] + [group_ids[n] for n in names if n in group_ids]
+
+
+# --------------------------------------------------------------------------- #
+# Runtime data: /var/lib/sinko (root only, never reachable from the page)
+# --------------------------------------------------------------------------- #
+HANDLED_KINDS = ("update", "check", "power")
+INSTALL_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+RESULT_STATUSES = ("ok", "failed")
+
+
+def state_dir() -> str:
+    """Read on every call, so tests (and a second box in a container) can point it elsewhere."""
+    return os.environ.get("SINKO_STATE_DIR") or DEFAULT_STATE_DIR
+
+
+def state_path(name: str) -> str:
+    return os.path.join(state_dir(), name)
+
+
+def _private_dir(path: str) -> None:
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    st = os.stat(path)
+    # makedirs obeys the umask, and an installer may have made the directory with looser rights.
+    if st.st_uid == os.geteuid() and stat.S_IMODE(st.st_mode) & 0o077:
+        os.chmod(path, 0o700)
+
+
+def ensure_state_dir(sub: str = "") -> str:
+    """Create the runtime directory (mode 0700: it holds the counter id and the update files); returns its path."""
+    path = state_dir()
+    _private_dir(path)
+    if sub:
+        path = os.path.join(path, sub)
+        _private_dir(path)
+    return path
+
+
+def _fsync_dir(directory: str) -> None:
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def atomic_write(path: str, data, mode: int = 0o600) -> None:
+    """Replace `path` so that a reader, or a power cut, sees the old content or the new, never half of it.
+
+    The box has no battery-backed clock and loses power without warning; a request marker that is only half
+    written would be acted on twice or not at all.
+    """
+    raw = data.encode("utf-8") if isinstance(data, str) else data
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix="." + os.path.basename(path) + ".")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            os.fchmod(fh.fileno(), mode)
+            fh.write(raw)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    _fsync_dir(directory)
+
+
+def read_json_file(path: str, default=None):
+    """The parsed JSON in `path`, or `default` when it is missing or unreadable (never raises)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return default
+
+
+def load_handled() -> dict:
+    """The request markers this box already acted on: {"update": m, "check": m, "power": m} (missing = never)."""
+    data = read_json_file(state_path("handled.json"), {})
+    out = {}
+    if isinstance(data, dict):
+        for kind in HANDLED_KINDS:
+            marker = _nonce(data.get(kind))
+            if marker is not None:
+                out[kind] = marker
+    return out
+
+
+def set_handled(kind: str, marker) -> None:
+    """Remember (or, with None, forget) the marker of a request. Durable before it returns."""
+    ensure_state_dir()
+    handled = load_handled()
+    if marker is None:
+        handled.pop(kind, None)
+    else:
+        handled[kind] = marker
+    atomic_write(state_path("handled.json"), json.dumps(handled, sort_keys=True))
+
+
+def install_id(create: bool = True):
+    """The random id the optional counter sends. Made on first use; derived from nothing on the device."""
+    try:
+        with open(state_path("install-id"), encoding="ascii") as fh:
+            value = fh.read().strip()
+        if INSTALL_ID_RE.match(value):
+            return value
+    except (OSError, ValueError):
+        pass
+    return reset_install_id() if create else None
+
+
+def reset_install_id() -> str:
+    ensure_state_dir()
+    value = secrets.token_hex(16)
+    atomic_write(state_path("install-id"), value + "\n")
+    return value
+
+
+def write_update_result(status: str, from_version, to_version, error, at: float) -> dict:
+    """What the update runner leaves for the scheduler (see architecture.md, "Update flow")."""
+    result = {"status": status, "from": from_version, "to": to_version, "error": error, "at": at}
+    ensure_state_dir()
+    atomic_write(state_path("update-result.json"), json.dumps(result, sort_keys=True))
+    return result
+
+
+def read_update_result():
+    """The runner's result as parse_state would accept it, or None when there is no (valid) result."""
+    raw = read_json_file(state_path("update-result.json"))
+    if not isinstance(raw, dict) or raw.get("status") not in RESULT_STATUSES or not _is_count(raw.get("at")):
+        return None
+    err = raw.get("error")
+    return {"status": raw["status"],
+            "from": raw.get("from") if isinstance(raw.get("from"), str) and SEMVER_RE.match(raw["from"]) else None,
+            "to": raw.get("to") if isinstance(raw.get("to"), str) and SEMVER_RE.match(raw["to"]) else None,
+            "error": err[:200] if isinstance(err, str) and err.strip() else None,
+            "at": float(raw["at"])}
+
+
+def clear_update_result() -> None:
+    try:
+        os.unlink(state_path("update-result.json"))
+    except FileNotFoundError:
+        pass
+
+
+class RunLock:
+    """An flock on /var/lib/sinko/lock: held for the whole of an update or rollback, so two never run at once.
+
+    The kernel drops the lock when the holder dies, so a crashed runner cannot block the next one. `is_held()` is
+    how the scheduler tells whether a runner is still alive.
+    """
+
+    def __init__(self):
+        self._fh = None
+
+    def acquire(self) -> bool:
+        ensure_state_dir()
+        fh = open(state_path("lock"), "a+")
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fh.close()
+            return False
+        self._fh = fh
+        return True
+
+    def release(self) -> None:
+        if self._fh is not None:
+            self._fh.close()               # closing drops the flock
+            self._fh = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+
+    @staticmethod
+    def is_held() -> bool:
+        probe = RunLock()
+        if probe.acquire():
+            probe.release()
+            return False
+        return True
 
 
 # --------------------------------------------------------------------------- #
