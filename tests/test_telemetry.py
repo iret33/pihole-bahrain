@@ -14,6 +14,7 @@ import unittest
 from unittest import mock
 
 import fake_release
+import mock_pihole
 import test_maintenance as tm
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -335,6 +336,174 @@ class PingSchedulingTests(tm.Fixture):
         with self.assertLogs("sinko", level="DEBUG") as logs:
             self.settle()
         self.assertNotIn(secret, "\n".join(r.getMessage() for r in logs.records))
+
+
+class CommandTests(unittest.TestCase):
+    """`sinko telemetry ...` and the install-time answer that `sinko setup` copies into the state."""
+
+    def setUp(self):
+        self.httpd, self.store = fake_release.serve_pihole()
+        self.addCleanup(self.httpd.server_close)
+        self.addCleanup(self.httpd.shutdown)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+        self.api = pb.Api("http://127.0.0.1:%d" % self.httpd.server_port, password=mock_pihole.PASSWORD)
+        self.api.login()
+        self.catalog = pb.load_catalog(LISTS)
+        self.ctl = pb.Controller(self.api, self.catalog, "https://lists.example/l")
+        with open(os.path.join(self.tmp, "pw"), "w") as fh:
+            fh.write(mock_pihole.PASSWORD)
+        self.conf = {}
+        env = mock.patch.dict(os.environ, {"SINKO_API_URL": "http://127.0.0.1:%d" % self.httpd.server_port,
+                                           "SINKO_STATE_DIR": os.path.join(self.tmp, "state"),
+                                           "SINKO_DT_MODEL": os.path.join(self.tmp, "none")})
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("SINKO_TELEMETRY_URL", None)
+        for patch in (mock.patch.object(pb, "CLI_PW_FILE", os.path.join(self.tmp, "pw")),
+                      mock.patch.object(pb, "read_config", lambda *a: dict(self.conf)),
+                      mock.patch.object(pb, "load_catalog", lambda *a: self.catalog)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def setup_pihole(self):
+        self.ctl.setup(run_gravity=False)
+
+    def state(self):
+        return pb.parse_state(next(g for g in self.store.groups if g["name"] == "pb-state")["comment"])
+
+    def run_cli(self, *args):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = pb.main(list(args))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_on_and_off_record_the_answer_in_the_state_and_say_what_it_means(self):
+        self.setup_pihole()
+        self.conf = {"SINKO_TELEMETRY_URL": "https://counter.example"}
+        code, out, _ = self.run_cli("telemetry", "on")
+        self.assertEqual(code, 0)
+        self.assertIs(self.state()["telemetry"]["on"], True)
+        self.assertIn("Anonymous counter: on", out)
+        self.assertIn("sinko telemetry payload", out)
+        self.assertIs(self.run_cli("telemetry", "off")[0], 0)
+        self.assertIs(self.state()["telemetry"]["on"], False)
+
+    def test_on_without_a_counter_address_says_that_nothing_is_sent(self):
+        self.setup_pihole()
+        code, out, _ = self.run_cli("telemetry", "on")
+        self.assertEqual(code, 0)
+        self.assertIs(self.state()["telemetry"]["on"], True)
+        self.assertIn("nothing is sent", out)
+
+    def test_off_removes_the_community_number(self):
+        self.setup_pihole()
+        state = self.state()
+        state["telemetry"]["on"] = True
+        state["community"] = {"online": 12, "at": 1.0}
+        self.ctl.write_state(state)
+        self.run_cli("telemetry", "off")
+        self.assertIsNone(self.state()["community"])
+
+    def test_on_and_off_leave_the_rest_of_the_state_alone(self):
+        self.setup_pihole()
+        state = self.state()
+        state["schedule"]["enabled"] = True
+        state["update"]["auto"] = True
+        state["setup"]["done"] = True
+        self.ctl.write_state(state)
+        self.run_cli("telemetry", "on")
+        after = self.state()
+        self.assertTrue(after["schedule"]["enabled"] and after["update"]["auto"] and after["setup"]["done"])
+
+    def test_status_reports_the_answer_and_never_the_id(self):
+        self.setup_pihole()
+        secret = pb.install_id()
+        for action, shown in (("status", "not decided yet"), ("on", "on"), ("off", "off")):
+            code, out, err = self.run_cli("telemetry", action)
+            self.assertEqual(code, 0)
+            self.assertIn("Anonymous counter: " + shown, out)
+            self.assertNotIn(secret, out + err)
+        state = self.state()
+        state["telemetry"]["on"] = True
+        state["community"] = {"online": 12, "at": 1.0}
+        self.ctl.write_state(state)
+        _, out, _ = self.run_cli("telemetry", "status")
+        self.assertIn("Boxes online at the last answer: 12", out)
+        self.assertNotIn(secret, out)
+
+    def test_status_does_not_change_anything(self):
+        self.setup_pihole()
+        writes = self.store.writes
+        self.run_cli("telemetry", "status")
+        self.assertEqual(self.store.writes, writes)
+
+    def test_payload_prints_exactly_what_would_be_sent_including_the_id(self):
+        code, out, err = self.run_cli("telemetry", "payload")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, pb.telemetry_body() + "\n")
+        self.assertEqual(json.loads(out)["id"], pb.install_id(create=False))
+        self.assertEqual(err, "")
+
+    def test_payload_needs_no_pihole(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.assertEqual(self.run_cli("telemetry", "payload")[0], 0)
+
+    def test_reset_id_makes_a_new_id_and_does_not_print_it(self):
+        old = pb.install_id()
+        code, out, err = self.run_cli("telemetry", "reset-id")
+        self.assertEqual(code, 0)
+        new = pb.install_id(create=False)
+        self.assertNotEqual(new, old)
+        self.assertNotIn(new, out + err)
+        self.assertNotIn(old, out + err)
+
+    def test_before_setup_has_made_the_state_the_command_says_so(self):
+        code, _, err = self.run_cli("telemetry", "on")
+        self.assertEqual(code, 1)
+        self.assertIn("sinko setup", err)
+
+    def test_pihole_being_down_is_a_message_not_a_traceback(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        code, _, err = self.run_cli("telemetry", "status")
+        self.assertEqual(code, 2)
+        self.assertIn("Pi-hole could not be reached", err)
+
+    def test_setup_copies_the_install_time_answer_when_the_state_has_none(self):
+        for value, want in (("1", True), ("0", False), ("true", True), ("No", False)):
+            self.store.groups[:] = [g for g in self.store.groups if g["name"] == "Default"]
+            self.conf = {"SINKO_TELEMETRY": value}
+            code, _, _ = self.run_cli("setup", "--no-gravity")
+            self.assertEqual(code, 0)
+            self.assertIs(self.state()["telemetry"]["on"], want, value)
+
+    def test_setup_leaves_the_state_alone_when_nothing_was_decided_at_install_time(self):
+        for conf in ({}, {"SINKO_TELEMETRY": ""}, {"SINKO_TELEMETRY": "maybe"}):
+            self.store.groups[:] = [g for g in self.store.groups if g["name"] == "Default"]
+            self.conf = conf
+            self.run_cli("setup", "--no-gravity")
+            self.assertIsNone(self.state()["telemetry"]["on"], conf)
+
+    def test_setup_never_overrides_the_parents_answer(self):
+        self.setup_pihole()
+        state = self.state()
+        state["telemetry"]["on"] = False
+        self.ctl.write_state(state)
+        self.conf = {"SINKO_TELEMETRY": "1"}
+        self.run_cli("setup", "--no-gravity")
+        self.assertIs(self.state()["telemetry"]["on"], False, "an answer given on the page beats the one from the installer")
+        writes = self.store.writes
+        self.run_cli("setup", "--no-gravity")
+        self.assertEqual(self.store.writes, writes, "and a second setup rewrites nothing")
+
+    def test_setup_makes_the_runtime_folder(self):
+        self.run_cli("setup", "--no-gravity")
+        state_dir = os.path.join(self.tmp, "state")
+        self.assertEqual(stat.S_IMODE(os.stat(state_dir).st_mode), 0o700)
+        self.assertTrue(os.path.isdir(os.path.join(state_dir, "cache")))
 
 
 if __name__ == "__main__":

@@ -2491,6 +2491,21 @@ class Maintenance:
 # --------------------------------------------------------------------------- #
 # Commands
 # --------------------------------------------------------------------------- #
+def seed_telemetry_answer(api: Api, conf: dict) -> bool:
+    """The installer asked whether the anonymous counter may run (or was told) and recorded the answer as
+    SINKO_TELEMETRY in the settings. The answer itself lives in the shared state, so copy it there, but only while the
+    state has none: whatever the parent has since answered on the page wins."""
+    value = (conf.get("SINKO_TELEMETRY") or "").strip().lower()
+    answer = True if value in ("1", "true", "yes", "on") else False if value in ("0", "false", "no", "off") else None
+    if answer is None:
+        return False                       # not decided at install time: the page asks later
+
+    def seed(state):
+        if state["telemetry"]["on"] is None:
+            state["telemetry"]["on"] = answer
+    return patch_state(api, seed)
+
+
 def cmd_setup(args) -> int:
     api = Api()
     api.wait_ready()
@@ -2499,11 +2514,68 @@ def cmd_setup(args) -> int:
         ctl = Controller(api, load_catalog())
         ctl.setup(run_gravity=False)
         ctl.readd_legacy_devices()
+        seed_telemetry_answer(api, read_config())
+        try:
+            ensure_state_dir("cache")
+        except OSError as err:
+            log.warning("cannot create %s: %s (updates will not work until it exists)", state_dir(), err)
         if not args.no_gravity:
             ctl.gravity()
     finally:
         api.logout()
     print("sinko: Pi-hole objects are up to date")
+    return 0
+
+
+def cmd_telemetry(args) -> int:
+    """`sinko telemetry on|off|status|payload|reset-id`. The answer lives in the shared state (the page shows and
+    sets the same one); nothing here ever prints the id except `payload`, which shows what would be sent."""
+    if args.action == "payload":
+        print(telemetry_body())
+        return 0
+    if args.action == "reset-id":
+        reset_install_id()
+        print("sinko: a new random id was made; the old one is forgotten. Nothing was sent.")
+        return 0
+    conf = read_config()
+    try:
+        api = Api()
+        api.login()
+    except (ApiError, OSError, ValueError) as err:
+        print("sinko: Pi-hole could not be reached (%s)" % short_text(err, 80), file=sys.stderr)
+        return 2
+    try:
+        groups = api.group_map()
+        if G_STATE not in groups:
+            print("sinko: Sinko is not set up in Pi-hole yet. Run: sudo sinko setup", file=sys.stderr)
+            return 1
+        if args.action in ("on", "off"):
+            answer = args.action == "on"
+
+            def record(state):
+                state["telemetry"]["on"] = answer
+                if not answer:
+                    state["community"] = None             # an old number must not outlive the "no"
+            patch_state(api, record)
+        state = parse_state(api.group_map()[G_STATE].get("comment"))
+    except (ApiError, OSError, ValueError) as err:
+        print("sinko: Pi-hole could not be read or written (%s)" % short_text(err, 80), file=sys.stderr)
+        return 2
+    finally:
+        api.logout()
+    on = state["telemetry"]["on"]
+    configured = bool(telemetry_url(conf))
+    print("Anonymous counter: %s" % ("on" if on else "off" if on is False else "not decided yet"))
+    if on and not configured:
+        print("No counter address is set up on this box, so nothing is sent.")
+    elif on:
+        print("It sends the data shown by: sudo sinko telemetry payload (every 6 hours or so). Switch off: sudo sinko telemetry off")
+    elif on is False:
+        print("Nothing is sent.")
+    else:
+        print("Nothing is sent until it is switched on: sudo sinko telemetry on")
+    if state["community"]:
+        print("Boxes online at the last answer: %d" % state["community"]["online"])
     return 0
 
 
@@ -3628,6 +3700,9 @@ def main(argv=None) -> int:
     p.set_defaults(fn=cmd_use_mac)
     sub.add_parser("run", help="run the scheduler (systemd)").set_defaults(fn=cmd_run)
     sub.add_parser("status", help="print current state").set_defaults(fn=cmd_status)
+    p = sub.add_parser("telemetry", help="the optional anonymous counter (boxes online): on, off, status, payload, reset-id")
+    p.add_argument("action", choices=["on", "off", "status", "payload", "reset-id"])
+    p.set_defaults(fn=cmd_telemetry)
     sub.add_parser("doctor", help="check the installation").set_defaults(fn=cmd_doctor)
     sub.add_parser("remove", help="delete this add-on's Pi-hole objects").set_defaults(fn=cmd_remove)
     args = parser.parse_args(argv)
