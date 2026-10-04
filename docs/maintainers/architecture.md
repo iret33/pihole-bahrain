@@ -1,0 +1,230 @@
+# Nay — architecture and contracts (3.0)
+
+This file is the single source of truth for how the parts of Nay talk to each other.
+If code and this file disagree, fix one of them in the same change.
+
+Nay (Arabic: ناي, the reed flute) is a parental-controls page and scheduler on top of Pi-hole v6.
+It ships as free software for people with their own hardware, and as a ready-made, pre-flashed
+Orange Pi Zero 3.
+
+## Pieces
+
+| Piece | Where | Runs as | Notes |
+|---|---|---|---|
+| Parent page | `web/` → `/var/www/html/index.html` + `/pb/*` | browser (phone) | static files served by Pi-hole's web server; talks only to the Pi-hole API on the same origin |
+| `nay` CLI + scheduler | `bin/nay` → `/opt/nay/bin/nay`, symlink `/usr/local/bin/nay` | root (systemd `nay.service` runs `nay run`) | Python 3 standard library only |
+| Installer | `install.sh` | root | idempotent: install, update and migrate |
+| Appliance tools | `tools/seal.sh`, `tools/firstboot.sh`, `systemd/nay-firstboot.service` | root | prepare / personalise the ready-made image |
+| Release build | `tools/build-release.sh`, `.github/workflows/release.yml` | CI | produces the three release assets |
+| Counter service | `telemetry/` (Cloudflare Worker + D1) | Cloudflare | anonymous "boxes online" count, opt-in |
+| Project site | `site/` → GitHub Pages | browser | landing page with live counters |
+
+Pi-hole objects created by Nay keep the **internal prefix `pb-`** (groups `pb-kids`, `pb-svc-<id>`, …; list
+comments `pb:<id>`). The prefix is historical and is not user-facing; do not rename it (it would orphan existing
+rules).
+
+## Names, paths, environment
+
+* Command `nay`; repo `iret33/nay` (`NAY_REPO_SLUG`); units `nay.service`, `nay-lists.service`, `nay-lists.timer`,
+  `nay-firstboot.service`; transient unit `nay-update`.
+* `/opt/nay` (code; `/opt/nay/src` is the last downloaded source), `/etc/nay/config` (settings, shell-compatible
+  `KEY=value`), `/var/lib/nay/` (runtime data owned by root, see below), `/var/log/nay-install.log`.
+* Legacy (pihole-bahrain ≤ 2.2.x): `/opt/pihole-bahrain`, `/etc/pihole-bahrain`, units `pihole-bahrain*.service|timer`,
+  command `pihole-bahrain`, config keys `PB_*`, page marker `<meta name="generator" content="pihole-bahrain">`.
+  The installer migrates these (see *Migration*). `read_config` in the CLI also accepts legacy `PB_X` for any missing
+  `NAY_X`.
+* Test/override hooks: `NAY_ROOT` (installer fake root), `NAY_APP_DIR`, `NAY_CONFIG_FILE`, `NAY_STATE_DIR`
+  (default `/var/lib/nay`), `NAY_API_URL`, `NAY_RELEASE_BASE`, `NAY_RELEASE_API`, `NAY_TELEMETRY_URL`.
+
+### `/etc/nay/config` keys
+
+`NAY_HOSTNAME`, `NAY_LISTS_BASE`, `NAY_REPO` (git URL), `NAY_REPO_SLUG` (`owner/name`), `NAY_REF`
+(`latest` by default), `NAY_IP`, `NAY_TELEMETRY` (`1` / `0` / absent = not decided at install time),
+`NAY_TELEMETRY_URL` (empty = counter not configured), `NAY_MDNS`, `NAY_OS_UPDATES`.
+
+### `/var/lib/nay/` (root only, never reachable from the page)
+
+| File | Purpose |
+|---|---|
+| `install-id` | random 128-bit hex used by the optional counter; created lazily, removed by `seal` |
+| `handled.json` | `{"update": <nonce>, "check": <nonce>, "power": <nonce>}`: last request markers acted on |
+| `update-result.json` | written by the update runner when it ends: `{"status":"ok|failed","from","to","error","at"}` |
+| `cache/nay-<version>.tar.gz` | the last two installed releases (offline rollback) |
+| `firstboot` | flag file: the ready-made image still has to personalise itself |
+
+## Release assets
+
+Tag `vX.Y.Z` with `VERSION` = `X.Y.Z` (CI checks). `tools/build-release.sh` builds, reproducibly:
+
+* `nay.tar.gz`: one top-level directory `nay/` containing `bin/ lists/ web/ systemd/ tools/ install.sh uninstall.sh
+  VERSION LICENSE NOTICE` (no tests, docs, site or telemetry).
+* `nay.tar.gz.sha256`: one line, `<hex>  nay.tar.gz`.
+* `install.sh`: byte-identical to the file in the tag (the one-liner).
+
+Stable asset names, so these URLs work: `https://github.com/<slug>/releases/latest/download/<asset>` and
+`https://github.com/<slug>/releases/download/vX.Y.Z/<asset>`. Every download of an asset is counted by GitHub
+(`download_count`): that is the project's download count (README badge, site counter).
+
+Latest-release metadata: `https://api.github.com/repos/<slug>/releases/latest` (`tag_name`, `html_url`,
+`prerelease`, `draft`). Overridable with `NAY_RELEASE_API`; asset base overridable with `NAY_RELEASE_BASE`
+(default `https://github.com/<slug>/releases`) so tests can serve fake releases from a local HTTP server.
+
+`NAY_REF`: `latest` (default) = newest release; `vX.Y.Z` = that release; anything else (a branch such as `master`)
+= developer path: `git clone --depth 1 --branch <ref> $NAY_REPO`.
+
+## Installer contract (`install.sh`)
+
+* `curl -fsSL https://github.com/<slug>/releases/latest/download/install.sh | sudo bash` (also still works from raw
+  `master`).
+* Fetches the release tarball + `.sha256`, verifies it (refuses on mismatch), extracts to `/opt/nay/src`, then runs
+  the `install.sh` shipped inside it (existing re-exec behaviour). `NAY_SRC=<dir>` uses an already extracted tree and
+  skips fetching (used by `nay update`, tests and the image build). Always non-interactive when `NAY_NONINTERACTIVE=1`.
+* Idempotent. Exit status ≠ 0 on failure, progress to stdout, full log in `/var/log/nay-install.log` (the generated
+  parent password never reaches the log).
+* `NAY_TELEMETRY=1|0` records the install-time answer (interactive installs ask: default *no*; non-interactive
+  installs without the variable record nothing, so the page asks later).
+* Installs `avahi-daemon` so the box answers to `<hostname>.local` (`NAY_MDNS=0` skips) and
+  `unattended-upgrades` for Debian security updates (`NAY_OS_UPDATES=0` skips; left alone when already installed).
+
+### Migration from pihole-bahrain
+
+Detected by `/opt/pihole-bahrain` or `/etc/pihole-bahrain` or the old units. Done by the new installer in this order:
+read the old config (`PB_*` → `NAY_*`, keep hostname/ip/lists/ref), stop + disable + delete the old units, install
+the new files, `nay setup` (re-registers every list under the new address, keeps groups, devices, rules, state),
+install the new units, leave `/usr/local/bin/pihole-bahrain` as a symlink to `nay` (with a one-line notice), and only at
+the very end delete `/opt/pihole-bahrain` and `/etc/pihole-bahrain` (the running installer may live inside the old
+`/opt/pihole-bahrain/src`). The old page (`generator` = `pihole-bahrain`) is replaced, never backed up as a user page.
+Old boxes update themselves by running `pihole-bahrain update`, which fetches the new repo (GitHub redirects the old
+name) and runs the new installer.
+
+## Shared state (`pb-state` group description, JSON)
+
+Read and written by the page **and** by the scheduler. Both normalise with `parse_state` (Python, `bin/nay`) /
+`parseState` (JS, `web/`), unknown top-level keys are dropped, so every key must be known to both.
+`tests/fixtures/state-cases.json` is the executable spec: `tests/test_state_contract.py` and
+`tests/state-contract.test.js` run the same file against both parsers.
+
+```jsonc
+{
+  "v": 1,
+  "timer": null, "schedule": {...}, "scheduleActive": false,      // unchanged since 2.x
+  "update": {
+    "auto": false,            // page: install updates by itself, 03:00–05:00 box time
+    "request": null,          // page: opaque marker (Date.now()) of "Update now"
+    "checkRequest": null,     // page: opaque marker of "Check again"
+    "latest": null,           // scheduler: newer version available ("3.1.0") or null
+    "notes": null,            // scheduler: https://github.com/<slug>/releases/tag/v3.1.0 (the page only links this)
+    "checked": 0,             // scheduler: epoch seconds of the last successful check
+    "status": "idle",         // scheduler: idle | running | ok | failed
+    "from": null, "to": null, // versions of the current/last attempt
+    "at": 0,                  // epoch seconds of the last status change
+    "error": null             // short reason when failed (≤ 200 chars, no secrets)
+  },
+  "power": {"request": null, "action": null},   // page: "reboot" | "poweroff" with a request marker
+  "telemetry": {"on": null},                    // null = not asked, true/false = the parent's answer (authoritative)
+  "community": null,                            // scheduler: {"online": n, "at": epoch} after a successful ping
+  "setup": {"done": false}                      // page: first-run checklist dismissed
+}
+```
+
+**Request protocol.** A request marker is opaque. The scheduler acts when it is non-null and different from the
+value stored in `/var/lib/nay/handled.json`; it first stores the marker there, then clears it in the state, then acts
+(so a reboot request cannot repeat after the box comes back). The page never decides anything: it only asks.
+Nothing in the state is ever used as a URL, path or command; updates always come from the repo configured in
+`/etc/nay/config`.
+
+The scheduler writes the state only when something changed (a write makes Pi-hole reload), and re-reads right
+before writing (existing pattern in `Controller.tick`) so it never overwrites what the page just wrote.
+
+## Update flow
+
+1. **Check** (scheduler, 2 minutes after start and then every 24 h, or on `checkRequest`): GET the release API
+   with a 10 s timeout in a background thread (never block the tick). Ignore drafts and prereleases. Semver compare
+   against `VERSION`. Offline or rate-limited = silently keep the old answer. Write `latest/notes/checked` if they
+   changed or `checked` is older than a day.
+2. **Run** (on `update.request`, or `auto` inside the 03:00–05:00 window when `latest` is set and this version has
+   not failed in the last 7 days): minimum 5 minutes between runs. Set `status=running, from, to, at`, clear the
+   request, then start `nay update --yes --from-panel` as a detached transient unit (`systemd-run --unit nay-update
+   --collect`; fall back to a detached subprocess). The runner survives the scheduler restart the installer causes.
+3. **`nay update`**: download `nay.tar.gz` + `.sha256` from the configured repo; verify the checksum; refuse tarballs
+   with absolute or `..` member paths or without `nay/VERSION`, `nay/install.sh`, `nay/bin/nay`; refuse a version
+   that is not newer unless `--force`; copy the tarball to `/var/lib/nay/cache/` (keep the two newest); run the
+   extracted `install.sh` with `NAY_SRC` and `NAY_NONINTERACTIVE=1`; then `nay selfcheck`. If the installer or the
+   self-check fails, **roll back** automatically by re-installing the previously cached version, and report
+   `failed` with a short reason. Finally write `update-result.json`.
+4. **Reconcile** (scheduler, every tick): if `status == running` and `update-result.json` exists, copy it into the state
+   (`ok`/`failed`, `to`, `error`, `at`), delete the file, and clear `latest` when it is now installed. If `running` is
+   stuck for > 20 minutes with no runner active, mark `failed` ("did not finish").
+5. `nay rollback` re-installs the previous cached version by hand. `nay update --ref vX.Y.Z` pins a release.
+
+`nay selfcheck` (fast, no DNS probing, exit ≠ 0 on failure, one line per check): API reachable and logged in with
+the CLI password, the `pb-*` groups exist, every catalog list is registered, the scheduler unit is active, the page
+files exist and `pb/version.txt` equals `VERSION`.
+
+## Power requests
+
+`power.action` `reboot` → `systemctl reboot`; `poweroff` → `systemctl poweroff`, executed after the marker is stored
+and the state cleared. The page warns that the children's internet stops while the box is off.
+
+## Address watch
+
+The scheduler compares the default-route IPv4 with `NAY_IP` every 5 minutes; when it changed it runs the equivalent of
+`nay configure --ip <new> --hostname <name>` and rewrites `NAY_IP`, so the local name keeps pointing at the box after
+the router hands out a new address (and after a ready-made unit is switched on in a different network).
+
+## Optional anonymous counter ("boxes online")
+
+* Off until the parent says yes (`telemetry.on == true` in the state; a page card or the installer prompt asks;
+  `nay telemetry on|off|status|payload` mirrors it). Endpoint from `NAY_TELEMETRY_URL`; empty = not configured, the
+  page hides the card and nothing is ever sent.
+* Every 6 h ± 30 min (first one 5 minutes after start) in a background thread with a 10 s timeout:
+  `POST {url}/v1/ping`, `Content-Type: application/json`, body ≤ 512 bytes:
+  `{"id": "<32 lowercase hex>", "v": "3.0.0", "hw": "orangepi-zero3|raspberrypi|x86|other"}`.
+  `id` is random, stored in `/var/lib/nay/install-id`, derived from nothing on the device. Nothing else is sent: no
+  domains, device names, addresses, children, rules, language or timezone.
+  `hw` comes from `/proc/device-tree/model` ("Orange Pi Zero 3" → `orangepi-zero3`, "Raspberry Pi" → `raspberrypi`)
+  or the CPU architecture (`x86_64` → `x86`), else `other`.
+* Response: `{"online": <int>, "total": <int>}`; stored as `community` in the state when the numbers are sane.
+* Worker (`telemetry/`) stores `id, first_seen, last_seen, version, hw, country` (country from Cloudflare's
+  `CF-IPCountry`; the IP is never stored or logged by the Worker) in D1. Ignores a ping from an id seen < 10 minutes
+  ago, rejects malformed bodies, purges ids unseen for 180 days (cron).
+  * `GET /v1/stats` → `{"online","active7d","total","countries","versions":{},"hw":{},"downloads":<int|null>,"generatedAt"}`
+    (online = seen within 12 h; downloads = sum of GitHub release asset downloads, cached 15 min; CORS `*`,
+    `Cache-Control: public, max-age=60`).
+  * `GET /badge/online.json`, `/badge/total.json`, `/badge/downloads.json`: shields.io endpoint JSON
+    (`{"schemaVersion":1,"label":"…","message":"1.2k","color":"0F766E"}`).
+
+## Parent page contract
+
+* Same-origin Pi-hole API only (`/api/...`); logic stays dependency-free vanilla JS, English + Arabic (RTL), no
+  build step. Every string exists in both languages, with the same `{placeholders}`; the copy test bans technical
+  words outside the "how it works" sheet.
+* New in 3.0: **My box** sheet (update, health, network addresses, change password, backup/restore, restart/shut
+  down, anonymous counter, about), **first-run claim** screen, **setup checklist** card, update banner when a newer
+  version exists.
+* Pi-hole API calls used by the new features (from the FTL OpenAPI specs; copies in the maintainers' scratch notes,
+  upstream: `pi-hole/FTL/src/api/docs/content/specs/*.yaml`):
+  `GET /api/auth` (no `sid` + `session.valid` true ⇒ no password set ⇒ claim screen),
+  `PATCH /api/config` with `{"config":{"webserver":{"api":{"password":"…"}}}}` (write-only property; the session is
+  invalidated afterwards, so sign in again), `GET /api/info/system`, `/api/info/sensors`, `/api/info/version`,
+  `/api/info/host`, `GET /api/teleporter` (zip), `POST /api/teleporter` (multipart `file` + `import` JSON), `GET
+  /api/dns/blocking`.
+* Backup = the whole Teleporter archive (it contains the password hash: the page says to keep it private).
+  Restore imports **only** the gravity tables (`group, adlist, adlist_by_group, domainlist, domainlist_by_group,
+  client, client_by_group`) and not `config`, so a restore never changes the address, upstreams or password.
+* Update links: only `update.notes` values that `parseState` accepted are rendered as links.
+
+## Ready-made image (Orange Pi Zero 3)
+
+Golden-unit method: install Nay on a fresh Armbian minimal (Debian Trixie) image, run `tools/seal.sh`, copy the SD
+card to an `.img`, compress, flash many cards. Sealing removes everything that must be unique or private (SSH host keys,
+machine-id, install-id, query history, parent password so the page offers the **claim screen**, shell history, logs),
+locks the default root password / password SSH logins, removes Armbian's first-login wizard file, and arms
+`nay-firstboot.service`. First boot regenerates host keys, repairs the local name/address for the actual network
+(`nay configure`), refreshes `NAY_IP`, then deletes the flag. `docs/product-image.md` is the seller's procedure.
+
+## Things only real hardware can prove
+
+Listed in `docs/hardware-test-checklist.md`; nothing in CI exercises: a real Pi-hole v6 (password config, teleporter,
+sensors), systemd behaviour (`systemd-run`, reboot from the service), Armbian first boot, mDNS on phones, the
+Orange Pi Zero 3's thermal sensor path, and a real GitHub release round trip.
