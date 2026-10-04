@@ -1,0 +1,39 @@
+Sinko
+Copyright (C) 2025-2026 The Sinko contributors
+
+Sinko is free software under the GNU General Public License, version 3 or later (LICENSE).
+This file lists the third-party software and services Sinko is built on, installs, or talks to.
+Each keeps its own licence and trademarks.
+
+Included in this repository
+---------------------------
+IBM Plex Sans Arabic (web/fonts/)
+    Copyright (C) 2017 IBM Corp. SIL Open Font License 1.1, see web/fonts/OFL.txt.
+
+Block lists (lists/)
+    Dedicated to the public domain under CC0 1.0, see lists/LICENSE.
+
+Installed or used at run time, not included in this repository
+--------------------------------------------------------------
+Pi-hole (https://pi-hole.net)
+    Pi-hole core, FTL and the web interface are licensed under the European Union Public Licence 1.2 (EUPL-1.2)
+    by Pi-hole LLC and contributors; "Pi-hole" is a registered trademark of Pi-hole LLC. Sinko downloads and installs
+    Pi-hole with Pi-hole's own official installer and talks to it through its public REST API. Sinko is not
+    affiliated with, endorsed by, or supported by Pi-hole LLC.
+    Source: https://github.com/pi-hole  Licence text: https://eupl.eu/1.2/en
+
+Debian GNU/Linux and Armbian
+    The operating system that Sinko is installed on (and that the ready-made image is built from) is made of many
+    free-software packages under their own licences (mostly GPL, LGPL, MIT, BSD). Debian: https://www.debian.org,
+    Armbian: https://www.armbian.com. "Debian" and "Armbian" are trademarks of their owners.
+    Anyone who distributes a pre-flashed card or image is distributing that software and must offer its licence texts
+    and source code: see docs/selling.md.
+
+Avahi (mDNS, so the box answers to <name>.local) and unattended-upgrades (Debian security updates): installed from
+Debian's packages, optional.
+
+Services Sinko can contact
+--------------------------
+GitHub (github.com, api.github.com, raw.githubusercontent.com): releases, update checks and block lists.
+Cloudflare (Workers, D1): the optional anonymous "boxes online" counter, only after the parent says yes
+(docs/privacy.md).

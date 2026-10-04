@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security problem
+    url: https://github.com/iret33/sinko/security/advisories/new
+    about: Report vulnerabilities privately, not as a public issue.
+  - name: Troubleshooting guide
+    url: https://github.com/iret33/sinko/blob/master/docs/troubleshooting.md
+    about: An app still works after being blocked? Start here.
