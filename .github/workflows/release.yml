@@ -1,0 +1,46 @@
+name: Release
+# Push a tag like v3.0.0 (the same number as in the VERSION file) to publish a release.
+# Boxes download these assets; every download is counted by GitHub (the project's download count).
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # create the release and upload its assets
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag must match VERSION and have changelog notes
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          [ "$tag" = "$(tr -d '[:space:]' < VERSION)" ] || { echo "::error::tag $GITHUB_REF_NAME does not match VERSION $(cat VERSION)"; exit 1; }
+          python3 tools/changelog-section.py "$tag" > release-notes.md
+      - name: Build the assets
+        run: bash tools/build-release.sh dist
+      - name: Check the archive the way a box does
+        run: |
+          cd dist
+          sha256sum -c sinko.tar.gz.sha256
+          tar -tzf sinko.tar.gz | head -n 5
+          mkdir -p ../verify && tar -xzf sinko.tar.gz -C ../verify
+          test "$(cat ../verify/sinko/VERSION)" = "${GITHUB_REF_NAME#v}"
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Sinko ${{ github.ref_name }}
+          body_path: release-notes.md
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            dist/sinko.tar.gz
+            dist/sinko.tar.gz.sha256
+            dist/install.sh
+          fail_on_unmatched_files: true

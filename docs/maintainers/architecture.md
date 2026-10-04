@@ -56,8 +56,8 @@ rules).
 
 Tag `vX.Y.Z` with `VERSION` = `X.Y.Z` (CI checks). `tools/build-release.sh` builds, reproducibly:
 
-* `sinko.tar.gz`: one top-level directory `sinko/` containing `bin/ lists/ web/ systemd/ tools/ install.sh uninstall.sh
-  VERSION LICENSE NOTICE` (no tests, docs, site or telemetry).
+* `sinko.tar.gz`: one top-level directory `sinko/` containing `bin/ lists/ web/ systemd/ tools/seal.sh tools/firstboot.sh install.sh
+  uninstall.sh VERSION LICENSE NOTICE` (no tests, docs, site, telemetry or development tools).
 * `sinko.tar.gz.sha256`: one line, `<hex>  sinko.tar.gz`.
 * `install.sh`: byte-identical to the file in the tag (the one-liner).
 
