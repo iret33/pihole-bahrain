@@ -16,8 +16,6 @@
   var POLL_MS = 30000;
   var SID_KEY = 'pb.sid';
   var LANG_KEY = 'pb.lang';
-  var DEFAULT_STATE = { v: 1, timer: null, scheduleActive: false,
-    schedule: { enabled: false, start: '21:00', end: '06:00', days: [0, 1, 2, 3, 4, 5, 6] } };
 
   // ------------------------------------------------------------------ strings
   var STR = {
@@ -523,25 +521,8 @@
   }
 
   // ------------------------------------------------------------------ model
-  function parseState(raw) {
-    var s = JSON.parse(JSON.stringify(DEFAULT_STATE)), d = {};
-    try { d = raw ? JSON.parse(raw) : {}; } catch (e) { d = {}; }
-    if (!d || typeof d !== 'object') d = {};
-    var tm = d.timer;
-    if (tm && (tm.mode === 'free' || tm.mode === 'block') && typeof tm.until === 'number') {
-      var snap = tm.snapshot || {};
-      s.timer = { mode: tm.mode, until: tm.until, snapshot: { services: snap.services || {}, offline: !!snap.offline } };
-    }
-    if (d.schedule && typeof d.schedule === 'object') {
-      var sc = d.schedule;
-      s.schedule.enabled = !!sc.enabled;
-      if (/^\d\d:\d\d$/.test(sc.start || '')) s.schedule.start = sc.start;
-      if (/^\d\d:\d\d$/.test(sc.end || '')) s.schedule.end = sc.end;
-      if (Array.isArray(sc.days)) s.schedule.days = sc.days.filter(function (x) { return x >= 0 && x <= 6; });
-    }
-    s.scheduleActive = !!d.scheduleActive;
-    return s;
-  }
+  // The shared state is normalised by PBCore.parseState (pb-core.js), with the same rules as the scheduler.
+  var parseState = PBCore.parseState;
 
   function load() {
     return Promise.all([
@@ -603,13 +584,12 @@
   }
   function writeState(mutator) {
     // Re-read first so we never overwrite a change the Pi service just made.
+    // PBCore.editState keeps every field the mutator does not touch, including the ones only the scheduler writes.
     return call('GET', '/api/groups/' + q(G.state)).then(function (j) {
       var g = (j.groups || [])[0] || M.groups[G.state];
-      var st = parseState(g.comment);
-      mutator(st);
-      var comment = JSON.stringify(st);
-      return call('PUT', '/api/groups/' + q(G.state), { name: G.state, comment: comment, enabled: false })
-        .then(function () { M.groups[G.state].comment = comment; M.state = st; });
+      var next = PBCore.editState(g.comment, mutator);
+      return call('PUT', '/api/groups/' + q(G.state), { name: G.state, comment: next.json, enabled: false })
+        .then(function () { M.groups[G.state].comment = next.json; M.state = next.state; });
     });
   }
   // Apply a full rule set. Only groups that actually change are written.
