@@ -76,7 +76,10 @@ EOF
   cat >"$STUBS/apt-get" <<'EOF'
 #!/usr/bin/env bash
 echo "apt-get $*" >>"$WORK/calls.log"
+[[ -z "${SINKO_PASSWORD+x}${PB_PASSWORD+x}" ]] || echo "apt-get $*" >>"$WORK/password-in-env"
 if [[ -e "$WORK/apt-fail" ]]; then echo "E: apt is not available (stub)" >&2; exit 100; fi
+# $WORK/apt-update-fail: "apt-get update" fails (a package source is unreachable), everything else works from the lists apt has.
+if [[ " $* " == *" update "* && -e "$WORK/apt-update-fail" ]]; then echo "E: Failed to fetch (stub)" >&2; exit 100; fi
 if [[ " $* " == *" install "* ]]; then
   for a in "$@"; do
     case "$a" in -*|install) ;; *) echo "$a" >>"$WORK/dpkg-installed" ;; esac
@@ -84,10 +87,30 @@ if [[ " $* " == *" install "* ]]; then
 fi
 exit 0
 EOF
+  # apt-cache policy PKG: every package has a candidate, unless $WORK/apt-nocandidate says the sources have none.
+  cat >"$STUBS/apt-cache" <<'EOF'
+#!/usr/bin/env bash
+echo "apt-cache $*" >>"$WORK/calls.log"
+[[ "$1" == policy ]] || exit 0
+shift
+for p in "$@"; do
+  echo "$p:"
+  echo "  Installed: (none)"
+  if [[ -e "$WORK/apt-nocandidate" ]]; then echo "  Candidate: (none)"; else echo "  Candidate: 1.0-1"; fi
+done
+EOF
+  # python3: the installer asks which version it runs on; $WORK/py-old makes the answer 3.8. Everything else is the real one.
+  cat >"$STUBS/python3" <<EOF
+#!/usr/bin/env bash
+if [[ -e "\$WORK/py-old" && "\$*" == *"sys.version_info[:2]"* ]]; then echo 3.8; exit 0; fi
+exec "$(command -v python3)" "\$@"
+EOF
   # systemctl keeps "active" and "enabled" as marker files, so tests can ask what the scripts did.
   cat >"$STUBS/systemctl" <<'EOF'
 #!/usr/bin/env bash
 echo "systemctl $*" >>"$WORK/calls.log"
+# Every program the installer starts must find the parent password out of its environment (see test_install.sh).
+[[ -z "${SINKO_PASSWORD+x}${PB_PASSWORD+x}" ]] || echo "systemctl $*" >>"$WORK/password-in-env"
 mkdir -p "$WORK/units"
 cmd=""; units=(); now=0
 for a in "$@"; do
@@ -150,17 +173,50 @@ if args[1] == "dns.hosts":
 conf[args[1]] = val
 json.dump(conf, open(db, "w"))
 EOF
+  # With $WORK/pihole-g-block present, "pihole -g" (gravity) hangs, like a slow list download: the test can then end the
+  # installer in the middle of `sinko setup`. $WORK/pihole-g-started and pihole-g-pid tell it where the hang is.
   cat >"$STUBS/pihole" <<'EOF'
 #!/usr/bin/env bash
 echo "pihole $*" >>"$WORK/calls.log"
+[[ -z "${SINKO_PASSWORD+x}${PB_PASSWORD+x}" ]] || echo "pihole $*" >>"$WORK/password-in-env"
+if [[ "${1:-}" == -g && -e "$WORK/pihole-g-fail" ]]; then echo "gravity failed (stub)" >&2; exit 1; fi
+if [[ "${1:-}" == -g && -e "$WORK/pihole-g-block" ]]; then
+  echo $$ >"$WORK/pihole-g-pid"; : >"$WORK/pihole-g-started"
+  exec sleep 600
+fi
 EOF
   # The installer's internet check probes github.com; everything else goes to the real curl (local servers only).
   # With $WORK/offline present the probe fails like it does on a box that has lost its internet.
+  # Every call is written to $WORK/curl.log, so a test can see which protocol limits the installer put on it.
   cat >"$STUBS/curl" <<EOF
 #!/usr/bin/env bash
+echo "curl \$*" >>"\$WORK/curl.log"
 if [[ "\$*" == *" https://github.com" ]]; then [[ -e "\$WORK/offline" ]] && exit 7; exit 0; fi
 exec "$(command -v curl)" "\$@"
 EOF
+  # install, mv and rm: the real ones, except that while $WORK/tripwire exists each call first checks that the files an
+  # update must never take away are all there (the program, every list, the page folder, the start page, the units).
+  # A violation is written to $WORK/tripwire-hit: a power cut at that moment would have left the box broken.
+  local tool
+  for tool in install mv rm; do
+    cat >"$STUBS/$tool" <<EOF
+#!/usr/bin/env bash
+if [[ -e "\$WORK/tripwire" ]]; then
+  need_lists="\$(cat "\$WORK/tripwire")"
+  have_lists="\$(ls "\$ROOT"/opt/sinko/lists/*.txt 2>/dev/null | wc -l)"
+  web="\$ROOT/var/www/html"
+  problem=""
+  (( have_lists >= need_lists )) || problem="only \$have_lists lists"
+  [[ -s "\$ROOT/opt/sinko/bin/sinko" ]] || problem="no program"
+  [[ -s "\$ROOT/opt/sinko/lists/services.json" ]] || problem="no services.json"
+  [[ -s "\$web/index.html" ]] || problem="no start page"
+  [[ -d "\$web/pb" || -d "\$web/pb.old" ]] || problem="no page folder"
+  [[ -s "\$ROOT/etc/systemd/system/sinko.service" ]] || problem="no scheduler unit"
+  [[ -z "\$problem" ]] || echo "$tool \$*: \$problem" >>"\$WORK/tripwire-hit"
+fi
+exec "$(command -v "$tool")" "\$@"
+EOF
+  done
   cat >"$STUBS/hostnamectl" <<'EOF'
 #!/usr/bin/env bash
 echo "hostnamectl $*" >>"$WORK/calls.log"
@@ -216,10 +272,29 @@ EOF
 }
 
 start_mock() {
-  python3 - "$PORT" "$REPO" <<'EOF' &
+  python3 - "$PORT" "$REPO" "$WORK/cli_pw" <<'EOF' &
 import sys, time
 sys.path.insert(0, sys.argv[2] + "/tests")
 import mock_pihole
+
+# Pi-hole's command-line password (webserver.api.cli_pw, the contents of /etc/pihole/cli_pw) is a second credential that
+# always signs in, whatever the web password is: the sinko program relies on it, and so a test can change the web
+# password (the installer does, through the API) without locking the program out.
+_cli_pw_file = sys.argv[3]
+_check = mock_pihole.Store.check_password
+
+
+def check_password(self, password):
+    if _check(self, password):
+        return True
+    try:
+        with open(_cli_pw_file, encoding="utf-8") as fh:
+            return isinstance(password, str) and password != "" and password == fh.read().strip()
+    except OSError:
+        return False
+
+
+mock_pihole.Store.check_password = check_password
 httpd, store = mock_pihole.serve(int(sys.argv[1]))
 while True:
     time.sleep(3600)
@@ -232,6 +307,15 @@ EOF
 
 # Mock API controls
 mock_auth()  { curl -s -X POST "http://127.0.0.1:$PORT/__mock__/require_auth" -d "{\"value\": $1}" >/dev/null; }
+# What Pi-hole itself does: PATCH /api/config with webserver.api.password ("" = no password, like a fresh Pi-hole).
+mock_set_password() {  # password
+  mock_api PATCH /api/config "{\"config\":{\"webserver\":{\"api\":{\"password\":\"$1\"}}}}" >/dev/null
+}
+# Does Pi-hole sign this web password in? (a real session id comes back) With no password set, nothing can be checked: fails.
+mock_password_works() {  # password
+  curl -s -X POST "http://127.0.0.1:$PORT/api/auth" -H 'Content-Type: application/json' -d "{\"password\":\"$1\"}" \
+    | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin)["session"].get("sid") else 1)'
+}
 
 # A tiny authenticated client for the mock API, for tests that look at Pi-hole's objects.
 # usage: mock_api METHOD /api/path [json-body]   (prints the JSON answer)
@@ -280,7 +364,9 @@ make_release() {
 fresh_start() {
   if [[ -n "${MOCK_PID:-}" ]]; then { kill "$MOCK_PID" 2>/dev/null || true; wait "$MOCK_PID" 2>/dev/null || true; }; fi
   rm -rf "$ROOT" "$WORK/units" "$WORK/ftl.json" "$WORK/tz" "$WORK/ipaddr" "$WORK/net-down" "$WORK/offline" "$WORK/apt-fail" \
-    "$WORK/ftl-fail" "$WORK/password-stuck" "$WORK/password-needs-pwhash" "$WORK/keygen-fail" "$WORK/sshd-open"
+    "$WORK/ftl-fail" "$WORK/password-stuck" "$WORK/password-needs-pwhash" "$WORK/keygen-fail" "$WORK/sshd-open" \
+    "$WORK/pihole-g-block" "$WORK/pihole-g-fail" "$WORK/pihole-g-started" "$WORK/pihole-g-pid" "$WORK/apt-update-fail" "$WORK/apt-nocandidate" \
+    "$WORK/py-old" "$WORK/password-in-env" "$WORK/curl.log" "$WORK/ftl-makes-cert" "$WORK/ftl-cert-fail"
   mkdir -p "$ROOT/etc/pihole" "$ROOT/etc/ssh" "$ROOT/var/www/html" "$ROOT/var/log" "$WORK/units"
   touch "$ROOT/etc/pihole/pihole.toml" "$WORK/units/pihole-FTL.service.active"
   : >"$WORK/calls.log"

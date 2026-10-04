@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Sinko — installer and updater.
 #
-#   curl -fsSL https://github.com/iret33/sinko/releases/latest/download/install.sh | sudo bash
+#   curl --proto '=https' --proto-redir '=https' -fsSL https://github.com/iret33/sinko/releases/latest/download/install.sh | sudo bash
 #
 # Installs Pi-hole v6 (if missing, fully unattended), the parent page, the
 # scheduler service and the service block lists. Safe to run again: it then
@@ -10,9 +10,13 @@
 # By default it downloads the newest release (sinko.tar.gz) from GitHub, checks it
 # against the published sha256 and refuses to install it if the two differ.
 #
-# Optional settings (environment variables, e.g. `curl … | sudo SINKO_PASSWORD=… bash`).
-# What you set once is saved in /etc/sinko/config and kept by later runs and updates.
-#   SINKO_PASSWORD        parent password. Otherwise you are asked (or one is generated).
+# Optional settings (environment variables, e.g. `curl … | sudo SINKO_HOSTNAME=kids.home bash`).
+# What you set once is saved in /etc/sinko/config and kept by later runs and updates (except the password, which only
+# Pi-hole keeps).
+#   SINKO_PASSWORD        parent password. Otherwise you are asked (or one is generated). Better not to use it on a
+#                      shared computer: a command line with the password in it stays in the shell history and shows
+#                      in the process list while it runs. The installer removes it from its environment at once and
+#                      hands it to Pi-hole through Pi-hole's API, not through a command line.
 #   SINKO_HOSTNAME        local name for the page, default family.lan ("none" to skip)
 #   SINKO_UPSTREAMS       upstream DNS for a NEW Pi-hole, default 1.1.1.3,1.0.0.3
 #                      (Cloudflare for Families: also blocks malware and adult sites)
@@ -25,7 +29,10 @@
 #   SINKO_REPO            git URL for the developer path, default https://github.com/<slug>.git
 #   SINKO_SRC             a folder with an already extracted release: nothing is downloaded
 #                      (used by "sinko update", "sinko rollback", image builds and tests)
-#   SINKO_RELEASE_BASE    where releases are downloaded from, default https://github.com/<slug>/releases
+#   SINKO_RELEASE_BASE    where releases are downloaded from, default https://github.com/<slug>/releases. https only
+#                      (plain http is accepted only for this machine itself). Saved when it is not the default, so
+#                      "sinko update" and the update check use it too. SINKO_RELEASE_API (the latest-release
+#                      address, default https://api.github.com/repos/<slug>/releases/latest) is kept the same way.
 #   SINKO_TELEMETRY       1 = count this box in the anonymous number of Sinko boxes online, 0 = do not.
 #                      Interactive installs ask (default no). Not asked and not set: nothing is saved
 #                      and the parent page asks later. What is sent: docs/privacy.md
@@ -37,6 +44,11 @@ set -Eeuo pipefail
 shopt -s inherit_errexit   # also stop on failures inside $(…), e.g. a failed download
 
 main() {
+  # The parent password may arrive in the environment. It is taken out of it at once, into a variable that is not
+  # exported, so none of the programs started below (apt, Pi-hole's installer, curl, git) inherit it. The one place it
+  # is handed on again is the line that starts the installer shipped inside the release (see below).
+  PASSWORD_GIVEN="${SINKO_PASSWORD-${PB_PASSWORD-}}"
+  unset SINKO_PASSWORD PB_PASSWORD
   import_legacy_env        # an old "pihole-bahrain update" runs this installer with PB_* variables
   # ---------------------------------------------------------------- constants
   local R="${SINKO_ROOT:-}"                        # test hook: install under a fake root
@@ -72,15 +84,21 @@ main() {
     exec > >(tee -a "$LOG_FILE") 2>&1
   fi
   trap 'on_error $LINENO' ERR
-  trap 'on_exit $?' EXIT
+  trap on_exit EXIT
   echo
   echo "=== sinko installer — $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
 
   if [[ "${SINKO_REEXEC:-}" != 1 ]]; then
     # One installer at a time (a parent running it by hand while "Update now" is working would corrupt both).
-    # The re-executed installer inherits this descriptor, and with it the lock.
-    mkdir -p "$R/var/lock"
-    exec 9>"$R/var/lock/sinko-install.lock"
+    # The re-executed installer inherits this descriptor, and with it the lock. The lock file lives in the state
+    # folder (root only), not in /run/lock: that folder is writable by every user, so another account could keep the
+    # file or hold its lock and stop every update. (It is not the updater's own lock, "lock" in the same folder: the
+    # updater holds that one while it runs this installer.)
+    install -d -m 700 "$STATE_DIR"
+    local lock="$STATE_DIR/install.lock"
+    { : >>"$lock"; } 2>/dev/null || die "Cannot open the lock file $lock. Is $STATE_DIR writable by root only?"
+    chmod 600 "$lock"
+    exec 9>>"$lock"
     flock -n 9 || die "Another Sinko installation or update is running. Wait until it has finished, then try again."
   fi
 
@@ -92,6 +110,9 @@ main() {
     # Always run the installer that ships with the code we are installing.
     [[ -f "$src/install.sh" ]] || die "$src has no install.sh."
     step "Starting the installer from the downloaded version"
+    # The password (if one was given) goes to the installer that does the work, which takes it out of its environment
+    # again before it starts anything else.
+    if [[ -n "$PASSWORD_GIVEN" ]]; then export SINKO_PASSWORD="$PASSWORD_GIVEN"; fi
     SINKO_REEXEC=1 SINKO_SRC="$src" exec bash "$src/install.sh"
   fi
   SRC="$src"
@@ -102,13 +123,13 @@ main() {
   detect_network
   install_pihole
   detect_legacy
-  stop_legacy_scheduler
   install_files
   set_timezone
   seed_config_from_legacy   # so that configure_pihole knows the name the old version put in Pi-hole
   configure_pihole          # before write_settings: it reads the previous hostname
   write_settings
   set_password
+  stop_legacy_scheduler     # as late as it can be: from here until install_services the box has no scheduler of its own
   step "Setting up groups, rules and block lists (downloads lists, can take a minute)"
   "$BIN_LINK" setup
   ok "Pi-hole is set up"
@@ -133,24 +154,27 @@ on_error() {
   printf 'It is safe to run the installer again after fixing the problem.\n' >&2
 }
 # Whatever way the installer ends: a box that was being migrated must not be left without a scheduler, because
-# bedtime and timers would silently stop. The old files are still there until the new scheduler runs.
+# bedtime and timers would silently stop. The old units are only stopped (never disabled) until the new scheduler runs,
+# so a power cut or a kill that skips this function still brings the old scheduler back at the next start.
+# This must not look at the exit status: when the shell is ended by a signal (Ctrl-C, a dropped SSH session, kill) the
+# status seen here is 0. NEW_SCHEDULER_UP is set on every path that ends well.
 on_exit() {
-  local rc="$1"
-  if (( rc != 0 )) && [[ "$LEGACY_STOPPED" == 1 && "$NEW_SCHEDULER_UP" != 1 ]]; then
+  if [[ "$LEGACY_STOPPED" == 1 && "$NEW_SCHEDULER_UP" != 1 ]]; then
     local unit
     for unit in pihole-bahrain.service pihole-bahrain-lists.timer; do
-      [[ -f "$UNIT_DIR/$unit" ]] && systemctl enable --now "$unit" >/dev/null 2>&1
+      if [[ -f "$UNIT_DIR/$unit" ]]; then systemctl enable --now "$unit" >/dev/null 2>&1 || true; fi
     done
-    printf 'The previous version keeps running, so the rules still apply. Run the installer again after fixing the problem.\n' >&2
+    printf 'The previous version keeps running: its scheduler was started again. Run the installer again after fixing the problem.\n' >&2
   fi
   return 0
 }
 
 # An old "pihole-bahrain update" starts this installer with PB_NONINTERACTIVE and PB_REF; people also had PB_* in their
-# scripts. A SINKO_* variable of the same name always wins.
+# scripts. A SINKO_* variable of the same name always wins. Two are not handled here: the password (taken out of the
+# environment at the top of main) and the ref (load_settings must know that it came from the old installer).
 import_legacy_env() {
   local k old new
-  for k in PASSWORD HOSTNAME UPSTREAMS TIMEZONE LISTS_BASE REPO REF NONINTERACTIVE INTERFACE PIHOLE_INSTALLER TTY; do
+  for k in HOSTNAME UPSTREAMS TIMEZONE LISTS_BASE REPO NONINTERACTIVE INTERFACE PIHOLE_INSTALLER TTY; do
     old="PB_$k"; new="SINKO_$k"
     if [[ -n "${!old+x}" && -z "${!new+x}" ]]; then export "$new=${!old}"; fi
   done
@@ -191,22 +215,29 @@ preflight() {
   done
   if (( ${#missing[@]} )); then
     step "Installing ${missing[*]}"
-    { DEBIAN_FRONTEND=noninteractive apt-get update -qq </dev/null \
-        && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "${missing[@]}" </dev/null >/dev/null; } \
+    apt_install "${missing[@]}" \
       || die "Could not install ${missing[*]}. Check the internet connection and run the installer again."
   fi
+  # The box program is Python 3 (standard library only) and uses features of 3.9: say so at once, in one line, rather
+  # than failing with a traceback in the middle of the installation.
+  local pyver
+  pyver="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"
+  if [[ ! "$pyver" =~ ^([0-9]+)\.([0-9]+)$ ]] || (( BASH_REMATCH[1] < 3 || (BASH_REMATCH[1] == 3 && BASH_REMATCH[2] < 9) )); then
+    die "Sinko needs Python 3.9 or newer, and this system has ${pyver:-no working Python 3}. Use a newer system image (Debian 11 or newer, Ubuntu 20.04 or newer)."
+  fi
+  ok "Python $pyver"
   # The internet is checked where it is needed (fetching the release, installing Pi-hole): an offline
   # "sinko rollback" or an install from SINKO_SRC must keep working.
 }
 
 need_internet() {
-  curl -fsS --max-time 15 -o /dev/null https://github.com 2>/dev/null \
+  curl -fsS --proto '=https' --proto-redir '=https' --max-time 15 -o /dev/null https://github.com 2>/dev/null \
     || die "No internet connection (cannot reach github.com). Check the cable and the router, then run the installer again."
 }
 
 # ------------------------------------------------------------------ settings
 # What can be saved in /etc/sinko/config (and be overridden by an environment variable of the same name).
-SETTING_KEYS="HOSTNAME LISTS_BASE REPO REPO_SLUG REF IP RELEASE_BASE TELEMETRY TELEMETRY_URL MDNS OS_UPDATES"
+SETTING_KEYS="HOSTNAME LISTS_BASE REPO REPO_SLUG REF IP RELEASE_BASE RELEASE_API TELEMETRY TELEMETRY_URL MDNS OS_UPDATES"
 declare -A ENVV=() SAVED=() LEGACY=()   # environment, /etc/sinko/config, /etc/pihole-bahrain/config
 
 # Reads the KEY=value lines of a settings file (shell syntax, as write_settings writes it) into the associative array
@@ -250,6 +281,13 @@ points_at_old_repo() {  # URL
      || "$u" == *"raw.githubusercontent.com/iret33/pihole-bahrain/"* ]]
 }
 
+# Where releases and the counter are fetched from: https, or plain http only to this machine itself (the test servers
+# of the test suite). Plain http across a network would let anybody on it swap the download and its checksum together.
+secure_address_ok() {  # URL
+  [[ "$1" =~ ^https://[A-Za-z0-9._~:/@+%=-]+$ ]] \
+    || [[ "$1" =~ ^http://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]{1,5})?(/[A-Za-z0-9._~:/@+%=-]*)?$ ]]
+}
+
 # owner/name from a GitHub URL, or nothing.
 slug_of_repo() {
   local u="$1"
@@ -271,6 +309,10 @@ load_settings() {
     v="SINKO_$k"
     if [[ -n "${!v+x}" ]]; then ENVV[$k]="${!v}"; fi
   done
+  # The ref an old "pihole-bahrain update" passes on (PB_REF), unless SINKO_REF says otherwise. Remembered as such,
+  # because for the official project the value master that the old installer always wrote is not a choice (below).
+  ENV_REF_IS_LEGACY=0
+  if [[ -z "${ENVV[REF]+x}" && -n "${PB_REF+x}" ]]; then ENVV[REF]="$PB_REF"; ENV_REF_IS_LEGACY=1; fi
   read_settings_file "$CONF_FILE" SINKO_ SAVED
   read_settings_file "$LEGACY_CONF_DIR/config" PB_ LEGACY
 
@@ -303,25 +345,54 @@ load_settings() {
 
   SINKO_REF="$(env_value REF || kept_value REF || echo "$DEFAULT_REF")"
   [[ -n "$SINKO_REF" ]] || SINKO_REF="$DEFAULT_REF"
+  # pihole-bahrain 2.x wrote PB_REF=master for everybody, and its "update" command passes it on every time. For the
+  # official project that was never a choice: such a box must follow the releases. A SINKO_REF=master that somebody
+  # gave or saved (a developer), a fork, and every other old value (a version, another branch) stay as they are.
+  if [[ "$SINKO_REF" == master && "$SINKO_REPO_SLUG" == "$DEFAULT_SLUG" ]]; then
+    if env_value REF >/dev/null; then
+      if (( ENV_REF_IS_LEGACY )); then SINKO_REF=latest; fi
+    elif ! saved_value REF >/dev/null && [[ -n "${LEGACY[REF]+x}" ]]; then
+      SINKO_REF=latest
+    fi
+  fi
   if [[ ! "$SINKO_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,100}$ || "$SINKO_REF" == *..* ]]; then
     die "SINKO_REF '$SINKO_REF' is not a version or branch name (use latest, vX.Y.Z or a branch such as master)"
   fi
 
   # A saved list address that is just the default of the project saved with it was never a choice: it follows
-  # the project if that changes (a fork, a rename). Any other saved or given address stays.
+  # the project if that changes (a fork, a rename). Any other saved or given address stays, and that includes the
+  # address of the old project (raw.githubusercontent.com/iret33/pihole-bahrain/...): the lists are registered in
+  # Pi-hole under it, GitHub's rename redirect still serves them, and leaving the address alone means no list is deleted
+  # or registered again while a box moves to Sinko (a changed address would switch the blocking off until the next
+  # gravity run has downloaded every list under its new name).
   local kept_lists kept_slug
   kept_lists="$(kept_value LISTS_BASE || true)"
   kept_slug="$(saved_value REPO_SLUG || true)"
-  if [[ "$kept_lists" == "https://raw.githubusercontent.com/${kept_slug:-$DEFAULT_SLUG}/master/lists" ]] || points_at_old_repo "$kept_lists"; then
+  if [[ "$kept_lists" == "https://raw.githubusercontent.com/${kept_slug:-$DEFAULT_SLUG}/master/lists" ]]; then
     kept_lists=""
   fi
   SINKO_LISTS_BASE="$(env_value LISTS_BASE || echo "$kept_lists")"
   SINKO_LISTS_BASE="${SINKO_LISTS_BASE:-https://raw.githubusercontent.com/$SINKO_REPO_SLUG/master/lists}"
+  # A folder inside the old program folder (pihole-bahrain filled it itself, on every update) goes away with that
+  # folder at the end of the migration: the lists are read from the new program folder, which has the same files.
+  local lists_dir="${SINKO_LISTS_BASE#file://}"
+  lists_dir="${lists_dir%/}"
+  if [[ "$lists_dir" == "$LEGACY_APP" || "$lists_dir" == "$LEGACY_APP"/* ]]; then
+    SINKO_LISTS_BASE="$APP_DIR/lists"
+    ok "The lists are read from $APP_DIR/lists now (the old folder $LEGACY_APP is removed at the end)"
+  fi
+
+  # Where updates come from. Saved only when it is not the project's own address (see write_settings), so a mirror
+  # that was chosen once is not forgotten, and the default keeps following the project.
   SINKO_RELEASE_BASE="$(env_value RELEASE_BASE || saved_value RELEASE_BASE || true)"
   SINKO_RELEASE_BASE="${SINKO_RELEASE_BASE:-https://github.com/$SINKO_REPO_SLUG/releases}"
   SINKO_RELEASE_BASE="${SINKO_RELEASE_BASE%/}"
-  [[ "$SINKO_RELEASE_BASE" =~ ^https?://[A-Za-z0-9._~:/@+%=-]+$ ]] \
-    || die "SINKO_RELEASE_BASE '$SINKO_RELEASE_BASE' is not a web address (https://…)"
+  secure_address_ok "$SINKO_RELEASE_BASE" \
+    || die "SINKO_RELEASE_BASE '$SINKO_RELEASE_BASE' must be an https:// address (plain http is only accepted for this machine itself)"
+  SINKO_RELEASE_API="$(env_value RELEASE_API || saved_value RELEASE_API || true)"
+  SINKO_RELEASE_API="${SINKO_RELEASE_API:-https://api.github.com/repos/$SINKO_REPO_SLUG/releases/latest}"
+  secure_address_ok "$SINKO_RELEASE_API" \
+    || die "SINKO_RELEASE_API '$SINKO_RELEASE_API' must be an https:// address (plain http is only accepted for this machine itself)"
 
   # The anonymous counter: 1 (count this box), 0 (do not) or empty (nobody has been asked yet: the page asks later).
   # An answer given earlier is kept; only a variable or the question below changes it.
@@ -341,8 +412,8 @@ load_settings() {
   done
   # Where the counter lives. Empty = the CLI's built-in address; never invented here, only kept or given.
   SINKO_TELEMETRY_URL="$(env_value TELEMETRY_URL || saved_value TELEMETRY_URL || true)"
-  [[ -z "$SINKO_TELEMETRY_URL" || "$SINKO_TELEMETRY_URL" =~ ^https?://[A-Za-z0-9._~:/@+%=-]+$ ]] \
-    || die "SINKO_TELEMETRY_URL '$SINKO_TELEMETRY_URL' is not a web address (https://…)"
+  [[ -z "$SINKO_TELEMETRY_URL" ]] || secure_address_ok "$SINKO_TELEMETRY_URL" \
+    || die "SINKO_TELEMETRY_URL '$SINKO_TELEMETRY_URL' must be an https:// address (plain http is only accepted for this machine itself)"
 }
 
 # Interactive installs ask once whether this box may be counted. Nobody asked (no terminal, SINKO_NONINTERACTIVE=1)
@@ -404,8 +475,13 @@ tree_complete() {  # DIR
 # curl to a file. Returns 0 on HTTP 200, 1 on any other HTTP answer (the code is in HTTP_CODE), 2 when the server
 # could not be reached at all, 3 when the file is bigger than allowed.
 http_get() {  # url dest max-bytes
-  local rc=0
-  HTTP_CODE="$(curl -sSL --connect-timeout 15 --max-time 600 --max-filesize "$3" -o "$2" -w '%{http_code}' "$1" 2>/dev/null </dev/null)" || rc=$?
+  local rc=0 proto='=https'
+  # Only https, and no redirect to anything else (curl follows an https-to-http redirect unless told not to): the
+  # download and its checksum come from the same place, so plain http would let anybody on the way swap both. The
+  # one exception is a server on this machine itself (the test servers), which secure_address_ok lets through.
+  if [[ "$1" == http://* ]]; then proto='=http,https'; fi
+  HTTP_CODE="$(curl -sSL --proto "$proto" --proto-redir "$proto" --connect-timeout 15 --max-time 600 --max-filesize "$3" \
+    -o "$2" -w '%{http_code}' "$1" 2>/dev/null </dev/null)" || rc=$?
   if (( rc == 63 )); then HTTP_CODE=0; return 3; fi      # curl: larger than --max-filesize
   (( rc == 0 )) || { HTTP_CODE=0; return 2; }
   [[ "$HTTP_CODE" == 200 ]]
@@ -622,7 +698,7 @@ EOF
   if [[ -z "$installer" ]]; then
     need_internet
     installer="$tmp/basic-install.sh"
-    curl -fsSL https://install.pi-hole.net -o "$installer"
+    curl -fsSL --proto '=https' --proto-redir '=https' https://install.pi-hole.net -o "$installer"
   fi
   bash "$installer" --unattended </dev/null
   rm -rf "$tmp"
@@ -632,8 +708,10 @@ EOF
 
 # ------------------------------------------------------------------ migration from pihole-bahrain
 # Detected by the old folder, the old settings or the old units. The order is the one in docs/maintainers/architecture.md:
-# old scheduler stopped, new files, `sinko setup` (registers the lists under the new address and keeps groups, devices,
-# rules and state: Pi-hole objects keep their pb- names), new units, and only at the very end the old folders go.
+# new files, old scheduler stopped (stopped only: it stays enabled, so a power cut still brings it back), `sinko setup`
+# (keeps groups, devices, rules, state and the lists exactly as they are: Pi-hole objects keep their pb- names, and the
+# lists keep the address they were registered under), new units, and only after that the old units are disabled and
+# deleted; the old folders go at the very end.
 detect_legacy() {
   local unit
   if [[ -e "$LEGACY_APP" || -e "$LEGACY_CONF_DIR" ]]; then MIGRATING=1; fi
@@ -646,13 +724,15 @@ detect_legacy() {
   fi
 }
 
-# The old scheduler stops first, so two schedulers never work on the same Pi-hole groups. Its files stay until the new
-# scheduler runs: if the installer fails in between, on_exit starts the old one again.
+# The old scheduler stops before `sinko setup`, so two schedulers never work on the same Pi-hole groups. It is only
+# stopped, never disabled, until the new scheduler runs (remove_legacy_units disables it): if the installer fails or is
+# ended in between, on_exit starts it again, and if even that cannot run (power cut, kill -9) it is still enabled, so
+# the next boot brings it back.
 stop_legacy_scheduler() {
   (( MIGRATING )) || return 0
-  systemctl disable --now pihole-bahrain.service pihole-bahrain-lists.timer >/dev/null 2>&1 || true
   LEGACY_STOPPED=1
-  ok "Stopped the old scheduler"
+  systemctl stop pihole-bahrain.service pihole-bahrain-lists.timer >/dev/null 2>&1 || true
+  ok "Stopped the old scheduler (until the new one runs)"
 }
 
 # `sinko configure` replaces the name an earlier run put into Pi-hole and learns that name from the settings file, which
@@ -666,9 +746,11 @@ seed_config_from_legacy() {
   mv "$CONF_FILE.tmp" "$CONF_FILE"
 }
 
+# Only called once the new scheduler is enabled and running (install_services).
 remove_legacy_units() {
   (( MIGRATING )) || return 0
   local unit
+  systemctl disable --now pihole-bahrain.service pihole-bahrain-lists.timer >/dev/null 2>&1 || true
   for unit in "${LEGACY_UNITS[@]}"; do rm -f "$UNIT_DIR/$unit"; done
   systemctl daemon-reload
 }
@@ -682,26 +764,68 @@ finish_legacy_migration() {
     ln -sfn "$APP_DIR/bin/sinko" "$LEGACY_BIN"
     ok "The command is now called sinko; 'pihole-bahrain' still works as a shortcut for now."
   fi
+  # A box installed without a terminal got its generated parent password saved in the old settings folder, to be read
+  # once. That folder is about to go: it is the only record of the password, so it moves (root only, as before).
+  local old_pw="$LEGACY_CONF_DIR/initial-password" new_pw="$CONF_DIR/initial-password"
+  if [[ -f "$old_pw" && ! -e "$new_pw" ]]; then
+    install -d -m 755 "$CONF_DIR"
+    ( umask 077; cp -- "$old_pw" "$new_pw.tmp" )
+    chmod 600 "$new_pw.tmp"
+    mv -f "$new_pw.tmp" "$new_pw"
+    ok "The parent password saved by the old version is now in $new_pw (readable by root only). Read it, then delete the file."
+  fi
   rm -rf "$LEGACY_APP" "$LEGACY_CONF_DIR" || warn "Could not remove the old folders $LEGACY_APP and $LEGACY_CONF_DIR; they are not used any more."
   rm -f "$LEGACY_LOG"
   ok "Removed the old version's files"
 }
 
+# Every file the installer puts in place is written under a temporary name next to its place and then renamed over it
+# (GNU install alone deletes the old file first and then writes the new one in place, with nothing forcing the data to
+# disk: a power cut a few seconds later can leave a zero-length program, page or unit file, and on a ready-made box
+# nobody can log in to repair it). A rename is atomic, and ext4 writes the data of a renamed file out first, so after
+# any interruption each file is either the old one or the new one. systemd ignores the *.sinko-new names.
+put() {  # mode source destination
+  install -m "$1" "$2" "$3.sinko-new"
+  mv -f "$3.sinko-new" "$3"
+}
+
+# What an interrupted run can leave behind: temporary files, and a page folder swap that stopped half way.
+clean_interrupted_leftovers() {
+  find "$APP_DIR" -name '*.sinko-new' -delete 2>/dev/null || true
+  find "$UNIT_DIR" "$(dirname "$BIN_LINK")" -maxdepth 1 -name '*.sinko-new' -delete 2>/dev/null || true
+  rm -rf "$APP_DIR/src.tmp"
+}
+
 install_files() {
   step "Installing the parent page"
   install -d -m 755 "$APP_DIR" "$APP_DIR/bin" "$APP_DIR/lists" "$APP_DIR/tools" "$CONF_DIR" "$(dirname "$BIN_LINK")"
-  install -m 755 "$SRC/bin/sinko" "$APP_DIR/bin/sinko"
-  rm -f "$APP_DIR"/lists/*.txt
-  install -m 644 "$SRC"/lists/*.txt "$SRC/lists/services.json" "$APP_DIR/lists/"
-  install -m 644 "$SRC/VERSION" "$APP_DIR/VERSION"
-  install -m 755 "$SRC/uninstall.sh" "$APP_DIR/uninstall.sh"
-  # The ready-made image tools. A git checkout holds other scripts too (release build, …): only these two belong on a box.
-  rm -f "$APP_DIR"/tools/*.sh
-  local tool
-  for tool in seal.sh firstboot.sh; do
-    if [[ -f "$SRC/tools/$tool" ]]; then install -m 755 "$SRC/tools/$tool" "$APP_DIR/tools/$tool"; fi
+  clean_interrupted_leftovers
+  put 755 "$SRC/bin/sinko" "$APP_DIR/bin/sinko"
+  # The lists: the new files go in first, and only the ones this release no longer has are deleted (the program reads
+  # services.json and every list at start: they must never be missing).
+  local f name
+  for f in "$SRC"/lists/*.txt "$SRC/lists/services.json"; do put 644 "$f" "$APP_DIR/lists/$(basename "$f")"; done
+  for f in "$APP_DIR"/lists/*.txt; do
+    [[ -e "$f" && ! -f "$SRC/lists/$(basename "$f")" ]] && rm -f "$f"
   done
-  ln -sfn "$APP_DIR/bin/sinko" "$BIN_LINK"
+  put 644 "$SRC/VERSION" "$APP_DIR/VERSION"
+  put 755 "$SRC/uninstall.sh" "$APP_DIR/uninstall.sh"
+  # The licence texts stay with the program (docs/selling.md tells sellers where they are), whatever happens to the source copy.
+  for name in LICENSE NOTICE; do
+    if [[ -f "$SRC/$name" ]]; then put 644 "$SRC/$name" "$APP_DIR/$name"; fi
+  done
+  if [[ -f "$SRC/lists/LICENSE" ]]; then put 644 "$SRC/lists/LICENSE" "$APP_DIR/lists/LICENSE"; fi
+  # The ready-made image tools. A git checkout holds other scripts too (release build, …): only these two belong on a box.
+  for name in seal.sh firstboot.sh; do
+    if [[ -f "$SRC/tools/$name" ]]; then put 755 "$SRC/tools/$name" "$APP_DIR/tools/$name"; fi
+  done
+  for f in "$APP_DIR"/tools/*.sh; do
+    [[ -e "$f" ]] || continue
+    name="$(basename "$f")"
+    if [[ ( "$name" != seal.sh && "$name" != firstboot.sh ) || ! -f "$SRC/tools/$name" ]]; then rm -f "$f"; fi
+  done
+  ln -sfn "$APP_DIR/bin/sinko" "$BIN_LINK.sinko-new"
+  mv -T -f "$BIN_LINK.sinko-new" "$BIN_LINK"
   # Runtime data (update results, the counter's id, rollback copies): root only, never reachable from the page.
   install -d -m 700 "$STATE_DIR" "$STATE_DIR/cache"
   chmod 700 "$STATE_DIR"
@@ -709,19 +833,22 @@ install_files() {
   WEBROOT="$(pihole-FTL --config -q webserver.paths.webroot 2>/dev/null || true)"
   WEBROOT="${WEBROOT:-$R/var/www/html}"
   install -d -m 755 "$WEBROOT"
-  if [[ -f "$WEBROOT/index.html" ]] && ! grep -q 'name="generator" content="sinko"' "$WEBROOT/index.html"; then
-    if grep -q 'parental/app.js' "$WEBROOT/index.html"; then
-      rm -f "$WEBROOT/index.html"             # page from the 1.x installer
-    elif grep -q 'name="generator" content="pihole-bahrain"' "$WEBROOT/index.html"; then
-      rm -f "$WEBROOT/index.html"             # page from pihole-bahrain 2.x: ours, not a page somebody made
-    elif [[ ! -f "$WEBROOT/index.html.pb-backup" ]]; then
-      mv "$WEBROOT/index.html" "$WEBROOT/index.html.pb-backup"
-      ok "Kept the previous start page as index.html.pb-backup"
-    fi
+  find "$WEBROOT" -maxdepth 1 -name '*.sinko-new' -delete 2>/dev/null || true
+  # A page folder swap (below) that was interrupted between its two renames: put the page that worked back.
+  if [[ -d "$WEBROOT/pb.old" ]]; then
+    if [[ -d "$WEBROOT/pb" ]]; then rm -rf "$WEBROOT/pb.old"; else mv "$WEBROOT/pb.old" "$WEBROOT/pb"; fi
+  fi
+  # A start page that is not ours is kept as a backup. The ones the 1.x installer and pihole-bahrain 2.x made are ours,
+  # and the new page replaces them below by rename: the page is never missing in between.
+  if [[ -f "$WEBROOT/index.html" ]] && ! grep -q 'name="generator" content="sinko"' "$WEBROOT/index.html" \
+     && ! grep -q 'parental/app.js' "$WEBROOT/index.html" \
+     && ! grep -q 'name="generator" content="pihole-bahrain"' "$WEBROOT/index.html" \
+     && [[ ! -f "$WEBROOT/index.html.pb-backup" ]]; then
+    mv "$WEBROOT/index.html" "$WEBROOT/index.html.pb-backup"
+    ok "Kept the previous start page as index.html.pb-backup"
   fi
   rm -rf "$WEBROOT/parental" "$WEBROOT/pb.new"
   install -d -m 755 "$WEBROOT/pb.new" "$WEBROOT/pb.new/fonts"
-  local f
   for f in "$SRC"/web/*; do
     [[ -f "$f" && "$(basename "$f")" != index.html ]] && install -m 644 "$f" "$WEBROOT/pb.new/"
   done
@@ -730,9 +857,20 @@ install_files() {
   "$BIN_LINK" domain-map >"$WEBROOT/pb.new/domains.json"   # domain -> app, so the page can name what a device opens
   chmod 644 "$WEBROOT/pb.new/domains.json"
   install -m 644 "$SRC/VERSION" "$WEBROOT/pb.new/version.txt"
-  rm -rf "$WEBROOT/pb"
+  # The scheduler's box.json (written by the box program, refreshed every few minutes) goes along, so the page does not
+  # miss it in the seconds until it is written again below.
+  if [[ -f "$WEBROOT/pb/box.json" ]]; then cp -p "$WEBROOT/pb/box.json" "$WEBROOT/pb.new/box.json" || true; fi
+  # The swap: everything of the new page is on disk before the folders change names (sync), and there are two renames,
+  # so a crash leaves the old page, the new page, or (between the renames) pb.old, which the next run puts back.
+  sync
+  if [[ -d "$WEBROOT/pb" ]]; then mv "$WEBROOT/pb" "$WEBROOT/pb.old"; fi
   mv "$WEBROOT/pb.new" "$WEBROOT/pb"
-  install -m 644 "$SRC/web/index.html" "$WEBROOT/index.html"
+  rm -rf "$WEBROOT/pb.old"
+  put 644 "$SRC/web/index.html" "$WEBROOT/index.html"
+  # The page reads /pb/box.json (address, version, heartbeat) at once: write it now, not at the scheduler's next round.
+  # An older program has no such command: that is not an error.
+  "$BIN_LINK" box-info --write >/dev/null 2>&1 || warn "The box information file was not written now (the scheduler writes it a few minutes after it starts)."
+  sync
   ok "Page installed in $WEBROOT"
 }
 
@@ -746,6 +884,14 @@ write_settings() {
     printf 'SINKO_REPO_SLUG=%q\n' "$SINKO_REPO_SLUG"
     printf 'SINKO_REF=%q\n' "$SINKO_REF"
     printf 'SINKO_IP=%q\n' "$IPV4"
+    # An update source that is not the project's own (a mirror): the box program reads these too, so every later update
+    # and update check goes there and not back to GitHub. The project's own addresses are not saved: they follow it.
+    if [[ "$SINKO_RELEASE_BASE" != "https://github.com/$SINKO_REPO_SLUG/releases" ]]; then
+      printf 'SINKO_RELEASE_BASE=%q\n' "$SINKO_RELEASE_BASE"
+    fi
+    if [[ "$SINKO_RELEASE_API" != "https://api.github.com/repos/$SINKO_REPO_SLUG/releases/latest" ]]; then
+      printf 'SINKO_RELEASE_API=%q\n' "$SINKO_RELEASE_API"
+    fi
     # Only what somebody answered or set: no answer is not "no".
     if [[ -n "$SINKO_TELEMETRY" ]]; then printf 'SINKO_TELEMETRY=%q\n' "$SINKO_TELEMETRY"; fi
     if [[ -n "$SINKO_TELEMETRY_URL" ]]; then printf 'SINKO_TELEMETRY_URL=%q\n' "$SINKO_TELEMETRY_URL"; fi
@@ -783,12 +929,92 @@ a = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
 print("-".join("".join(secrets.choice(a) for _ in range(4)) for _ in range(3)))'
 }
 
+# Gives Pi-hole the password through its API (PATCH /api/config on this machine): the password is read from standard
+# input and travels in the request body. Pi-hole's command line has no other way that hides it: `pihole-FTL --config
+# webserver.api.password <pw>` takes it only as an argument (and `pihole setpassword`, with or without an argument,
+# ends in that same command), and every local user can read a running program's arguments in /proc/<pid>/cmdline.
+# Prints nothing and exits 1 when it did not work (apply_password then falls back to `pihole setpassword`).
+IFS= read -r -d '' SET_PASSWORD_PY <<'PYEOF' || true
+import json, os, ssl, sys, urllib.error, urllib.request
+
+ports, password = sys.argv[1], sys.stdin.readline().rstrip("\n")
+base = os.environ.get("SINKO_API_URL", "").rstrip("/")
+if not base:                      # the same choice the sinko program makes: an http port first, then an https one
+    http = https = ""
+    for tok in ports.split(","):
+        tok = tok.strip()
+        if tok.startswith("["):   # an IPv6 binding
+            continue
+        tok = tok.rsplit(":", 1)[-1]
+        digits = "".join(c for c in tok if c.isdigit())
+        flags = tok[len(digits):]
+        if not digits or "r" in flags:
+            continue
+        if "s" in flags:
+            https = https or digits
+        else:
+            http = http or digits
+    base = "http://127.0.0.1:" + http if http else ("https://127.0.0.1:" + https if https else "http://127.0.0.1:80")
+ctx = ssl.create_default_context()    # a self-signed certificate of this machine, reached on 127.0.0.1 only
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+
+
+def call(method, path, body=None, sid=None):
+    req = urllib.request.Request(base + path, method=method, data=None if body is None else json.dumps(body).encode())
+    req.add_header("Accept", "application/json")
+    if body is not None:
+        req.add_header("Content-Type", "application/json")
+    if sid:
+        req.add_header("sid", sid)
+    try:
+        with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
+            raw = resp.read()
+            return resp.status, (json.loads(raw) if raw else {})
+    except urllib.error.HTTPError as err:
+        return err.code, {}
+
+
+try:
+    status, answer = call("GET", "/api/auth")
+    session = answer.get("session", {}) if isinstance(answer, dict) else {}
+    sid = None
+    if not (status == 200 and session.get("valid")):      # a password is set: sign in the way the sinko program does
+        with open(os.environ.get("SINKO_CLI_PW_FILE", "/etc/pihole/cli_pw"), encoding="utf-8") as fh:
+            cli_pw = fh.read().strip()
+        status, answer = call("POST", "/api/auth", {"password": cli_pw})
+        session = answer.get("session", {}) if isinstance(answer, dict) else {}
+        if status != 200 or not session.get("valid"):
+            sys.exit(1)
+        sid = session.get("sid")
+    status, _ = call("PATCH", "/api/config", {"config": {"webserver": {"api": {"password": password}}}}, sid)
+    sys.exit(0 if status == 200 else 1)
+except (OSError, ValueError):
+    sys.exit(1)
+PYEOF
+set_password_via_api() {  # ports (the webserver.port setting); the password on standard input
+  python3 -c "$SET_PASSWORD_PY" "$1"
+}
+
+# Sets Pi-hole's password and checks that it took.
+apply_password() {  # password
+  local pw="$1" ports
+  ports="$(pihole-FTL --config webserver.port 2>/dev/null | head -n1 || true)"
+  if set_password_via_api "${ports:-80}" <<<"$pw" && "$BIN_LINK" password-state >/dev/null 2>&1; then
+    return 0
+  fi
+  # Pi-hole's own command: it works wherever the API route did not (the password is briefly in its arguments).
+  echo "  (Pi-hole's API did not take the password: using 'pihole setpassword')"
+  pihole setpassword "$pw" >/dev/null
+}
+
 set_password() {
   step "Parent password"
   local state=0
   "$BIN_LINK" password-state || state=$?
   SHOW_PASSWORD=""
-  local pw="${SINKO_PASSWORD:-}"
+  local pw="$PASSWORD_GIVEN"
+  PASSWORD_GIVEN=""
   if [[ -z "$pw" && $state -eq 0 ]]; then
     ok "Keeping the existing password"
     return
@@ -807,7 +1033,9 @@ set_password() {
     SHOW_PASSWORD="$pw"
   fi
   (( ${#pw} >= 8 )) || die "SINKO_PASSWORD must be at least 8 characters."
-  pihole setpassword "$pw" >/dev/null
+  [[ "$pw" != *[[:cntrl:]]* ]] || die "SINKO_PASSWORD must not contain line breaks or other control characters."
+  apply_password "$pw"
+  pw=""
   ok "Password set"
 }
 
@@ -816,14 +1044,16 @@ install_services() {
   local pihole_bin
   pihole_bin="$(command -v pihole || echo /usr/local/bin/pihole)"
   install -d -m 755 "$UNIT_DIR"
-  install -m 644 "$SRC/systemd/sinko.service" "$UNIT_DIR/sinko.service"
-  install -m 644 "$SRC/systemd/sinko-lists.timer" "$UNIT_DIR/sinko-lists.timer"
-  sed "s|@PIHOLE@|$pihole_bin|g" "$SRC/systemd/sinko-lists.service" >"$UNIT_DIR/sinko-lists.service"
-  chmod 644 "$UNIT_DIR/sinko-lists.service"
+  put 644 "$SRC/systemd/sinko.service" "$UNIT_DIR/sinko.service"
+  put 644 "$SRC/systemd/sinko-lists.timer" "$UNIT_DIR/sinko-lists.timer"
+  sed "s|@PIHOLE@|$pihole_bin|g" "$SRC/systemd/sinko-lists.service" >"$UNIT_DIR/sinko-lists.service.sinko-new"
+  chmod 644 "$UNIT_DIR/sinko-lists.service.sinko-new"
+  mv -f "$UNIT_DIR/sinko-lists.service.sinko-new" "$UNIT_DIR/sinko-lists.service"
   # Installed on every box but enabled only by tools/seal.sh, on the ready-made image (it is also guarded by a flag file).
   if [[ -f "$SRC/systemd/sinko-firstboot.service" ]]; then
-    install -m 644 "$SRC/systemd/sinko-firstboot.service" "$UNIT_DIR/sinko-firstboot.service"
+    put 644 "$SRC/systemd/sinko-firstboot.service" "$UNIT_DIR/sinko-firstboot.service"
   fi
+  sync                          # the unit files are on disk before systemd reads them (an empty unit file is a masked unit)
   systemctl daemon-reload
   systemctl enable --quiet sinko.service sinko-lists.timer
   systemctl restart sinko.service
@@ -833,15 +1063,27 @@ install_services() {
   ok "Scheduler running; lists refresh every night"
 }
 
-# Optional extras. Neither is allowed to fail the installation: the children's rules do not depend on them.
+# Packages. `apt-get update` fails when any one of the package sources cannot be reached (Armbian adds its own next to
+# Debian's), even though the lists of the others were refreshed and the package is there: so a failed update is a
+# warning, and the installation goes on when apt has a version to install.
 APT_UPDATED=0
+apt_has_candidate() {  # package: is there a version apt can install?
+  local version
+  version="$(apt-cache policy "$1" 2>/dev/null | awk '/^ *Candidate:/ {print $2; exit}')"
+  [[ -n "$version" && "$version" != "(none)" ]]
+}
 apt_install() {  # package... : 0 when installed
   if (( ! APT_UPDATED )); then
-    DEBIAN_FRONTEND=noninteractive apt-get update -qq </dev/null || return 1
     APT_UPDATED=1
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq </dev/null \
+      || warn "apt could not refresh all its package lists (a package source may be unreachable). Going on with the lists it has."
   fi
+  local p
+  for p in "$@"; do apt_has_candidate "$p" || return 1; done
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "$@" </dev/null >/dev/null
 }
+
+# Optional extras. Neither is allowed to fail the installation: the children's rules do not depend on them.
 
 # avahi-daemon makes the box answer to <hostname>.local, so the page opens by a name that never changes even when the
 # router hands out another address. An avahi that is already installed is left exactly as it is.
