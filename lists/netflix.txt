@@ -1,4 +1,4 @@
-! Title: nay / netflix
+! Title: sinko / netflix
 ! Format: Adblock-style, one ||domain^ per line
 ||netflix.ca^
 ||netflix.com.edgesuite.net^

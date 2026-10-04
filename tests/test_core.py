@@ -10,7 +10,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 LISTS = os.path.join(ROOT, "lists")
 
-loader = importlib.machinery.SourceFileLoader("pb", os.path.join(ROOT, "bin", "nay"))
+loader = importlib.machinery.SourceFileLoader("pb", os.path.join(ROOT, "bin", "sinko"))
 spec = importlib.util.spec_from_loader("pb", loader)
 pb = importlib.util.module_from_spec(spec)
 loader.exec_module(pb)
@@ -266,7 +266,7 @@ class PureTests(unittest.TestCase):
         for ports, want in cases.items():
             with mock.patch.object(pb, "ftl_config", return_value=ports), \
                     mock.patch.dict(os.environ, {}, clear=False):
-                os.environ.pop("NAY_API_URL", None)
+                os.environ.pop("SINKO_API_URL", None)
                 self.assertEqual(pb.discover_base_url(), want, ports)
 
     def test_cli_array_and_hosts(self):
@@ -279,14 +279,14 @@ class PureTests(unittest.TestCase):
     def test_config_file_and_list_base(self):
         import tempfile
         with tempfile.NamedTemporaryFile("w", delete=False) as fh:
-            fh.write("# comment\nNAY_LISTS_BASE='https://cdn.example/lists/'\nNAY_HOSTNAME=family.lan\n")
+            fh.write("# comment\nSINKO_LISTS_BASE='https://cdn.example/lists/'\nSINKO_HOSTNAME=family.lan\n")
         try:
             conf = pb.read_config(fh.name)
         finally:
             os.remove(fh.name)
-        self.assertEqual(conf["NAY_HOSTNAME"], "family.lan")
+        self.assertEqual(conf["SINKO_HOSTNAME"], "family.lan")
         with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("NAY_LISTS_BASE", None)
+            os.environ.pop("SINKO_LISTS_BASE", None)
             self.assertEqual(pb.lists_base(conf), "https://cdn.example/lists")
             self.assertEqual(pb.lists_base({}), pb.DEFAULT_LISTS_BASE)
         self.assertEqual(pb.list_address("x", "/opt/l"), "file:///opt/l/x.txt")

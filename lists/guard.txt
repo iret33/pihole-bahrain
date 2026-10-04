@@ -1,4 +1,4 @@
-! Title: nay / guard
+! Title: sinko / guard
 ! Format: Adblock-style, one ||domain^ per line
 ||cloudflare-dns.com^
 ||dns-family.adguard.com^

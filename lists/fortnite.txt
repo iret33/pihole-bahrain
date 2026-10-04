@@ -1,4 +1,4 @@
-! Title: nay / fortnite
+! Title: sinko / fortnite
 ! Format: Adblock-style, one ||domain^ per line
 ||epicgames.com^
 ||epicgames.dev^

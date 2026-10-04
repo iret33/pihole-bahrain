@@ -1,4 +1,4 @@
-! Title: nay / minecraft
+! Title: sinko / minecraft
 ! Format: Adblock-style, one ||domain^ per line
 ||minecraft-services.net^
 ||minecraft.net^

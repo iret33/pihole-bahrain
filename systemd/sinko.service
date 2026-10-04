@@ -1,12 +1,12 @@
 [Unit]
-Description=Nay scheduler (nay timers and bedtime)
-Documentation=https://github.com/iret33/nay
+Description=Sinko scheduler (sinko timers and bedtime)
+Documentation=https://github.com/iret33/sinko
 After=pihole-FTL.service network-online.target
 Wants=pihole-FTL.service network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /opt/nay/bin/nay run
+ExecStart=/usr/bin/python3 /opt/sinko/bin/sinko run
 Restart=always
 RestartSec=10
 NoNewPrivileges=yes

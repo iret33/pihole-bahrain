@@ -1,5 +1,5 @@
 [Unit]
-Description=Nightly refresh of Nay block lists
+Description=Nightly refresh of Sinko block lists
 
 [Timer]
 OnCalendar=*-*-* 03:30

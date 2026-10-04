@@ -1,4 +1,4 @@
-! Title: nay / facebook
+! Title: sinko / facebook
 ! Format: Adblock-style, one ||domain^ per line
 ||accountkit.com^
 ||facebook.com^

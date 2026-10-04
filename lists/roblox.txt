@@ -1,4 +1,4 @@
-! Title: nay / roblox
+! Title: sinko / roblox
 ! Format: Adblock-style, one ||domain^ per line
 ||blox.com^
 ||rbx.cn^

@@ -23,7 +23,7 @@ ap.add_argument("--shots", default=None)
 args = ap.parse_args()
 
 httpd, store = mock_pihole.serve(0, os.path.join(ROOT, "web"))
-loader = importlib.machinery.SourceFileLoader("pb", os.path.join(ROOT, "bin", "nay"))
+loader = importlib.machinery.SourceFileLoader("pb", os.path.join(ROOT, "bin", "sinko"))
 spec = importlib.util.spec_from_loader("pb", loader)
 pb = importlib.util.module_from_spec(spec)
 loader.exec_module(pb)

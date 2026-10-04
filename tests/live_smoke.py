@@ -25,7 +25,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--shots", default=None)
 args = ap.parse_args()
 
-loader = importlib.machinery.SourceFileLoader("pb", os.path.join(ROOT, "bin", "nay"))
+loader = importlib.machinery.SourceFileLoader("pb", os.path.join(ROOT, "bin", "sinko"))
 spec = importlib.util.spec_from_loader("pb", loader)
 pb = importlib.util.module_from_spec(spec)
 loader.exec_module(pb)

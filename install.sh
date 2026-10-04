@@ -1,39 +1,39 @@
 #!/usr/bin/env bash
-# Nay — installer and updater.
+# Sinko — installer and updater.
 #
-#   curl -fsSL https://raw.githubusercontent.com/iret33/nay/master/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/iret33/sinko/master/install.sh | sudo bash
 #
 # Installs Pi-hole v6 (if missing, fully unattended), the parent page, the
 # scheduler service and the service block lists. Safe to run again: it then
 # updates everything and keeps your password, devices and rules.
 #
-# Optional settings (environment variables, e.g. `curl … | sudo NAY_PASSWORD=… bash`):
-#   NAY_PASSWORD        parent password. Otherwise you are asked (or one is generated).
-#   NAY_HOSTNAME        local name for the page, default family.lan ("none" to skip)
-#   NAY_UPSTREAMS       upstream DNS for a NEW Pi-hole, default 1.1.1.3,1.0.0.3
+# Optional settings (environment variables, e.g. `curl … | sudo SINKO_PASSWORD=… bash`):
+#   SINKO_PASSWORD        parent password. Otherwise you are asked (or one is generated).
+#   SINKO_HOSTNAME        local name for the page, default family.lan ("none" to skip)
+#   SINKO_UPSTREAMS       upstream DNS for a NEW Pi-hole, default 1.1.1.3,1.0.0.3
 #                      (Cloudflare for Families: also blocks malware and adult sites)
-#   NAY_TIMEZONE        e.g. Asia/Bahrain. Default: Asia/Bahrain if the system is on UTC.
-#   NAY_LISTS_BASE      where Pi-hole downloads the service lists
-#   NAY_REPO, NAY_REF    git source, default this repository, branch master
-#   NAY_NONINTERACTIVE  1 = never prompt
+#   SINKO_TIMEZONE        e.g. Asia/Bahrain. Default: Asia/Bahrain if the system is on UTC.
+#   SINKO_LISTS_BASE      where Pi-hole downloads the service lists
+#   SINKO_REPO, SINKO_REF    git source, default this repository, branch master
+#   SINKO_NONINTERACTIVE  1 = never prompt
 set -Eeuo pipefail
 shopt -s inherit_errexit   # also stop on failures inside $(…), e.g. a failed download
 
 main() {
   # ---------------------------------------------------------------- constants
-  local R="${NAY_ROOT:-}"                        # test hook: install under a fake root
-  APP_DIR="$R/opt/nay"
-  CONF_DIR="$R/etc/nay"
+  local R="${SINKO_ROOT:-}"                        # test hook: install under a fake root
+  APP_DIR="$R/opt/sinko"
+  CONF_DIR="$R/etc/sinko"
   CONF_FILE="$CONF_DIR/config"
   TOML="$R/etc/pihole/pihole.toml"
   UNIT_DIR="$R/etc/systemd/system"
-  BIN_LINK="$R/usr/local/bin/nay"
-  LOG_FILE="$R/var/log/nay-install.log"
-  DEFAULT_REPO="https://github.com/iret33/nay.git"
+  BIN_LINK="$R/usr/local/bin/sinko"
+  LOG_FILE="$R/var/log/sinko-install.log"
+  DEFAULT_REPO="https://github.com/iret33/sinko.git"
   DEFAULT_REF="master"
 
   mkdir -p "$(dirname "$LOG_FILE")"
-  if [[ "${NAY_REEXEC:-}" != 1 ]]; then
+  if [[ "${SINKO_REEXEC:-}" != 1 ]]; then
     # Older versions printed the generated parent password into this log. Remove such lines now,
     # while nothing has the file open: sed -i replaces the file, so doing it after tee has opened
     # it would send the rest of this run into a deleted file. Then keep the log root-only.
@@ -46,15 +46,15 @@ main() {
   fi
   trap 'on_error $LINENO' ERR
   echo
-  echo "=== nay installer — $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
+  echo "=== sinko installer — $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
 
   preflight
   local src
   src="$(locate_source)"
-  if [[ "${NAY_REEXEC:-}" != 1 && "$src" == "$APP_DIR/src" && -f "$src/install.sh" ]]; then
+  if [[ "${SINKO_REEXEC:-}" != 1 && "$src" == "$APP_DIR/src" && -f "$src/install.sh" ]]; then
     # Always run the installer that ships with the code we are installing.
     step "Starting the installer from the downloaded version"
-    NAY_REEXEC=1 exec bash "$src/install.sh"
+    SINKO_REEXEC=1 exec bash "$src/install.sh"
   fi
   SRC="$src"
   VERSION="$(cat "$SRC/VERSION" 2>/dev/null || echo unknown)"
@@ -73,7 +73,7 @@ main() {
   ok "Pi-hole is set up"
   install_services
   step "Final check"
-  "$BIN_LINK" doctor || warn "Some checks failed — see above. Run 'sudo nay doctor' again later."
+  "$BIN_LINK" doctor || warn "Some checks failed — see above. Run 'sudo sinko doctor' again later."
   summary
   show_generated_password
 }
@@ -88,8 +88,8 @@ on_error() {
   printf '\n%sInstallation failed%s (line %s). Full log: %s\n' "$RD" "$N" "$1" "$LOG_FILE" >&2
   printf 'It is safe to run the installer again after fixing the problem.\n' >&2
 }
-TTY_DEV="${NAY_TTY:-/dev/tty}"      # the terminal; NAY_TTY is a test hook
-can_prompt() { [[ "${NAY_NONINTERACTIVE:-}" != 1 ]] && { : <"$TTY_DEV"; } 2>/dev/null; }
+TTY_DEV="${SINKO_TTY:-/dev/tty}"      # the terminal; SINKO_TTY is a test hook
+can_prompt() { [[ "${SINKO_NONINTERACTIVE:-}" != 1 ]] && { : <"$TTY_DEV"; } 2>/dev/null; }
 has_tty() { { : >>"$TTY_DEV"; } 2>/dev/null; }
 
 # ------------------------------------------------------------------ steps
@@ -112,7 +112,7 @@ preflight() {
   esac
   command -v systemctl >/dev/null || die "systemd is required."
   local free_kb
-  free_kb="$(df -Pk "${NAY_ROOT:-/}" | awk 'NR==2 {print $4}')"
+  free_kb="$(df -Pk "${SINKO_ROOT:-/}" | awk 'NR==2 {print $4}')"
   (( free_kb > 1024 * 1024 )) || die "At least 1 GB of free disk space is needed."
   ok "Disk space: $(( free_kb / 1024 )) MB free"
 
@@ -135,15 +135,15 @@ locate_source() {
   if [[ -n "$self" && -f "$self" ]]; then
     dir="$(cd "$(dirname "$self")" && pwd)"
   fi
-  if [[ -n "$dir" && -f "$dir/bin/nay" && -d "$dir/lists" && -d "$dir/web" ]]; then
+  if [[ -n "$dir" && -f "$dir/bin/sinko" && -d "$dir/lists" && -d "$dir/web" ]]; then
     echo "$dir"
     return
   fi
   # Started through curl | bash: fetch the code.
-  local repo="${NAY_REPO:-$DEFAULT_REPO}" ref="${NAY_REF:-$DEFAULT_REF}"
+  local repo="${SINKO_REPO:-$DEFAULT_REPO}" ref="${SINKO_REF:-$DEFAULT_REF}"
   local dest="$APP_DIR/src"
   {
-    step "Downloading nay ($ref)"
+    step "Downloading sinko ($ref)"
     mkdir -p "$APP_DIR"
     rm -rf "$dest.tmp"
     git clone --quiet --depth 1 --branch "$ref" "$repo" "$dest.tmp"
@@ -156,26 +156,26 @@ locate_source() {
 
 load_settings() {
   # Precedence: environment > saved config > defaults.
-  local env_hostname="${NAY_HOSTNAME-__unset__}" env_lists="${NAY_LISTS_BASE:-}"
-  local env_repo="${NAY_REPO:-}" env_ref="${NAY_REF:-}"
+  local env_hostname="${SINKO_HOSTNAME-__unset__}" env_lists="${SINKO_LISTS_BASE:-}"
+  local env_repo="${SINKO_REPO:-}" env_ref="${SINKO_REF:-}"
   if [[ -f "$CONF_FILE" ]]; then
     # shellcheck disable=SC1090
     . "$CONF_FILE"
   fi
-  [[ "$env_hostname" != "__unset__" ]] && NAY_HOSTNAME="$env_hostname"
-  NAY_HOSTNAME="${NAY_HOSTNAME-family.lan}"
-  [[ "$NAY_HOSTNAME" == none ]] && NAY_HOSTNAME=""
-  if [[ -n "$NAY_HOSTNAME" && ! "$NAY_HOSTNAME" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; then
-    die "NAY_HOSTNAME '$NAY_HOSTNAME' is not a valid name like family.lan"
+  [[ "$env_hostname" != "__unset__" ]] && SINKO_HOSTNAME="$env_hostname"
+  SINKO_HOSTNAME="${SINKO_HOSTNAME-family.lan}"
+  [[ "$SINKO_HOSTNAME" == none ]] && SINKO_HOSTNAME=""
+  if [[ -n "$SINKO_HOSTNAME" && ! "$SINKO_HOSTNAME" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; then
+    die "SINKO_HOSTNAME '$SINKO_HOSTNAME' is not a valid name like family.lan"
   fi
-  NAY_LISTS_BASE="${env_lists:-${NAY_LISTS_BASE:-https://raw.githubusercontent.com/iret33/nay/master/lists}}"
-  NAY_REPO="${env_repo:-${NAY_REPO:-$DEFAULT_REPO}}"
-  NAY_REF="${env_ref:-${NAY_REF:-$DEFAULT_REF}}"
+  SINKO_LISTS_BASE="${env_lists:-${SINKO_LISTS_BASE:-https://raw.githubusercontent.com/iret33/sinko/master/lists}}"
+  SINKO_REPO="${env_repo:-${SINKO_REPO:-$DEFAULT_REPO}}"
+  SINKO_REF="${env_ref:-${SINKO_REF:-$DEFAULT_REF}}"
 }
 
 detect_network() {
   step "Checking the network"
-  IFACE="${NAY_INTERFACE:-$(ip -4 route show default 2>/dev/null | awk '{for (i=1;i<NF;i++) if ($i=="dev") {print $(i+1); exit}}')}"
+  IFACE="${SINKO_INTERFACE:-$(ip -4 route show default 2>/dev/null | awk '{for (i=1;i<NF;i++) if ($i=="dev") {print $(i+1); exit}}')}"
   [[ -n "$IFACE" ]] || die "No network connection with a default route. Plug in the Ethernet cable."
   local line
   line="$(ip -4 -o addr show dev "$IFACE" scope global | head -n1)"
@@ -206,16 +206,16 @@ install_pihole() {
   fi
   if [[ ! -f "$TOML" ]]; then
     # A config file makes Pi-hole's --unattended mode skip every dialog.
-    local up="${NAY_UPSTREAMS:-1.1.1.3,1.0.0.3}" list="" u
+    local up="${SINKO_UPSTREAMS:-1.1.1.3,1.0.0.3}" list="" u
     IFS=',' read -r -a ups <<<"$up"
     for u in "${ups[@]}"; do
       u="${u// /}"
-      [[ "$u" =~ ^[0-9A-Fa-f:.#]+$ ]] || die "Invalid NAY_UPSTREAMS entry: $u"
+      [[ "$u" =~ ^[0-9A-Fa-f:.#]+$ ]] || die "Invalid SINKO_UPSTREAMS entry: $u"
       list+="${list:+, }\"$u\""
     done
     mkdir -p "$(dirname "$TOML")"
     cat >"$TOML" <<EOF
-# Pre-seeded by nay for an unattended Pi-hole install.
+# Pre-seeded by sinko for an unattended Pi-hole install.
 [dns]
   upstreams = [ $list ]
   interface = "$IFACE"
@@ -236,7 +236,7 @@ EOF
   step "Installing Pi-hole (this takes a few minutes)"
   local tmp installer
   tmp="$(mktemp -d)"
-  installer="${NAY_PIHOLE_INSTALLER:-}"
+  installer="${SINKO_PIHOLE_INSTALLER:-}"
   if [[ -z "$installer" ]]; then
     installer="$tmp/basic-install.sh"
     curl -fsSL https://install.pi-hole.net -o "$installer"
@@ -250,17 +250,17 @@ EOF
 install_files() {
   step "Installing the parent page"
   install -d -m 755 "$APP_DIR" "$APP_DIR/bin" "$APP_DIR/lists" "$CONF_DIR" "$(dirname "$BIN_LINK")"
-  install -m 755 "$SRC/bin/nay" "$APP_DIR/bin/nay"
+  install -m 755 "$SRC/bin/sinko" "$APP_DIR/bin/sinko"
   rm -f "$APP_DIR"/lists/*.txt
   install -m 644 "$SRC"/lists/*.txt "$SRC/lists/services.json" "$APP_DIR/lists/"
   install -m 644 "$SRC/VERSION" "$APP_DIR/VERSION"
   install -m 755 "$SRC/uninstall.sh" "$APP_DIR/uninstall.sh"
-  ln -sfn "$APP_DIR/bin/nay" "$BIN_LINK"
+  ln -sfn "$APP_DIR/bin/sinko" "$BIN_LINK"
 
   WEBROOT="$(pihole-FTL --config -q webserver.paths.webroot 2>/dev/null || true)"
   WEBROOT="${WEBROOT:-$R/var/www/html}"
   install -d -m 755 "$WEBROOT"
-  if [[ -f "$WEBROOT/index.html" ]] && ! grep -q 'name="generator" content="nay"' "$WEBROOT/index.html"; then
+  if [[ -f "$WEBROOT/index.html" ]] && ! grep -q 'name="generator" content="sinko"' "$WEBROOT/index.html"; then
     if grep -q 'parental/app.js' "$WEBROOT/index.html"; then
       rm -f "$WEBROOT/index.html"             # page from the 1.x installer
     elif [[ ! -f "$WEBROOT/index.html.pb-backup" ]]; then
@@ -288,12 +288,12 @@ install_files() {
 write_settings() {
   local tmp="$CONF_FILE.tmp"
   {
-    echo "# nay settings. Re-run the installer after editing."
-    printf 'NAY_HOSTNAME=%q\n' "$NAY_HOSTNAME"
-    printf 'NAY_LISTS_BASE=%q\n' "$NAY_LISTS_BASE"
-    printf 'NAY_REPO=%q\n' "$NAY_REPO"
-    printf 'NAY_REF=%q\n' "$NAY_REF"
-    printf 'NAY_IP=%q\n' "$IPV4"
+    echo "# sinko settings. Re-run the installer after editing."
+    printf 'SINKO_HOSTNAME=%q\n' "$SINKO_HOSTNAME"
+    printf 'SINKO_LISTS_BASE=%q\n' "$SINKO_LISTS_BASE"
+    printf 'SINKO_REPO=%q\n' "$SINKO_REPO"
+    printf 'SINKO_REF=%q\n' "$SINKO_REF"
+    printf 'SINKO_IP=%q\n' "$IPV4"
   } >"$tmp"
   chmod 644 "$tmp"
   mv "$tmp" "$CONF_FILE"
@@ -301,7 +301,7 @@ write_settings() {
 
 set_timezone() {
   command -v timedatectl >/dev/null || return 0
-  local current want="${NAY_TIMEZONE:-}"
+  local current want="${SINKO_TIMEZONE:-}"
   current="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
   if [[ -z "$want" ]]; then
     case "$current" in ""|UTC|Etc/UTC|Universal|Etc/Universal|GMT|Etc/GMT) want="Asia/Bahrain" ;; *) return 0 ;; esac
@@ -316,8 +316,8 @@ set_timezone() {
 
 configure_pihole() {
   step "Applying Pi-hole settings"
-  "$BIN_LINK" configure --ip "$IPV4" --hostname "$NAY_HOSTNAME"   # "" removes the name
-  ok "Parent page enabled at http://$IPV4/${NAY_HOSTNAME:+ and http://$NAY_HOSTNAME/}"
+  "$BIN_LINK" configure --ip "$IPV4" --hostname "$SINKO_HOSTNAME"   # "" removes the name
+  ok "Parent page enabled at http://$IPV4/${SINKO_HOSTNAME:+ and http://$SINKO_HOSTNAME/}"
 }
 
 gen_password() {
@@ -331,7 +331,7 @@ set_password() {
   local state=0
   "$BIN_LINK" password-state || state=$?
   SHOW_PASSWORD=""
-  local pw="${NAY_PASSWORD:-}"
+  local pw="${SINKO_PASSWORD:-}"
   if [[ -z "$pw" && $state -eq 0 ]]; then
     ok "Keeping the existing password"
     return
@@ -349,7 +349,7 @@ set_password() {
     pw="$(gen_password)"
     SHOW_PASSWORD="$pw"
   fi
-  (( ${#pw} >= 8 )) || die "NAY_PASSWORD must be at least 8 characters."
+  (( ${#pw} >= 8 )) || die "SINKO_PASSWORD must be at least 8 characters."
   pihole setpassword "$pw" >/dev/null
   ok "Password set"
 }
@@ -359,14 +359,14 @@ install_services() {
   local pihole_bin
   pihole_bin="$(command -v pihole || echo /usr/local/bin/pihole)"
   install -d -m 755 "$UNIT_DIR"
-  install -m 644 "$SRC/systemd/nay.service" "$UNIT_DIR/nay.service"
-  install -m 644 "$SRC/systemd/nay-lists.timer" "$UNIT_DIR/nay-lists.timer"
-  sed "s|@PIHOLE@|$pihole_bin|g" "$SRC/systemd/nay-lists.service" >"$UNIT_DIR/nay-lists.service"
-  chmod 644 "$UNIT_DIR/nay-lists.service"
+  install -m 644 "$SRC/systemd/sinko.service" "$UNIT_DIR/sinko.service"
+  install -m 644 "$SRC/systemd/sinko-lists.timer" "$UNIT_DIR/sinko-lists.timer"
+  sed "s|@PIHOLE@|$pihole_bin|g" "$SRC/systemd/sinko-lists.service" >"$UNIT_DIR/sinko-lists.service"
+  chmod 644 "$UNIT_DIR/sinko-lists.service"
   systemctl daemon-reload
-  systemctl enable --quiet nay.service nay-lists.timer
-  systemctl restart nay.service
-  systemctl restart nay-lists.timer
+  systemctl enable --quiet sinko.service sinko-lists.timer
+  systemctl restart sinko.service
+  systemctl restart sinko-lists.timer
   ok "Scheduler running; lists refresh every night"
 }
 
@@ -390,10 +390,10 @@ summary() {
   local url="http://$IPV4/"
   cat <<EOF
 
-${G}${B}Nay is ready.${N}
+${G}${B}Sinko is ready.${N}
 
-  Parent page:   ${B}$url${N}${NAY_HOSTNAME:+
-                 or http://$NAY_HOSTNAME/ (after the router step below)}
+  Parent page:   ${B}$url${N}${SINKO_HOSTNAME:+
+                 or http://$SINKO_HOSTNAME/ (after the router step below)}
 EOF
   if [[ -n "${SHOW_PASSWORD:-}" ]]; then
     printf '  Password:      generated for you, shown below\n'
@@ -407,9 +407,9 @@ EOF
   3. Reserve $IPV4 for this device ("DHCP reservation" / "static lease").
   4. Restart Wi-Fi on the children's devices, then add them on the parent page.
 
-  Check the installation any time: sudo nay doctor
-  Update:                          sudo nay update
-  Remove:                          sudo /opt/nay/uninstall.sh
+  Check the installation any time: sudo sinko doctor
+  Update:                          sudo sinko update
+  Remove:                          sudo /opt/sinko/uninstall.sh
 EOF
 }
 

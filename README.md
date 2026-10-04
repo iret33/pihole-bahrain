@@ -1,4 +1,4 @@
-# Nay
+# Sinko
 
 A simple parental-controls page on top of [Pi-hole](https://pi-hole.net) v6,
 in Arabic and English. Parents can:
@@ -20,14 +20,14 @@ On a fresh Debian-based device (Armbian, Debian 12/13, Ubuntu 22.04+,
 Raspberry Pi OS) connected by Ethernet:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/iret33/nay/master/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/iret33/sinko/master/install.sh | sudo bash
 ```
 
 The installer:
 
 1. installs Pi-hole v6 if it is missing (fully unattended);
 2. asks for a parent password. If it cannot ask, it generates one and shows it on the screen only; with no screen at
-   all it saves it in `/etc/nay/initial-password` (readable by root only: read it, then delete the file).
+   all it saves it in `/etc/sinko/initial-password` (readable by root only: read it, then delete the file).
    The password is never written to the install log;
 3. installs the parent page at `http://<box-ip>/` (the Pi-hole admin stays at `/admin/`);
 4. creates the Pi-hole groups, rules and block lists;
@@ -43,17 +43,17 @@ update it first with `sudo pihole -up` (the installer stops and says so).
 ### Options
 
 Pass these as environment variables after `sudo`, for example
-`curl … | sudo NAY_PASSWORD='s3cret-pass' bash`.
+`curl … | sudo SINKO_PASSWORD='s3cret-pass' bash`.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `NAY_PASSWORD` | ask / generate | Parent password (also the Pi-hole admin password) |
-| `NAY_HOSTNAME` | `family.lan` | Local name for the page; `none` to skip |
-| `NAY_UPSTREAMS` | `1.1.1.3,1.0.0.3` | Upstream DNS for a new Pi-hole (Cloudflare for Families: also blocks malware and adult sites) |
-| `NAY_TIMEZONE` | `Asia/Bahrain` if the system is on UTC | Time zone used by bedtime |
-| `NAY_LISTS_BASE` | this repo's `lists/` on GitHub | Where Pi-hole downloads the service lists |
-| `NAY_REPO`, `NAY_REF` | this repo, `master` | Source to install from (use a tag for pinned releases) |
-| `NAY_NONINTERACTIVE` | – | `1` = never prompt |
+| `SINKO_PASSWORD` | ask / generate | Parent password (also the Pi-hole admin password) |
+| `SINKO_HOSTNAME` | `family.lan` | Local name for the page; `none` to skip |
+| `SINKO_UPSTREAMS` | `1.1.1.3,1.0.0.3` | Upstream DNS for a new Pi-hole (Cloudflare for Families: also blocks malware and adult sites) |
+| `SINKO_TIMEZONE` | `Asia/Bahrain` if the system is on UTC | Time zone used by bedtime |
+| `SINKO_LISTS_BASE` | this repo's `lists/` on GitHub | Where Pi-hole downloads the service lists |
+| `SINKO_REPO`, `SINKO_REF` | this repo, `master` | Source to install from (use a tag for pinned releases) |
+| `SINKO_NONINTERACTIVE` | – | `1` = never prompt |
 
 ### Last step: point the home network at the box
 
@@ -105,7 +105,7 @@ off, so:
 Parent's phone ──► http://box/  (index.html + /pb/app.js)
                         │  Pi-hole REST API (/api), signed in with the parent password
                         ▼
-                  Pi-hole FTL  ◄──── nay.service (timers, bedtime)
+                  Pi-hole FTL  ◄──── sinko.service (timers, bedtime)
                         │
 Child's device ──DNS──► │  blocked if the device is in an enabled pb-* group
 ```
@@ -120,7 +120,7 @@ Child's device ──DNS──► │  blocked if the device is in an enabled pb
 - `pb-offline` and `pb-paused` share one "block everything" rule, so
   "internet off" only affects children's devices, never the parents'.
 - Timer and bedtime settings are stored as JSON in the description of the
-  disabled group `pb-state`. The page writes them; `nay run`
+  disabled group `pb-state`. The page writes them; `sinko run`
   (a systemd service) enforces them every 15 seconds.
 - Devices are added by MAC address when Pi-hole knows it (stable across IP
   changes), otherwise by IP address. An IPv6-only entry is not offered, because
@@ -157,7 +157,7 @@ away (the chevron remembers its state). At most about 3 packets a second are dra
 The picture never changes a rule.
 
 - **Names.** An app is named only when its domain is in `pb/domains.json` (made at install time from the
-  block lists, `nay domain-map`); anything else is "A website". Raw domain names are never shown.
+  block lists, `sinko domain-map`); anything else is "A website". Raw domain names are never shown.
   A *stop* is credited to an app only when that app is blocked for the child it came from: an ad list also
   stops trackers on an allowed app's domain, and that reads "An unwanted site", never "Stopped Netflix". While the
   internet is off or a device is paused, a stop says that instead. A device is named for a stop only, never for an allowed lookup.
@@ -182,7 +182,7 @@ The picture never changes a rule.
 Pi-hole downloads the lists straight from this repository, so a change pushed
 to `master` reaches every box on its next nightly refresh (or immediately with
 `sudo pihole -g`). Adding a **new** service also needs the new code on the box:
-`sudo nay update`.
+`sudo sinko update`.
 
 To add a service: create `lists/<id>.txt`, add an entry to `services.json`
 (id, English and Arabic names, category, colour, whether Homework mode blocks
@@ -192,33 +192,33 @@ infrastructure such as `google.com`, `apple.com` or `akamaihd.net`.
 ## Commands on the box
 
 ```bash
-sudo nay doctor     # check the installation, and that DNS really reaches the box
-sudo nay diagnose   # why is a blocked app still working? (read-only report)
-sudo nay watch      # does a device's DNS reach the box? (turn its Wi-Fi off/on, open the app)
-sudo nay use-mac    # re-register children added by IP address under their MAC address
-sudo nay status     # current rules, devices, timer, bedtime (JSON)
-sudo nay update     # update to the latest version
-sudo nay setup      # re-create groups/lists if something was deleted
+sudo sinko doctor     # check the installation, and that DNS really reaches the box
+sudo sinko diagnose   # why is a blocked app still working? (read-only report)
+sudo sinko watch      # does a device's DNS reach the box? (turn its Wi-Fi off/on, open the app)
+sudo sinko use-mac    # re-register children added by IP address under their MAC address
+sudo sinko status     # current rules, devices, timer, bedtime (JSON)
+sudo sinko update     # update to the latest version
+sudo sinko setup      # re-create groups/lists if something was deleted
 sudo pihole setpassword        # change the parent password
-journalctl -u nay   # scheduler log
-sudo /opt/nay/uninstall.sh   # remove the add-on (Pi-hole stays)
+journalctl -u sinko   # scheduler log
+sudo /opt/sinko/uninstall.sh   # remove the add-on (Pi-hole stays)
 ```
 
-Files: code in `/opt/nay`, settings in `/etc/nay/config`,
+Files: code in `/opt/sinko`, settings in `/etc/sinko/config`,
 page in `/var/www/html/index.html` and `/var/www/html/pb/`, install log in
-`/var/log/nay-install.log`.
+`/var/log/sinko-install.log`.
 
 ## Troubleshooting
 
 **An app still works after it was blocked.** Go through these in order:
 
-1. `sudo nay doctor`. Every line should say `ok` or `info`. A `FIX` line
+1. `sudo sinko doctor`. Every line should say `ok` or `info`. A `FIX` line
    says what is wrong and what to do; a `WARN` line is advice (for example that a
    child's device has sent no DNS query for a day, or that the network uses IPv6).
-2. `sudo nay diagnose`. A read-only report that ends with the likely
+2. `sudo sinko diagnose`. A read-only report that ends with the likely
    causes, most likely first. It tests YouTube and Instagram; name other apps with
    `diagnose tiktok roblox`.
-3. `sudo nay watch`. Turn Wi-Fi off and on on the child's device, then open
+3. `sudo sinko watch`. Turn Wi-Fi off and on on the child's device, then open
    the app, or `m.youtube.com` in its **browser** (apps remember answers for a while).
    If no line appears, the device does not use the box for DNS. If it says "answered
    normally", no child rule matches that address.
@@ -231,7 +231,7 @@ The usual causes:
   or the phone uses Private DNS, a VPN or mobile data.
 - **Another client row overrides the child's** (see "Which rule applies to a device").
 - **The child was added by IP address** and the address changed. Run
-  `sudo nay use-mac` to re-register it by MAC.
+  `sudo sinko use-mac` to re-register it by MAC.
 
 **Searching the lists by hand.** Pi-hole stores these Adblock-style entries as
 `||youtube.com^`, not `youtube.com`, so searching for the bare domain finds nothing

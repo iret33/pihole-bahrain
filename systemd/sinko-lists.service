@@ -1,5 +1,5 @@
 [Unit]
-Description=Refresh Nay block lists (pihole -g)
+Description=Refresh Sinko block lists (pihole -g)
 After=pihole-FTL.service network-online.target
 Wants=network-online.target
 

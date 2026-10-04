@@ -1,4 +1,4 @@
-! Title: nay / telegram
+! Title: sinko / telegram
 ! Format: Adblock-style, one ||domain^ per line
 ||cdn-telegram.org^
 ||t.me^

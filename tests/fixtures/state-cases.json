@@ -1,5 +1,5 @@
 {
- "comment": "Shared by tests/test_state_contract.py (bin/nay parse_state) and tests/state-contract.test.js (web parseState): both must normalise every input to exactly this.",
+ "comment": "Shared by tests/test_state_contract.py (bin/sinko parse_state) and tests/state-contract.test.js (web parseState): both must normalise every input to exactly this.",
  "cases": [
   {
    "name": "empty string",
@@ -198,7 +198,7 @@
   },
   {
    "name": "a complete valid update block",
-   "input": "{\"update\": {\"auto\": true, \"request\": 1800000001234, \"checkRequest\": \"abc\", \"latest\": \"3.1.0\", \"notes\": \"https://github.com/iret33/nay/releases/tag/v3.1.0\", \"checked\": 1800000000, \"status\": \"running\", \"from\": \"3.0.0\", \"to\": \"3.1.0\", \"at\": 1800000100, \"error\": null}}",
+   "input": "{\"update\": {\"auto\": true, \"request\": 1800000001234, \"checkRequest\": \"abc\", \"latest\": \"3.1.0\", \"notes\": \"https://github.com/iret33/sinko/releases/tag/v3.1.0\", \"checked\": 1800000000, \"status\": \"running\", \"from\": \"3.0.0\", \"to\": \"3.1.0\", \"at\": 1800000100, \"error\": null}}",
    "expected": {
     "v": 1,
     "timer": null,
@@ -222,7 +222,7 @@
      "request": 1800000001234,
      "checkRequest": "abc",
      "latest": "3.1.0",
-     "notes": "https://github.com/iret33/nay/releases/tag/v3.1.0",
+     "notes": "https://github.com/iret33/sinko/releases/tag/v3.1.0",
      "checked": 1800000000,
      "status": "running",
      "from": "3.0.0",
@@ -386,7 +386,7 @@
   },
   {
    "name": "release notes link: only github.com releases pages",
-   "input": "{\"update\": {\"notes\": \"https://github.com/iret33/nay/releases\"}}",
+   "input": "{\"update\": {\"notes\": \"https://github.com/iret33/sinko/releases\"}}",
    "expected": {
     "v": 1,
     "timer": null,
@@ -410,7 +410,7 @@
      "request": null,
      "checkRequest": null,
      "latest": null,
-     "notes": "https://github.com/iret33/nay/releases",
+     "notes": "https://github.com/iret33/sinko/releases",
      "checked": 0,
      "status": "idle",
      "from": null,
@@ -433,7 +433,7 @@
   },
   {
    "name": "release notes link with extra path is refused",
-   "input": "{\"update\": {\"notes\": \"https://github.com/iret33/nay/releases/tag/v3.1.0/../../x\"}}",
+   "input": "{\"update\": {\"notes\": \"https://github.com/iret33/sinko/releases/tag/v3.1.0/../../x\"}}",
    "expected": {
     "v": 1,
     "timer": null,
@@ -480,7 +480,7 @@
   },
   {
    "name": "release notes link on another host is refused",
-   "input": "{\"update\": {\"notes\": \"https://github.com.evil.example/iret33/nay/releases\"}}",
+   "input": "{\"update\": {\"notes\": \"https://github.com.evil.example/iret33/sinko/releases\"}}",
    "expected": {
     "v": 1,
     "timer": null,

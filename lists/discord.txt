@@ -1,4 +1,4 @@
-! Title: nay / discord
+! Title: sinko / discord
 ! Format: Adblock-style, one ||domain^ per line
 ||airhorn.solutions^
 ||airhornbot.com^

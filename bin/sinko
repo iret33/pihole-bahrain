@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""nay — parental controls on top of Pi-hole v6.
+"""sinko — parental controls on top of Pi-hole v6.
 
 Commands
   setup        Create/refresh the Pi-hole groups, lists and rules this add-on uses.
@@ -50,11 +50,11 @@ import urllib.request
 
 VERSION = "2.2.0"
 
-APP_DIR = os.environ.get("NAY_APP_DIR", "/opt/nay")
+APP_DIR = os.environ.get("SINKO_APP_DIR", "/opt/sinko")
 LISTS_DIR = os.path.join(APP_DIR, "lists")
-CONFIG_FILE = os.environ.get("NAY_CONFIG_FILE", "/etc/nay/config")
-DEFAULT_LISTS_BASE = "https://raw.githubusercontent.com/iret33/nay/master/lists"
-CLI_PW_FILE = os.environ.get("NAY_CLI_PW_FILE", "/etc/pihole/cli_pw")
+CONFIG_FILE = os.environ.get("SINKO_CONFIG_FILE", "/etc/sinko/config")
+DEFAULT_LISTS_BASE = "https://raw.githubusercontent.com/iret33/sinko/master/lists"
+CLI_PW_FILE = os.environ.get("SINKO_CLI_PW_FILE", "/etc/pihole/cli_pw")
 
 G_KIDS = "pb-kids"          # marker: membership == "this is a kid device"
 G_GUARD = "pb-guard"        # always-on anti-bypass list (DoH resolvers)
@@ -64,7 +64,7 @@ G_STATE = "pb-state"        # disabled; description holds shared JSON state
 SVC_PREFIX = "pb-svc-"
 LIST_COMMENT_PREFIX = "pb:"
 BLOCK_ALL_REGEX = "^.*$"
-BLOCK_ALL_COMMENT = "nay: blocks everything for offline/paused kid devices"
+BLOCK_ALL_COMMENT = "sinko: blocks everything for offline/paused kid devices"
 
 DEFAULT_GROUP = 0
 TICK_SECONDS = 15
@@ -89,7 +89,7 @@ NOTES_RE = re.compile(r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/rel
 UPDATE_STATUSES = ("idle", "running", "ok", "failed")
 POWER_ACTIONS = ("reboot", "poweroff")
 
-log = logging.getLogger("nay")
+log = logging.getLogger("sinko")
 
 
 # --------------------------------------------------------------------------- #
@@ -135,7 +135,7 @@ def lists_base(conf: dict | None = None) -> str:
     list changes automatically) or a local directory (served as file://).
     """
     conf = read_config() if conf is None else conf
-    base = os.environ.get("NAY_LISTS_BASE") or conf.get("NAY_LISTS_BASE") or DEFAULT_LISTS_BASE
+    base = os.environ.get("SINKO_LISTS_BASE") or conf.get("SINKO_LISTS_BASE") or DEFAULT_LISTS_BASE
     return base.rstrip("/")
 
 
@@ -294,7 +294,7 @@ def merged_hosts(current: list, ip: str, hostname: str) -> list:
 
 def discover_base_url() -> str:
     """Build a local API URL from webserver.port, e.g. '80o,443os,[::]:80o'."""
-    env = os.environ.get("NAY_API_URL")
+    env = os.environ.get("SINKO_API_URL")
     if env:
         return env.rstrip("/")
     try:
@@ -597,14 +597,14 @@ class Controller:
                 self.api.add_group(name, comment, enabled)
                 log.debug("created group %s", name)
 
-        ensure(G_KIDS, "nay: kid devices", True)
-        ensure(G_GUARD, "nay: stops DNS bypass on kid devices", True)
-        ensure(G_OFFLINE, "nay: internet off for kid devices", False)
-        ensure(G_PAUSED, "nay: paused kid devices", True)
+        ensure(G_KIDS, "sinko: kid devices", True)
+        ensure(G_GUARD, "sinko: stops DNS bypass on kid devices", True)
+        ensure(G_OFFLINE, "sinko: internet off for kid devices", False)
+        ensure(G_PAUSED, "sinko: paused kid devices", True)
         ensure(G_STATE, json.dumps(DEFAULT_STATE, separators=(",", ":")), False)
         wanted = {s["id"] for s in self.catalog["services"]}
         for s in self.catalog["services"]:
-            ensure(svc_group(s["id"]), "nay: " + s["name"], False)
+            ensure(svc_group(s["id"]), "sinko: " + s["name"], False)
 
         # pb-paused must stay enabled, pb-state must stay disabled.
         groups = self.api.group_map()
@@ -859,7 +859,7 @@ def cmd_setup(args) -> int:
             ctl.gravity()
     finally:
         api.logout()
-    print("nay: Pi-hole objects are up to date")
+    print("sinko: Pi-hole objects are up to date")
     return 0
 
 
@@ -1000,7 +1000,7 @@ def identity_warning(rep: Report, label: str, kid: dict, dev, groups: dict, clie
             row = winning_row(o, clients)
             if row is None or kid_id not in row.get("groups", []):
                 loose.append(other)
-        notes.append("its MAC address %s is known now, so it can be added by MAC (sudo nay use-mac %s)"
+        notes.append("its MAC address %s is known now, so it can be added by MAC (sudo sinko use-mac %s)"
                      % (mac, kid["client"]))
         if loose:
             notes.append("it also uses %s, which no rule covers" % ", ".join(loose))
@@ -1037,7 +1037,7 @@ def kid_checks(rep: Report, catalog: dict, groups: dict, clients: list, devices:
 # What `doctor` learns from the machine itself (tests substitute their own probe)
 # --------------------------------------------------------------------------- #
 class SystemProbe:
-    """Reads the routing table, IPv6 state and Pi-hole's log. Paths can be overridden with NAY_* variables."""
+    """Reads the routing table, IPv6 state and Pi-hole's log. Paths can be overridden with SINKO_* variables."""
 
     @staticmethod
     def _lines(env: str, default: str) -> list:
@@ -1050,7 +1050,7 @@ class SystemProbe:
     def default_gateway(self):
         """IPv4 address of the default gateway (usually the router), or None."""
         best = None
-        for line in self._lines("NAY_ROUTE_FILE", "/proc/net/route")[1:]:
+        for line in self._lines("SINKO_ROUTE_FILE", "/proc/net/route")[1:]:
             f = line.split()
             if len(f) < 8 or f[1] != "00000000" or not int(f[3], 16) & 0x2:      # default route via a gateway
                 continue
@@ -1062,14 +1062,14 @@ class SystemProbe:
     def ipv6_addresses(self) -> list:
         """(address, scope) of this box's IPv6 addresses; scope 0 means global."""
         out = []
-        for line in self._lines("NAY_IF_INET6_FILE", "/proc/net/if_inet6"):
+        for line in self._lines("SINKO_IF_INET6_FILE", "/proc/net/if_inet6"):
             f = line.split()
             if len(f) >= 6:
                 out.append((str(ipaddress.IPv6Address(int(f[0], 16))), int(f[3], 16)))
         return out
 
     def ipv6_default_route(self) -> bool:
-        for line in self._lines("NAY_IPV6_ROUTE_FILE", "/proc/net/ipv6_route"):
+        for line in self._lines("SINKO_IPV6_ROUTE_FILE", "/proc/net/ipv6_route"):
             f = line.split()
             if len(f) >= 10 and f[0] == "0" * 32 and f[1] == "00" and f[9] != "lo":
                 flags = int(f[8], 16)
@@ -1079,12 +1079,12 @@ class SystemProbe:
 
     def own_addresses(self) -> set:
         own = {"127.0.0.1", "::1"} | {a for a, _ in self.ipv6_addresses()}
-        if read_config().get("NAY_IP"):
-            own.add(read_config()["NAY_IP"])
+        if read_config().get("SINKO_IP"):
+            own.add(read_config()["SINKO_IP"])
         return own
 
     def ftl_log_tail(self, nbytes: int = 512 * 1024) -> str:
-        path = os.environ.get("NAY_FTL_LOG")
+        path = os.environ.get("SINKO_FTL_LOG")
         if not path:
             try:
                 path = ftl_config("files.log.ftl")
@@ -1225,8 +1225,8 @@ def cmd_doctor(args) -> int:
     try:
         rep.check(subprocess.run(["systemctl", "is-active", "--quiet", "pihole-FTL"]).returncode == 0,
                   "pihole-FTL service is running")
-        rep.check(subprocess.run(["systemctl", "is-active", "--quiet", "nay"]).returncode == 0,
-                  "nay scheduler is running")
+        rep.check(subprocess.run(["systemctl", "is-active", "--quiet", "sinko"]).returncode == 0,
+                  "sinko scheduler is running")
     except OSError:
         pass
     try:
@@ -1295,7 +1295,7 @@ def sql_rows(db: str, sql: str) -> list:
     PATH (tests, a development machine) the standard library's sqlite3 module reads the file instead.
     """
     exe = shutil.which("pihole-FTL")
-    if exe and os.environ.get("NAY_SQL_BACKEND") != "python":
+    if exe and os.environ.get("SINKO_SQL_BACKEND") != "python":
         try:
             out = subprocess.run([exe, "sqlite3", "-readonly", "-json", db, sql],
                                  capture_output=True, text=True, timeout=60)
@@ -1388,8 +1388,8 @@ def gather_diagnose(api: Api, catalog: dict, targets: list, now: float, sql=sql_
     except ApiError:
         facts["blocking"] = None
     facts["gateway"] = (probe or SystemProbe()).default_gateway()
-    gravity_db = db_path("NAY_GRAVITY_DB", "files.gravity", GRAVITY_DB)
-    ftl_db = db_path("NAY_FTL_DB", "files.database", FTL_DB)
+    gravity_db = db_path("SINKO_GRAVITY_DB", "files.gravity", GRAVITY_DB)
+    ftl_db = db_path("SINKO_FTL_DB", "files.database", FTL_DB)
 
     def query(db, text, what):
         try:
@@ -1473,17 +1473,17 @@ def diagnose_findings(facts: dict) -> list:
     for t in facts["targets"]:
         g, lst = t["group"], t["list"]
         if g is None:
-            found.append("%s: its group pb-svc-%s does not exist. Run: sudo nay setup" % (t["name"], t["id"]))
+            found.append("%s: its group pb-svc-%s does not exist. Run: sudo sinko setup" % (t["name"], t["id"]))
         elif not g.get("enabled"):
             found.append("%s: its group is disabled, which means NOT blocked. The toggle on the page did not take effect "
                          "(or a timer or bedtime changed it back)." % t["name"])
         if lst is None:
-            found.append("%s: its block list is not registered in Pi-hole. Run: sudo nay setup" % t["name"])
+            found.append("%s: its block list is not registered in Pi-hole. Run: sudo sinko setup" % t["name"])
         elif not lst.get("enabled"):
-            found.append("%s: its block list is disabled in Pi-hole. Run: sudo nay setup" % t["name"])
+            found.append("%s: its block list is disabled in Pi-hole. Run: sudo sinko setup" % t["name"])
         elif not lst.get("number"):
             found.append("%s: its block list holds 0 domains in gravity. Run: sudo pihole -g (and check that the list "
-                         "server is reachable: sudo nay doctor)" % t["name"])
+                         "server is reachable: sudo sinko doctor)" % t["name"])
         searched = {d: hits for d, hits in t["gravity"].items() if hits is not None}
         if searched and not any(searched.values()):
             found.append("%s: none of its domains (%s) is in gravity. Pi-hole stores them as ||domain^; run: sudo pihole -g"
@@ -1506,14 +1506,14 @@ def diagnose_findings(facts: dict) -> list:
                              "blocked for it. Remove that row in the Pi-hole admin under Clients (or give it the pb groups)."
                              % (k["label"], where, e["via"], names, apps, "is" if len(missing) == 1 else "are"))
             else:
-                found.append("%s%s: the groups Pi-hole applies (%s) lack %s, so %s %s not blocked for it. Run: sudo nay setup"
+                found.append("%s%s: the groups Pi-hole applies (%s) lack %s, so %s %s not blocked for it. Run: sudo sinko setup"
                              % (k["label"], where, names, ", ".join("pb-svc-" + t["id"] for t in missing), apps,
                                 "is" if len(missing) == 1 else "are"))
     seen = facts["sources_24h"]
     for k in facts["kids"]:
         if k["ips"] and seen and not any(ip in seen for ip in k["ips"]):
             found.append("%s: no DNS query from %s reached this box in the last 24 hours. The device is not using the box for "
-                         "DNS (router DNS setting, IPv6 DNS, Private DNS, a VPN or mobile data). Run: sudo nay watch"
+                         "DNS (router DNS setting, IPv6 DNS, Private DNS, a VPN or mobile data). Run: sudo sinko watch"
                          % (k["label"], ", ".join(k["ips"][:3])))
     gw = facts.get("gateway")
     if gw and facts["sources_1h"] and sum(facts["sources_1h"].values()) >= RELAY_MIN_QUERIES:
@@ -1527,11 +1527,11 @@ def diagnose_findings(facts: dict) -> list:
             if late:
                 who = ", ".join("%s (%d)" % (q["client"], q["n"]) for q in late[:4])
                 found.append("%s was still answered normally after its group last changed, from %s, although the rules look "
-                             "right. Run: sudo nay watch while opening it on the device." % (t["name"], who))
+                             "right. Run: sudo sinko watch while opening it on the device." % (t["name"], who))
     if not found and facts["errors"]:
         found.append("Nothing wrong found in what could be read, but some checks could not run (see 'Could not read' above).")
     elif not found:
-        found.append("Nothing wrong found on the box: the rules look right. Run: sudo nay watch, then open the app "
+        found.append("Nothing wrong found on the box: the rules look right. Run: sudo sinko watch, then open the app "
                      "on the child's device, to see whether its queries reach the box.")
     return found
 
@@ -1721,7 +1721,7 @@ def watch_summary(state: WatchState, kid_names: dict, minutes: float) -> list:
     out = []
     if not state.counts:
         out.append("No query for these apps reached the box in %g minute(s). The device is not using this box for DNS: "
-                   "check the router's DNS setting, IPv6 DNS, Private DNS, a VPN or mobile data (see: sudo nay doctor)."
+                   "check the router's DNS setting, IPv6 DNS, Private DNS, a VPN or mobile data (see: sudo sinko doctor)."
                    % minutes)
         return out
     for client, c in sorted(state.counts.items(), key=lambda x: -x[1]["queries"]):
@@ -1731,7 +1731,7 @@ def watch_summary(state: WatchState, kid_names: dict, minutes: float) -> list:
                       "y" if c["queries"] == 1 else "ies", ", ".join("%s %d" % kv for kv in sorted(c["services"].items())),
                       c["blocked"], c["answered"]))
         if c["answered"] and not c["blocked"]:
-            out.append("    -> answered normally: no child rule matches this address (%s). Check: sudo nay doctor"
+            out.append("    -> answered normally: no child rule matches this address (%s). Check: sudo sinko doctor"
                        % ("it is registered, so look for a row that overrides it" if who else "add it as a child device"))
         elif c["blocked"]:
             out.append("    -> blocking works for this address")
@@ -1759,7 +1759,7 @@ def cmd_diagnose(args) -> int:
         ids = {s["id"] for s in catalog["services"]}
         unknown = [s for s in args.services if s not in ids]
         if unknown:
-            print("nay: unknown service(s): %s (known: %s)" % (", ".join(unknown), ", ".join(sorted(ids))), file=sys.stderr)
+            print("sinko: unknown service(s): %s (known: %s)" % (", ".join(unknown), ", ".join(sorted(ids))), file=sys.stderr)
             return 1
         targets = args.services or [s for s in DEFAULT_DIAGNOSE_SERVICES if s in ids]
         facts = gather_diagnose(api, catalog, targets, time.time())
@@ -1774,10 +1774,10 @@ def cmd_watch(args) -> int:
     ids = {s["id"] for s in catalog["services"]}
     unknown = [s for s in args.service if s not in ids]
     if unknown:
-        print("nay: unknown service(s): %s" % ", ".join(unknown), file=sys.stderr)
+        print("sinko: unknown service(s): %s" % ", ".join(unknown), file=sys.stderr)
         return 1
     dmap = service_domain_map(catalog, only=set(args.service) or None)
-    path = db_path("NAY_DNSMASQ_LOG", "files.log.dnsmasq", DNSMASQ_LOG)
+    path = db_path("SINKO_DNSMASQ_LOG", "files.log.dnsmasq", DNSMASQ_LOG)
     logging_on, _ = ftl_try("dns.queryLogging")
     if logging_on == "false":
         print("Query logging is switched off, so there is nothing to watch. Turn it on: sudo pihole-FTL --config dns.queryLogging true")
@@ -1803,7 +1803,7 @@ def cmd_configure(args) -> int:
     ftl_set_config("webserver.api.cli_pw", "true")
     # The config file still holds the name added by the previous run (install.sh
     # rewrites it afterwards), so a renamed or removed name does not linger.
-    old = conf.get("NAY_HOSTNAME", "")
+    old = conf.get("SINKO_HOSTNAME", "")
     hostname = args.hostname if args.hostname is not None else old
     ours = {n for n in (old, hostname) if n}
     hosts = parse_cli_array(ftl_config("dns.hosts"))
@@ -1816,22 +1816,22 @@ def cmd_configure(args) -> int:
         ftl_set_config("dns.hosts", json.dumps(new))
     if args.disable_web:
         ftl_set_config("webserver.serve_all", "false")
-    print("nay: Pi-hole settings applied")
+    print("sinko: Pi-hole settings applied")
     return 0
 
 
 def cmd_update(args) -> int:
     conf = read_config()
     src = os.path.join(APP_DIR, "src")
-    repo = conf.get("NAY_REPO", "https://github.com/iret33/nay.git")
-    ref = args.ref or conf.get("NAY_REF", "master")
+    repo = conf.get("SINKO_REPO", "https://github.com/iret33/sinko.git")
+    ref = args.ref or conf.get("SINKO_REF", "master")
     if not os.path.isdir(os.path.join(src, ".git")):
         subprocess.run(["rm", "-rf", src], check=True)
         subprocess.run(["git", "clone", "--quiet", "--depth", "1", "--branch", ref, repo, src], check=True)
     else:
         subprocess.run(["git", "-C", src, "fetch", "--quiet", "--depth", "1", "origin", ref], check=True)
         subprocess.run(["git", "-C", src, "checkout", "--quiet", "--force", "FETCH_HEAD"], check=True)
-    env = dict(os.environ, NAY_REF=ref, NAY_NONINTERACTIVE="1")
+    env = dict(os.environ, SINKO_REF=ref, SINKO_NONINTERACTIVE="1")
     return subprocess.run(["bash", os.path.join(src, "install.sh")], env=env).returncode
 
 
@@ -1864,12 +1864,12 @@ def cmd_remove(args) -> int:
         Controller(api, load_catalog()).remove()
     finally:
         api.logout()
-    print("nay: removed its groups, lists, rules and kid devices from Pi-hole")
+    print("sinko: removed its groups, lists, rules and kid devices from Pi-hole")
     return 0
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="nay", description=__doc__.split("\n")[0])
+    parser = argparse.ArgumentParser(prog="sinko", description=__doc__.split("\n")[0])
     parser.add_argument("--version", action="version", version=VERSION)
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -1905,13 +1905,13 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(levelname)s %(message)s", stream=sys.stderr)
-    if os.geteuid() != 0 and "NAY_API_URL" not in os.environ:
-        print("nay: run as root (sudo)", file=sys.stderr)
+    if os.geteuid() != 0 and "SINKO_API_URL" not in os.environ:
+        print("sinko: run as root (sudo)", file=sys.stderr)
         return 1
     try:
         return args.fn(args)
     except ApiError as err:
-        print("nay: Pi-hole API error: %s" % err, file=sys.stderr)
+        print("sinko: Pi-hole API error: %s" % err, file=sys.stderr)
         return 2
 
 

@@ -1,4 +1,4 @@
-! Title: nay / pubg
+! Title: sinko / pubg
 ! Format: Adblock-style, one ||domain^ per line
 ||gpubgm.com^
 ||igamecj.com^

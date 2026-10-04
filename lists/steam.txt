@@ -1,4 +1,4 @@
-! Title: nay / steam
+! Title: sinko / steam
 ! Format: Adblock-style, one ||domain^ per line
 ||s.team^
 ||steam.com^

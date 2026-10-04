@@ -1,4 +1,4 @@
-! Title: nay / chatgpt
+! Title: sinko / chatgpt
 ! Format: Adblock-style, one ||domain^ per line
 ||chatgpt.com^
 ||oaistatic.com^

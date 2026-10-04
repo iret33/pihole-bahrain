@@ -1,4 +1,4 @@
-! Title: nay / x-twitter
+! Title: sinko / x-twitter
 ! Format: Adblock-style, one ||domain^ per line
 ||ads-twitter.com^
 ||cms-twdigitalassets.com^

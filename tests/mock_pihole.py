@@ -1,6 +1,6 @@
 """A small in-memory imitation of the Pi-hole v6 REST API.
 
-It implements only what nay uses, with the same URL shapes, payloads
+It implements only what sinko uses, with the same URL shapes, payloads
 and quirks as FTL (groups addressed by name, lists by address + ?type=,
 domains by /type/kind/domain, PUT keeps groups when "groups" is omitted,
 comment is cleared when omitted, etc.).
@@ -451,11 +451,11 @@ _CLI = []
 
 
 def load_cli():
-    """bin/nay as a module (for the catalog and the domain map)."""
+    """bin/sinko as a module (for the catalog and the domain map)."""
     if not _CLI:
         import importlib.machinery
         import importlib.util
-        loader = importlib.machinery.SourceFileLoader("pb_cli", os.path.join(HERE, "..", "bin", "nay"))
+        loader = importlib.machinery.SourceFileLoader("pb_cli", os.path.join(HERE, "..", "bin", "sinko"))
         spec = importlib.util.spec_from_loader("pb_cli", loader)
         mod = importlib.util.module_from_spec(spec)
         loader.exec_module(mod)
@@ -542,7 +542,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--web", default=None, help="directory with index.html/app.js (served at / and /pb/)")
-    ap.add_argument("--setup", action="store_true", help="run nay setup against the mock first")
+    ap.add_argument("--setup", action="store_true", help="run sinko setup against the mock first")
     ap.add_argument("--live", action="store_true", help="generate demo DNS traffic in the background")
     a = ap.parse_args()
     httpd, store = serve(a.port, a.web)
@@ -550,7 +550,7 @@ if __name__ == "__main__":
         import importlib.machinery
         import importlib.util
         here = os.path.dirname(os.path.abspath(__file__))
-        src = os.path.join(here, "..", "bin", "nay")
+        src = os.path.join(here, "..", "bin", "sinko")
         loader = importlib.machinery.SourceFileLoader("pb", src)
         spec = importlib.util.spec_from_loader("pb", loader)
         pb = importlib.util.module_from_spec(spec)

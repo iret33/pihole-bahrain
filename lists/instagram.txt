@@ -1,4 +1,4 @@
-! Title: nay / instagram
+! Title: sinko / instagram
 ! Format: Adblock-style, one ||domain^ per line
 ||cdninstagram.com^
 ||api.facebook.com^

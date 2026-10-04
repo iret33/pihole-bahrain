@@ -1,4 +1,4 @@
-! Title: nay / tiktok
+! Title: sinko / tiktok
 ! Format: Adblock-style, one ||domain^ per line
 ||amemv.com^
 ||bdurl.com^
