@@ -124,6 +124,7 @@ class AuthTests(MockCase):
         a.login()
         b.login()
         self.assertEqual(b.req("DELETE", "/api/auth")[0], 204)
+        self.assertEqual(self.store.deleted_sessions, [b.sid], "the mock remembers which session was deleted")
         self.assertEqual(a.json("GET", "/api/groups")[0], 200)
         self.assertEqual(b.json("GET", "/api/groups")[0], 401)
 

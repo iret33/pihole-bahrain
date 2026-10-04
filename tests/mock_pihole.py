@@ -83,6 +83,7 @@ class Store:
         self.totp_code = None             # a string: two-factor login is on and this is the current code
         self.max_sessions = None          # a number: POST /api/auth answers 429 once that many sessions are open
         self.password_changes = 0
+        self.deleted_sessions = []        # the session ids DELETE /api/auth was called for, in order
         # -- configuration (GET/PATCH /api/config) --
         self.config = {"dns": {"hosts": []}, "webserver": {"api": {"max_sessions": 16}}}
         # -- Teleporter --
@@ -372,6 +373,12 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):  # quiet
         pass
 
+    def handle(self):
+        try:
+            super().handle()
+        except (BrokenPipeError, ConnectionResetError):
+            pass                                    # the browser went away (a reload, a closed tab): not worth a traceback
+
     # ---------- helpers ----------
     def send(self, code, payload):
         body = json.dumps(payload).encode()
@@ -482,6 +489,7 @@ class Handler(BaseHTTPRequestHandler):
                     s.sessions.add(sid)
                     return self.send(200, self.session_json(True, sid=sid, validity=1800, message="correct password"))
                 if method == "DELETE":
+                    s.deleted_sessions.append(self.headers.get("sid"))
                     s.sessions.discard(self.headers.get("sid"))
                     return self.send(204, {})
             if not self.authed():

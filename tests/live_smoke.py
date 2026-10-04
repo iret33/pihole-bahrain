@@ -228,7 +228,11 @@ with sync_playwright() as p:
     expect(len(set(texts)) == 4, "each step has its own words")
     expect(page.locator(".node-dev .node-name").all_inner_texts() == ["Example phone", "Everyone else"], "examples come from an example phone, never from a real child: %s" % page.locator(".node-dev .node-name").all_inner_texts())
     shot(page, "live-tour.png")
-    expect((page.inner_text("#statChecked"), page.inner_text("#statStopped"), page.inner_text("#statShare")) == n0, "the tour changed no number")
+    n1 = (page.inner_text("#statChecked"), page.inner_text("#statStopped"), page.inner_text("#statShare"))
+    # The numbers cover the last 24 hours, so the seeded history rolls out of the window while the test runs: a number may go DOWN by a
+    # query or two. What an example must never do is push one UP.
+    c0, c1, s0, s1, p0, p1 = number(n0[0]), number(n1[0]), number(n0[1]), number(n1[1]), number(n0[2]), number(n1[2])
+    expect(0 <= c0 - c1 <= 3 and 0 <= s0 - s1 <= 3 and abs(p0 - p1) <= 0.3, "the tour added nothing to any number %s -> %s" % (n0, n1))
     page.click("#tourNext")                                # Done
     expect(page.locator("#liveTour").is_hidden(), "finishing the tour closes it")
     expect(page.evaluate("() => document.activeElement && document.activeElement.id") == "tourBtn", "and puts focus back on the button that opened it")
