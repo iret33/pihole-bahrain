@@ -4,92 +4,10 @@
 # the Pi-hole API by tests/mock_pihole.py, and files go under a temp "root".
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(dirname "$HERE")"
-WORK="$(mktemp -d)"
-ROOT="$WORK/root"
-STUBS="$WORK/stubs"
+# shellcheck source=tests/lib_stubs.sh
+. "$HERE/lib_stubs.sh"
 PORT="${PORT:-18080}"
-mkdir -p "$ROOT/etc/pihole" "$ROOT/var/www/html" "$STUBS"
-cleanup() { [[ -n "${MOCK_PID:-}" ]] && kill "$MOCK_PID" 2>/dev/null; [[ -n "${KEEP:-}" ]] || rm -rf "$WORK"; }
-trap cleanup EXIT
-fail() { echo "FAIL: $*" >&2; exit 1; }
-
-# ---------- stubs ----------
-cat >"$STUBS/ip" <<'EOF'
-#!/usr/bin/env bash
-case "$*" in
-  *"route show default"*) echo "default via 192.168.1.1 dev eth0 proto dhcp src 192.168.1.50 metric 100" ;;
-  *"addr show dev eth0"*) echo "2: eth0    inet 192.168.1.50/24 brd 192.168.1.255 scope global dynamic eth0" ;;
-esac
-EOF
-cat >"$STUBS/dpkg" <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
-cat >"$STUBS/systemctl" <<EOF
-#!/usr/bin/env bash
-echo "systemctl \$*" >>"$WORK/calls.log"
-exit 0
-EOF
-cat >"$STUBS/timedatectl" <<EOF
-#!/usr/bin/env bash
-if [[ "\$1" == show ]]; then cat "$WORK/tz" 2>/dev/null || echo Etc/UTC; exit 0; fi
-if [[ "\$1" == set-timezone ]]; then echo "\$2" >"$WORK/tz"; fi
-EOF
-# pihole-FTL --config [-q] key [value]  — backed by a JSON file
-cat >"$STUBS/pihole-FTL" <<EOF
-#!/usr/bin/env python3
-import json, os, sys
-db = "$WORK/ftl.json"
-conf = json.load(open(db)) if os.path.exists(db) else {
-    "webserver.serve_all": "false", "webserver.api.cli_pw": "true",
-    "webserver.paths.webroot": "$ROOT/var/www/html", "webserver.port": "80o,443os",
-    "dns.hosts": "[ 192.168.1.9 nas.lan ]", "resolver.macNames": "true", "dns.blocking.active": "true",
-    "files.log.ftl": "$WORK/FTL.log"}
-args = [a for a in sys.argv[1:] if a != "-q"]
-assert args[0] == "--config", args
-if len(args) == 2:
-    print(conf.get(args[1], ""))
-    # Like FTL: with -q, a true/false setting is also the exit status.
-    sys.exit(1 if "-q" in sys.argv and conf.get(args[1]) == "false" else 0)
-else:
-    val = args[2]
-    if args[1] == "dns.hosts":
-        items = json.loads(val)
-        val = "[ " + ", ".join(items) + " ]" if items else "[]"
-    conf[args[1]] = val
-    json.dump(conf, open(db, "w"))
-EOF
-cat >"$STUBS/pihole" <<EOF
-#!/usr/bin/env bash
-echo "pihole \$*" >>"$WORK/calls.log"
-EOF
-# The installer's internet check probes github.com; everything else is local.
-cat >"$STUBS/curl" <<EOF
-#!/usr/bin/env bash
-[[ "\$*" == *" https://github.com" ]] && exit 0
-exec "$(command -v curl)" "\$@"
-EOF
-chmod +x "$STUBS"/*
-
-# ---------- mock API ----------
-python3 - "$PORT" "$REPO" <<'EOF' &
-import sys, time
-sys.path.insert(0, sys.argv[2] + "/tests")
-import mock_pihole
-httpd, store = mock_pihole.serve(int(sys.argv[1]))
-while True:
-    time.sleep(3600)
-EOF
-MOCK_PID=$!
-echo test >"$WORK/cli_pw"
-for _ in $(seq 50); do curl -s -o /dev/null "http://127.0.0.1:$PORT/api/auth" && break; sleep 0.1; done
-
-export PATH="$STUBS:$PATH" SINKO_ROOT="$ROOT" SINKO_NONINTERACTIVE=1
-export SINKO_API_URL="http://127.0.0.1:$PORT" SINKO_CLI_PW_FILE="$WORK/cli_pw"
-export SINKO_APP_DIR="$ROOT/opt/sinko" SINKO_CONFIG_FILE="$ROOT/etc/sinko/config"
-touch "$ROOT/etc/pihole/pihole.toml"
-command -v pihole-FTL >/dev/null || fail "stub missing"
+fake_system_init
 
 # Pretend an old 1.x page is installed
 mkdir -p "$ROOT/var/www/html/parental"
@@ -182,11 +100,11 @@ mv "$WORK/toml.bak" "$ROOT/etc/pihole/pihole.toml"
 
 echo "--- the one-liner path: install.sh arrives on stdin, clones SINKO_REPO and runs itself again"
 THROW="$WORK/throwaway"; mkdir -p "$THROW"
-git -C "$REPO" ls-files -z | tar -C "$REPO" --null -T - -cf - | tar -x -C "$THROW"
+git -C "$REPO" ls-files -z --cached --others --exclude-standard | tar -C "$REPO" --null -T - -cf - | tar -x -C "$THROW"
 git -C "$THROW" init -q -b master && git -C "$THROW" add -A && git -C "$THROW" -c user.name=t -c user.email=t@t commit -qm test
 LOG="$ROOT/var/log/sinko-install.log"
 rm -rf "$ROOT/opt/sinko/src"
-SINKO_REPO="file://$THROW" bash <"$REPO/install.sh" >"$WORK/piped.out" 2>&1 || { cat "$WORK/piped.out"; fail "piped install.sh failed"; }
+SINKO_REPO="file://$THROW" SINKO_REF=master bash <"$REPO/install.sh" >"$WORK/piped.out" 2>&1 || { cat "$WORK/piped.out"; fail "piped install.sh failed"; }
 grep -q "Starting the installer from the downloaded version" "$WORK/piped.out" || fail "the piped run did not start the downloaded installer"
 grep -q "Installing version $(cat "$REPO/VERSION") from $ROOT/opt/sinko/src" "$WORK/piped.out" || fail "the downloaded copy was not the one installed"
 grep -q "Sinko is ready" "$WORK/piped.out" || fail "the piped run did not finish"
@@ -194,7 +112,7 @@ grep -q "Starting the installer from the downloaded version" "$LOG" || fail "the
 grep -q "Installing version" "$LOG" || fail "the install log lost the rest of the piped run (re-exec lost the log copy)"
 
 echo "--- a generated parent password never reaches the install log"
-set_auth() { curl -s -X POST "http://127.0.0.1:$PORT/__mock__/require_auth" -d "{\"value\": $1}" >/dev/null; }
+set_auth() { mock_auth "$1"; }
 LOG="$ROOT/var/log/sinko-install.log"
 last_password() { grep 'pihole setpassword' "$WORK/calls.log" | tail -1 | awk '{print $3}'; }
 printf '  Password:      OLD-OLD-OLD-OLD   (written by an older version)\n' >>"$LOG"
