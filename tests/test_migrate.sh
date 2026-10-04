@@ -4,7 +4,7 @@
 # (from inside /opt/pihole-bahrain/src, with PB_* variables), and the mock Pi-hole holding the family's objects.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=tests/lib_stubs.sh
+# shellcheck source=tests/lib_stubs.sh disable=SC1091
 . "$HERE/lib_stubs.sh"
 PORT="${PORT:-18082}"
 fake_system_init

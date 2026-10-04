@@ -86,7 +86,9 @@ homes() { printf '%s\n' "$R/root"; local d; for d in "$R"/home/*/; do [[ -d "$d"
 join_list() { local out="" p; for p in "$@"; do out+="${out:+, }$p"; done; printf '%s' "$out"; }
 
 # The logs: files to empty (so their owners and modes stay as the services expect) and rotated copies to delete.
+# Of Pi-hole's own files only the query database may be deleted, so even its rotated logs are emptied, never removed.
 is_rotated() {
+  case "$1" in "$R"/var/log/pihole/*) return 1 ;; esac
   case "$1" in
     *.gz|*.xz|*.bz2|*.zst|*.old|*.[0-9]|*.[0-9][0-9]|*-20[0-9][0-9][0-9][0-9][0-9][0-9]) return 0 ;;
     *) return 1 ;;
@@ -176,7 +178,7 @@ build_plan() {
     if is_rotated "$f"; then rotated=$(( rotated + 1 )); elif [[ -s "$f" ]]; then emptied=$(( emptied + 1 )); fi
   done < <(log_files)
   journals="$(archived_journals | grep -c . || true)"
-  add_action "Clear the logs: empty $emptied log files and delete $rotated rotated ones under $R/var/log (the files stay, with their owners), the journal's old files ($journals), downloaded package files" act_clean_logs
+  add_action "Clear the logs: empty $emptied log files (Pi-hole's too: they list every site that was asked for) and delete $rotated rotated ones under $R/var/log (the files stay, with their owners; Pi-hole's are only emptied), the journal's old files ($journals), downloaded package files" act_clean_logs
   if (( ZEROFILL )); then
     add_action "Write zeros over the free space and delete them, so the image compresses small (takes a while)" act_zerofill
   fi

@@ -33,7 +33,6 @@ ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
-ProtectClock=yes
 ProtectHostname=yes
 RestrictRealtime=yes
 LockPersonality=yes
@@ -42,7 +41,8 @@ SystemCallArchitectures=native
 # Deliberately NOT set (each would stop something above, and a failure would switch bedtime off without a sound):
 #   ProtectSystem=            the fallback update and `pihole-FTL --config` write under /opt, /etc, /usr/local, /var
 #   ReadWritePaths= ReadOnlyPaths= InaccessiblePaths=   only useful with ProtectSystem=, or would hide what is needed
-#   PrivateDevices=           the fallback update installs packages, whose scripts can need device nodes
+#   PrivateDevices= DevicePolicy= DeviceAllow= ProtectClock=   the fallback update installs packages, whose scripts can
+#                             need device nodes (ProtectClock= alone already closes the device policy)
 #   RestrictSUIDSGID=         the same: dpkg creates setuid files for some packages
 #   RestrictNamespaces=       package scripts and tools run by an update may unshare namespaces
 #   CapabilityBoundingSet= AmbientCapabilities=   Pi-hole's files belong to the pihole user (chown, kill, bypassing

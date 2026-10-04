@@ -3,7 +3,7 @@
 # developer path. Fake releases are served by a local web server; nothing here reaches the real GitHub.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=tests/lib_stubs.sh
+# shellcheck source=tests/lib_stubs.sh disable=SC1091
 . "$HERE/lib_stubs.sh"
 PORT="${PORT:-18081}"
 RELPORT="${RELPORT:-18091}"

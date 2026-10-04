@@ -41,7 +41,7 @@ for need in AF_UNIX AF_INET AF_INET6; do   # D-Bus (systemd-run, reboot), Pi-hol
 done
 for blocking in ProtectSystem ReadWritePaths ReadOnlyPaths InaccessiblePaths PrivateDevices RestrictSUIDSGID RestrictNamespaces \
                 CapabilityBoundingSet AmbientCapabilities User DynamicUser PrivateUsers SystemCallFilter MemoryDenyWriteExecute \
-                ProtectProc ProcSubset PrivateNetwork IPAddressDeny UMask; do
+                ProtectProc ProcSubset PrivateNetwork IPAddressDeny UMask ProtectClock DevicePolicy DeviceAllow; do
   [[ -z "$(active "$blocking")" ]] || fail "$blocking is set: it can stop systemd-run, pihole-FTL, the installer fallback or the writes to /etc/sinko and /var/lib/sinko"
   grep -q "^#.*$blocking" "$svc" || fail "$blocking is not set, and the unit does not say why"
 done

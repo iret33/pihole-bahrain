@@ -4,7 +4,7 @@
 # real system: every system command is a stub and every path is under the fake root.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=tests/lib_stubs.sh
+# shellcheck source=tests/lib_stubs.sh disable=SC1091
 . "$HERE/lib_stubs.sh"
 PORT="${PORT:-18083}"
 fake_system_init
@@ -57,6 +57,7 @@ make_golden() {
   for f in pihole-FTL.db pihole-FTL.db-wal pihole-FTL.db-shm gravity.db; do echo "database $f" >"$ROOT/etc/pihole/$f"; done
   echo "syslog lines" >"$ROOT/var/log/syslog"; echo "older" >"$ROOT/var/log/syslog.1"; echo gz >"$ROOT/var/log/auth.log.2.gz"
   echo "queries" >"$ROOT/var/log/pihole/pihole.log"; echo "ftl" >"$ROOT/var/log/pihole/FTL.log"; echo "login records" >"$ROOT/var/log/wtmp"
+  echo "older queries" >"$ROOT/var/log/pihole/pihole.log.1"; echo "oldest queries" >"$ROOT/var/log/pihole/pihole.log.2.gz"
   echo active >"$ROOT/var/log/journal/0123abcd/system.journal"; echo archived >"$ROOT/var/log/journal/0123abcd/system@0000000000000001-0000000000000002.journal"
   echo "install log" >"$ROOT/var/log/sinko-install.log"
   : >"$WORK/calls.log"
@@ -163,7 +164,8 @@ done
 [[ -f "$ROOT/var/lib/sinko/cache/sinko-1.0.0.tar.gz" ]] || fail "the rollback copy was removed"
 [[ -f "$ROOT/etc/machine-id" && ! -s "$ROOT/etc/machine-id" ]] || fail "the machine id must exist and be empty"
 [[ -L "$ROOT/var/lib/dbus/machine-id" && "$(readlink "$ROOT/var/lib/dbus/machine-id")" == ../../../etc/machine-id ]] || fail "/var/lib/dbus/machine-id still holds a copy"
-for emptied in var/log/syslog var/log/wtmp var/log/pihole/pihole.log var/log/pihole/FTL.log var/log/sinko-install.log; do
+for emptied in var/log/syslog var/log/wtmp var/log/pihole/pihole.log var/log/pihole/FTL.log var/log/sinko-install.log \
+               var/log/pihole/pihole.log.1 var/log/pihole/pihole.log.2.gz; do   # Pi-hole's rotated logs are emptied, never deleted
   [[ -f "$ROOT/$emptied" && ! -s "$ROOT/$emptied" ]] || fail "$emptied must stay as an empty file"
 done
 [[ ! -e "$ROOT/var/log/syslog.1" && ! -e "$ROOT/var/log/auth.log.2.gz" ]] || fail "rotated logs were left"

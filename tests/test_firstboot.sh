@@ -3,7 +3,7 @@
 # the seal, the golden unit's SSH keys and address still in place, and a different network around it now.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=tests/lib_stubs.sh
+# shellcheck source=tests/lib_stubs.sh disable=SC1091
 . "$HERE/lib_stubs.sh"
 PORT="${PORT:-18084}"
 fake_system_init
