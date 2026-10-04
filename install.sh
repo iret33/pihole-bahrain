@@ -276,6 +276,8 @@ install_files() {
   done
   install -m 644 "$SRC"/web/fonts/* "$WEBROOT/pb.new/fonts/"
   install -m 644 "$SRC/lists/services.json" "$WEBROOT/pb.new/services.json"
+  "$BIN_LINK" domain-map >"$WEBROOT/pb.new/domains.json"   # domain -> app, so the page can name what a device opens
+  chmod 644 "$WEBROOT/pb.new/domains.json"
   install -m 644 "$SRC/VERSION" "$WEBROOT/pb.new/version.txt"
   rm -rf "$WEBROOT/pb"
   mv "$WEBROOT/pb.new" "$WEBROOT/pb"

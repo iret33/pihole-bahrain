@@ -48,7 +48,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 
 APP_DIR = os.environ.get("PB_APP_DIR", "/opt/pihole-bahrain")
 LISTS_DIR = os.path.join(APP_DIR, "lists")
@@ -1544,6 +1544,15 @@ def service_domain_map(catalog: dict, lists_dir: str | None = None, only=None) -
     return out
 
 
+def build_domain_map(catalog: dict, lists_dir: str | None = None) -> dict:
+    """{"v": 1, "domains": {"youtube.com": "youtube", ...}}: which app a domain belongs to.
+
+    The parent page loads this (installed as pb/domains.json) so real queries can be shown as
+    "YouTube" instead of "googlevideo.com". Lookups match the longest domain suffix, like service_of().
+    """
+    return {"v": 1, "domains": dict(sorted(service_domain_map(catalog, lists_dir).items()))}
+
+
 def service_of(domain: str, dmap: dict):
     d = domain.lower().rstrip(".")
     while d:
@@ -1761,6 +1770,11 @@ def cmd_password_state(args) -> int:
     return 0 if api.password_set() else 3
 
 
+def cmd_domain_map(args) -> int:
+    print(json.dumps(build_domain_map(load_catalog()), separators=(",", ":")))
+    return 0
+
+
 def cmd_use_mac(args) -> int:
     api = Api()
     api.login()
@@ -1808,6 +1822,7 @@ def main(argv=None) -> int:
     p.add_argument("minutes", nargs="?", type=float, default=2, help="how long to watch (default 2)")
     p.add_argument("--service", action="append", default=[], help="only this service (repeatable; default all)")
     p.set_defaults(fn=cmd_watch)
+    sub.add_parser("domain-map", help=argparse.SUPPRESS).set_defaults(fn=cmd_domain_map)   # used by install.sh
     p = sub.add_parser("use-mac", help="re-register children added by IP address under their MAC address")
     p.add_argument("address", nargs="?", default=None, help="only this child's IP address (default: all)")
     p.add_argument("--dry-run", action="store_true", help="show what would change")

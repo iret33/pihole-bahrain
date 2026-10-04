@@ -10,6 +10,9 @@
 <title>Family Internet</title>
 <link rel="stylesheet" href="/pb/style.css">
 <link rel="manifest" href="/pb/manifest.json">
+<script src="/pb/pb-core.js" defer></script>
+<script src="/pb/pb-live.js" defer></script>
+<script src="/pb/pb-picture.js" defer></script>
 <script src="/pb/app.js" defer></script>
 </head>
 <body>
@@ -23,6 +26,12 @@
   <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
   <symbol id="i-device" viewBox="0 0 24 24"><rect x="7" y="3" width="10" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M11 18h2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
   <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 6v12M15 6v12" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3.5 5 6v5.2c0 4.3 2.9 7.6 7 9.3 4.1-1.7 7-5 7-9.3V6z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="m9 12.2 2.1 2.1 3.9-4.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M3.8 12h16.4M12 3.5c2.3 2.4 3.4 5.2 3.4 8.5s-1.1 6.1-3.4 8.5c-2.3-2.4-3.4-5.2-3.4-8.5S9.7 5.9 12 3.5z" fill="none" stroke="currentColor" stroke-width="1.6"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4.2 3.6 19h16.8z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v4.2M12 16.9v.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 11v5M12 7.9v.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-moon-sm" viewBox="0 0 24 24"><path d="M19.5 14.6A7.5 7.5 0 0 1 9.4 4.5a7.5 7.5 0 1 0 10.1 10.1z" fill="currentColor"/></symbol>
   <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
 </svg>
 
@@ -54,6 +63,8 @@
     </div>
   </header>
 
+  <div class="cols">
+  <div class="col-main">
   <section class="hero" id="hero" aria-live="polite">
     <p class="hero-kicker" id="heroKicker"></p>
     <h1 class="hero-title" id="heroTitle"></h1>
@@ -66,6 +77,74 @@
 
   <p class="banner" id="banner" role="status" hidden></p>
 
+  <!-- The live picture: how the home's requests flow through the family box. Built and animated by pb-picture.js. -->
+  <section class="block live" id="live" aria-labelledby="liveTitle" hidden>
+    <div class="live-card">
+      <div class="live-head">
+        <span class="live-icon" id="liveIcon"><svg aria-hidden="true"><use href="#i-shield"/></svg></span>
+        <div class="live-head-text">
+          <h2 id="liveTitle"></h2>
+          <p class="live-sub" id="liveSub"></p>
+        </div>
+      </div>
+      <div class="live-pillrow">
+        <span class="live-pill" id="livePill"><i class="dot"></i><span id="livePillText"></span></span>
+        <button type="button" class="live-toggle" id="liveToggle" data-act="liveToggle" aria-expanded="true" aria-controls="stage">
+          <span class="live-toggle-text" id="liveToggleText"></span><svg aria-hidden="true"><use href="#i-chevron"/></svg>
+        </button>
+      </div>
+
+      <div class="stage" id="stage">
+        <i class="rail-end rail-a" data-node="rail-a" aria-hidden="true"></i><i class="rail-end rail-b" data-node="rail-b" aria-hidden="true"></i>
+        <svg class="live-wires" aria-hidden="true"></svg>
+        <div class="live-packets" aria-hidden="true"></div>
+        <div class="stage-devices" id="stageDevices"></div>
+        <button type="button" class="node node-box" id="nodeBox" data-node="box" data-act="node" data-which="box">
+          <span class="node-box-icon"><svg aria-hidden="true"><use href="#i-shield"/></svg></span>
+          <span class="node-box-text"><span class="node-box-name" id="boxName"></span><span class="node-box-sub" id="boxSub"></span></span>
+        </button>
+        <div class="stage-inner" id="stageInner" hidden></div>
+        <button type="button" class="node node-net" id="nodeNet" data-node="net" data-act="node" data-which="net">
+          <svg aria-hidden="true"><use href="#i-globe"/></svg><span id="netName"></span>
+        </button>
+      </div>
+
+      <p class="live-caption" id="liveCaption"></p>
+      <div class="live-tour" id="liveTour" hidden>
+        <p class="live-tour-count" id="tourCount"></p>
+        <div class="live-tour-step" id="tourStep" aria-live="polite"></div>
+        <div class="live-tour-btns">
+          <button type="button" class="btn" data-act="tourBack" id="tourBack"></button>
+          <button type="button" class="btn btn-primary" data-act="tourNext" id="tourNext"></button>
+          <button type="button" class="link" data-act="tourEnd" id="tourEnd"></button>
+        </div>
+      </div>
+
+      <ul class="live-stats" id="liveStats">
+        <li><button type="button" class="stat" data-act="stat" data-which="checked"><span class="stat-value" id="statChecked">0</span><span class="stat-label" id="statCheckedLabel"></span></button></li>
+        <li><button type="button" class="stat stat-stopped" data-act="stat" data-which="stopped"><span class="stat-value" id="statStopped">0</span><span class="stat-label" id="statStoppedLabel"></span></button></li>
+        <li><button type="button" class="stat" data-act="stat" data-which="share"><span class="stat-value" id="statShare">0%</span><span class="stat-label" id="statShareLabel"></span></button></li>
+      </ul>
+      <p class="live-scope" id="liveScope"></p>
+      <p class="live-note" id="liveNote"></p>
+
+      <details class="live-recent" id="liveRecent">
+        <summary id="liveRecentTitle"></summary>
+        <ul id="liveRecentList"></ul>
+      </details>
+      <p class="sr-only" id="liveAria" role="status"></p>
+      <p class="sr-only" id="liveSay" role="status"></p>
+
+      <div class="live-actions">
+        <button type="button" class="btn btn-primary" data-act="tour" id="tourBtn"></button>
+        <button type="button" class="btn" data-act="detail" id="detailBtn"></button>
+      </div>
+    </div>
+  </section>
+
+  </div>
+
+  <div class="col-side">
   <section class="block" aria-labelledby="modesTitle">
     <h2 id="modesTitle" data-i18n="modes">Quick modes</h2>
     <div class="modes">
@@ -138,6 +217,8 @@
     <a href="/admin/" data-i18n="advanced">Advanced settings</a>
     <span id="version"></span>
   </footer>
+  </div>
+  </div>
 </div>
 
 <dialog id="timerDialog" class="sheet" aria-labelledby="timerTitle">
@@ -190,6 +271,16 @@
       <button type="submit" value="no" class="btn" data-i18n="cancel">Cancel</button>
       <button type="submit" value="yes" class="btn btn-danger" id="confirmYes"></button>
     </div>
+  </form>
+</dialog>
+
+<dialog id="liveSheet" class="sheet sheet-tall" aria-labelledby="sheetTitle">
+  <form method="dialog" class="sheet-body" id="sheetForm">
+    <div class="sheet-head">
+      <h2 id="sheetTitle"></h2>
+      <button type="submit" value="close" class="icon-btn" formnovalidate><svg><use href="#i-close"/></svg><span class="sr-only" data-i18n="close">Close</span></button>
+    </div>
+    <div id="sheetBody" class="sheet-scroll"></div>
   </form>
 </dialog>
 

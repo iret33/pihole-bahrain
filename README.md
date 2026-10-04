@@ -6,7 +6,10 @@ in Arabic and English. Parents can:
 - block or allow apps (YouTube, TikTok, Roblox, …) with one tap;
 - switch on **Homework** mode, a timed **Free time**, or a timed **Offline break**;
 - pause a single child's device;
-- set a **Bedtime** schedule that turns the internet off at night.
+- set a **Bedtime** schedule that turns the internet off at night;
+- watch **the live picture**: every phone and tablet at home asks the family
+  box first, and the box says yes or no. Requests travel along wires as little
+  packets, and the page shows how many were checked and stopped in the last 24 hours.
 
 Timers and bedtime run on the box itself, so they keep working after the
 parent closes the page.
@@ -134,6 +137,43 @@ Child's device ──DNS──► │  blocked if the device is in an enabled pb
 Everything the add-on creates in Pi-hole starts with `pb-` or has a comment
 starting with `pb:`, and your own groups, lists and rules are never touched.
 
+### The live picture
+
+The card under the big button draws what Pi-hole is doing, in words a parent can follow:
+devices on top, the family box in the middle, the internet at the bottom. A request
+goes to the box; a stopped one comes back as a dead end (a red packet with a cross), an
+allowed one goes on to the internet and back (a teal packet with a tick), and one the box
+remembered turns around at the box. A dotted line around the box shows that after a yes the
+device connects by itself: videos and messages never pass through the box.
+*Show me how it works* plays a five-step tour with clearly labelled **Example** packets from
+an example phone; examples never change a number. *More detail* explains the four steps,
+shows busy hours, the apps stopped most, and explains the technical words (DNS, gravity, cache).
+
+What it reads, and how often: `/api/stats/summary` every 15 s (the three numbers: checked,
+stopped, share; *whole home, last 24 hours*), `/api/queries` every 3.5 s with a small `length` and
+`from` taken from the box's own clock, and `/api/history` plus `/api/stats/top_domains` only while the
+detail sheet is open. Nothing is read while the page is hidden, a dialog is open, or the picture is folded
+away (the chevron remembers its state). At most about 3 packets a second are drawn; the rest are only counted.
+The picture never changes a rule.
+
+- **Names.** An app is named only when its domain is in `pb/domains.json` (made at install time from the
+  block lists, `pihole-bahrain domain-map`); anything else is "A website". Raw domain names are never shown.
+  A *stop* is credited to an app only when that app is blocked for the child it came from: an ad list also
+  stops trackers on an allowed app's domain, and that reads "An unwanted site", never "Stopped Netflix". While the
+  internet is off or a device is paused, a stop says that instead. A device is named for a stop only, never for an allowed lookup.
+- **Each child's wire** shows what is true: *Online now*, *Quiet*, *Paused*, *Internet off*, *Rules may
+  not apply* (another Pi-hole client row overrides the child's, see above), *Not seen in 24 hours*
+  (the device is probably not using the box) and *Rules set* (the box cannot tell when it was last online, for
+  example at a privacy level that hides devices: never a guess like "not seen"). The headline says "the rules are working"
+  only when nothing needs a look and a device was seen lately; if every device is quiet, or one has been quiet for
+  hours (a phone that left Wi-Fi looks exactly like that), it says "the rules are set". If Pi-hole's blocking is switched off
+  (`/api/dns/blocking`), the card says so in amber instead of anything green.
+- **Privacy levels.** At level 1 packets are drawn without app names, at level 2 clients are folded into
+  "Whole home", at level 3 only the totals are shown, with a note saying why.
+- **Reduced motion.** Nothing moves; the "What just happened" list opens by default and a short summary is
+  announced to screen readers at most every 30 seconds.
+- Arabic is drawn right to left with the whole picture mirrored; digits stay Latin.
+
 ## Block lists
 
 `lists/` holds one list per service (Adblock style, `||domain^` per line) plus
@@ -218,8 +258,11 @@ DNS filtering is a strong everyday filter, not a lock:
 ```bash
 python3 -m unittest discover -s tests -p "test_*.py"   # core, schedule, lists, doctor, diagnose
 sudo bash tests/test_install.sh                          # installer, stubbed system
+node --test tests/pb-core.test.js                        # the live picture's logic (feed, pacing, states, curves)
 python3 tests/ui_smoke.py --shots /tmp/shots            # browser test (needs playwright)
-python3 tests/mock_pihole.py --web web --setup           # page on http://127.0.0.1:8080, password "test"
+python3 tests/stage_smoke.py                             # drawing engine on a fixture page
+python3 tests/live_smoke.py --shots /tmp/shots          # the live picture on the real page: numbers, packets, tour, Arabic, privacy
+python3 tests/mock_pihole.py --web web --setup --live    # page on http://127.0.0.1:8080, password "test", with demo traffic
 ```
 
 `tests/mock_pihole.py` imitates the parts of the Pi-hole v6 API this project
