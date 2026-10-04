@@ -75,7 +75,19 @@ DEFAULT_STATE = {
     "schedule": {"enabled": False, "start": "21:00", "end": "06:00",
                  "days": [0, 1, 2, 3, 4, 5, 6]},
     "scheduleActive": False,
+    # Written by the parent page (auto, request, checkRequest) and by the scheduler (the rest). See parse_state.
+    "update": {"auto": False, "request": None, "checkRequest": None, "latest": None, "notes": None,
+               "checked": 0, "status": "idle", "from": None, "to": None, "at": 0, "error": None},
+    "power": {"request": None, "action": None},      # the page asks for "reboot" or "poweroff"
+    "telemetry": {"on": None},                       # None: not asked yet; True/False: the parent's answer
+    "community": None,                               # {"online": n, "at": epoch}, set by the scheduler after a ping
+    "setup": {"done": False},                        # the first-run checklist was dismissed
 }
+
+SEMVER_RE = re.compile(r"^\d{1,4}\.\d{1,4}\.\d{1,4}$")
+NOTES_RE = re.compile(r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases(/tag/[A-Za-z0-9_.+-]+)?$")
+UPDATE_STATUSES = ("idle", "running", "ok", "failed")
+POWER_ACTIONS = ("reboot", "poweroff")
 
 log = logging.getLogger("nay")
 
@@ -470,7 +482,66 @@ def parse_state(raw) -> dict:
         if isinstance(days, list):
             s["days"] = sorted({int(d) for d in days if isinstance(d, int) and 0 <= d <= 6})
     state["scheduleActive"] = bool(data.get("scheduleActive", False))
+    state["update"] = _parse_update(data.get("update"))
+    state["power"] = _parse_power(data.get("power"))
+    tel = data.get("telemetry")
+    if isinstance(tel, dict) and isinstance(tel.get("on"), bool):
+        state["telemetry"] = {"on": tel["on"]}
+    comm = data.get("community")
+    if isinstance(comm, dict) and _is_count(comm.get("online")) and _is_number(comm.get("at")):
+        state["community"] = {"online": int(comm["online"]), "at": float(comm["at"])}
+    setup = data.get("setup")
+    if isinstance(setup, dict):
+        state["setup"] = {"done": setup.get("done") is True}
     return state
+
+
+def _is_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value == value and abs(value) != float("inf")
+
+
+def _is_count(value) -> bool:
+    return _is_number(value) and value >= 0
+
+
+def _nonce(value):
+    """A request marker the page writes (the time in ms) and the scheduler acts on once: a number or a short string."""
+    if _is_number(value) and value > 0:
+        return value
+    if isinstance(value, str) and 0 < len(value) <= 40:
+        return value
+    return None
+
+
+def _parse_update(raw) -> dict:
+    out = dict(DEFAULT_STATE["update"])
+    if not isinstance(raw, dict):
+        return out
+    out["auto"] = raw.get("auto") is True
+    out["request"] = _nonce(raw.get("request"))
+    out["checkRequest"] = _nonce(raw.get("checkRequest"))
+    for key in ("latest", "from", "to"):
+        v = raw.get(key)
+        out[key] = v if isinstance(v, str) and SEMVER_RE.match(v) else None
+    notes = raw.get("notes")
+    out["notes"] = notes if isinstance(notes, str) and NOTES_RE.match(notes) else None
+    for key in ("checked", "at"):
+        v = raw.get(key)
+        out[key] = v if _is_count(v) else 0
+    out["status"] = raw.get("status") if raw.get("status") in UPDATE_STATUSES else "idle"
+    err = raw.get("error")
+    out["error"] = err[:200] if isinstance(err, str) and err.strip() else None
+    return out
+
+
+def _parse_power(raw) -> dict:
+    out = dict(DEFAULT_STATE["power"])
+    if isinstance(raw, dict) and raw.get("action") in POWER_ACTIONS:
+        out["action"] = raw["action"]
+        out["request"] = _nonce(raw.get("request"))
+        if out["request"] is None:
+            out["action"] = None
+    return out
 
 
 def valid_hhmm(value) -> bool:

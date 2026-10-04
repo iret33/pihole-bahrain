@@ -1,0 +1,1287 @@
+{
+ "comment": "Shared by tests/test_state_contract.py (bin/nay parse_state) and tests/state-contract.test.js (web parseState): both must normalise every input to exactly this.",
+ "cases": [
+  {
+   "name": "empty string",
+   "input": "",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "not json",
+   "input": "{oops",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "json but not an object",
+   "input": "[1,2,3]",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "legacy state: only timer and schedule (2.x)",
+   "input": "{\"v\": 1, \"timer\": {\"mode\": \"free\", \"until\": 1800000000, \"snapshot\": {\"services\": {\"youtube\": true}, \"offline\": false}}, \"schedule\": {\"enabled\": true, \"start\": \"22:00\", \"end\": \"06:30\", \"days\": [0, 1, 2, 3, 4]}, \"scheduleActive\": true}",
+   "expected": {
+    "v": 1,
+    "timer": {
+     "mode": "free",
+     "until": 1800000000.0,
+     "snapshot": {
+      "services": {
+       "youtube": true
+      },
+      "offline": false
+     }
+    },
+    "schedule": {
+     "enabled": true,
+     "start": "22:00",
+     "end": "06:30",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4
+     ]
+    },
+    "scheduleActive": true,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "a complete valid update block",
+   "input": "{\"update\": {\"auto\": true, \"request\": 1800000001234, \"checkRequest\": \"abc\", \"latest\": \"3.1.0\", \"notes\": \"https://github.com/iret33/nay/releases/tag/v3.1.0\", \"checked\": 1800000000, \"status\": \"running\", \"from\": \"3.0.0\", \"to\": \"3.1.0\", \"at\": 1800000100, \"error\": null}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": true,
+     "request": 1800000001234,
+     "checkRequest": "abc",
+     "latest": "3.1.0",
+     "notes": "https://github.com/iret33/nay/releases/tag/v3.1.0",
+     "checked": 1800000000,
+     "status": "running",
+     "from": "3.0.0",
+     "to": "3.1.0",
+     "at": 1800000100,
+     "error": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "an update block full of bad values",
+   "input": "{\"update\": {\"auto\": \"yes\", \"request\": -5, \"checkRequest\": true, \"latest\": \"v3.0.0\", \"notes\": \"http://evil.example/releases\", \"checked\": -1, \"status\": \"hacked\", \"from\": \"3.0\", \"to\": \"3.0.0.1\", \"at\": \"now\", \"error\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "update.error is trimmed to 200 characters and blank errors are dropped",
+   "input": "{\"update\": {\"status\": \"failed\", \"error\": \"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "failed",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "blank error",
+   "input": "{\"update\": {\"status\": \"failed\", \"error\": \"   \"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "failed",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "release notes link: only github.com releases pages",
+   "input": "{\"update\": {\"notes\": \"https://github.com/iret33/nay/releases\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": "https://github.com/iret33/nay/releases",
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "release notes link with extra path is refused",
+   "input": "{\"update\": {\"notes\": \"https://github.com/iret33/nay/releases/tag/v3.1.0/../../x\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "release notes link on another host is refused",
+   "input": "{\"update\": {\"notes\": \"https://github.com.evil.example/iret33/nay/releases\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "a request marker may be a short string",
+   "input": "{\"update\": {\"request\": \"r-1\", \"checkRequest\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": "r-1",
+     "checkRequest": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "a request marker over 40 characters or equal to 0 is dropped",
+   "input": "{\"update\": {\"request\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\", \"checkRequest\": 0}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "power: a valid reboot request",
+   "input": "{\"power\": {\"request\": 1800000002000, \"action\": \"reboot\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": 1800000002000,
+     "action": "reboot"
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "power: poweroff",
+   "input": "{\"power\": {\"request\": \"p1\", \"action\": \"poweroff\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": "p1",
+     "action": "poweroff"
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "power: unknown action is dropped",
+   "input": "{\"power\": {\"request\": 1800000002000, \"action\": \"format\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "power: an action without a request is dropped",
+   "input": "{\"power\": {\"action\": \"reboot\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "telemetry answered yes",
+   "input": "{\"telemetry\": {\"on\": true}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": true
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "telemetry answered no",
+   "input": "{\"telemetry\": {\"on\": false}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": false
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "telemetry: only a real boolean counts",
+   "input": "{\"telemetry\": {\"on\": \"yes\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "community: valid",
+   "input": "{\"community\": {\"online\": 1234, \"at\": 1800000000}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": {
+     "online": 1234,
+     "at": 1800000000.0
+    },
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "community: a fractional count is floored",
+   "input": "{\"community\": {\"online\": 3.7, \"at\": 1800000000.5}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": {
+     "online": 3,
+     "at": 1800000000.5
+    },
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "community: negative count is refused",
+   "input": "{\"community\": {\"online\": -1, \"at\": 1800000000}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "community: text instead of numbers is refused",
+   "input": "{\"community\": {\"online\": \"12\", \"at\": \"now\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "setup done",
+   "input": "{\"setup\": {\"done\": true}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": true
+    }
+   }
+  },
+  {
+   "name": "setup: only a real true counts",
+   "input": "{\"setup\": {\"done\": \"true\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "unknown top-level keys are dropped",
+   "input": "{\"hello\": \"world\", \"update\": {\"auto\": true}, \"v\": 1}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": true,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  }
+ ]
+}
