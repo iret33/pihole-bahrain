@@ -61,8 +61,9 @@
       homeworkOn: 'Homework mode on', freeOn: 'Free time started', breakOn: 'Offline break started', timerEnded: 'Timer ended',
       internetOff: 'Internet turned off', internetOn: 'Internet turned on',
       nowBlocked: '{n} blocked', nowAllowed: '{n} allowed', allAllowed: 'All apps allowed', allBlocked: 'All apps blocked',
-      schedulerDown: 'The timer on the box is not running. On the Pi, run: sudo systemctl restart sinko',
-      notInstalled: 'Setup is not finished on this box. On the Pi, run: sudo sinko setup',
+      // Nothing here may need a keyboard on the box: parents cannot type commands. Unplugging and re-plugging restarts everything.
+      schedulerDown: 'The timer on the box is not running. Unplug the box, plug it back in and wait two minutes. If it keeps happening, ask whoever set up the box.',
+      notInstalled: 'Setup is not finished on this box. Wait a few minutes and reload this page. If it stays like this, ask whoever set up the box.',
       failed: 'That did not work: {e}', sessionEnded: 'Your session ended. Sign in again.',
       days: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'],
       daysLong: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'],
@@ -72,7 +73,7 @@
       cat: {}, langSwitch: 'العربية', minutesShort: '{n} min'
     },
     ar: {
-      appName: 'إنترنت العائلة', loginHint: 'سجّل الدخول بكلمة مرور الوالدين التي اخترتها أثناء الإعداد.', password: 'كلمة المرور',
+      appName: 'سينكو', loginHint: 'سجّل الدخول بكلمة مرور الوالدين التي اخترتها أثناء الإعداد.', password: 'كلمة المرور',
       totp: 'الرمز المكوّن من 6 أرقام من تطبيق المصادقة', signIn: 'تسجيل الدخول', signOut: 'تسجيل الخروج',
       wrongPassword: 'كلمة المرور غير صحيحة. حاول مرة أخرى.', wrongTotp: 'أدخل كلمة المرور والرمز المكوّن من 6 أرقام.',
       noConnection: 'تعذّر الوصول إلى صندوق العائلة. تأكد أنه يعمل ومتصل بالشبكة.',
@@ -113,8 +114,8 @@
       homeworkOn: 'تم تفعيل وقت الدراسة', freeOn: 'بدأ الوقت الحر', breakOn: 'بدأت الاستراحة', timerEnded: 'انتهى المؤقت',
       internetOff: 'تم إيقاف الإنترنت', internetOn: 'تم تشغيل الإنترنت',
       nowBlocked: 'تم حظر {n}', nowAllowed: 'تم السماح بـ {n}', allAllowed: 'تم السماح بكل التطبيقات', allBlocked: 'تم حظر كل التطبيقات',
-      schedulerDown: 'المؤقت على صندوق العائلة لا يعمل. نفّذ على الصندوق: sudo systemctl restart sinko',
-      notInstalled: 'الإعداد غير مكتمل على صندوق العائلة. نفّذ على الصندوق: sudo sinko setup',
+      schedulerDown: 'المؤقت على صندوق العائلة لا يعمل. افصل الصندوق عن الكهرباء ثم أعد توصيله وانتظر دقيقتين. إذا تكرر ذلك فاسأل من أعدّ الصندوق.',
+      notInstalled: 'الإعداد غير مكتمل على صندوق العائلة. انتظر بضع دقائق ثم أعد تحميل الصفحة. إذا استمر الأمر فاسأل من أعدّ الصندوق.',
       failed: 'لم تنجح العملية: {e}', sessionEnded: 'انتهت الجلسة. سجّل الدخول مجددًا.',
       days: ['أحد', 'اثنين', 'ثلاثاء', 'أربعاء', 'خميس', 'جمعة', 'سبت'],
       daysLong: ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'],
@@ -279,6 +280,54 @@
   Object.keys(LIVE_STR.en).forEach(function (k) { STR.en[k] = LIVE_STR.en[k]; });
   Object.keys(LIVE_STR.ar).forEach(function (k) { STR.ar[k] = LIVE_STR.ar[k]; });
 
+  // ------------------------------------------------------------------ strings for the first run: claim screen, setup list, update banner
+  // (the My box sheet's own strings live in pb-box.js). tests/test_copy.py checks both languages and the plain-words rule.
+  var FIRST_STR = {
+    en: {
+      tagline: 'Family internet',
+      claimTitle: 'Welcome to Sinko', claimLead: 'Choose a parent password for this box. You will use it to sign in on this page.',
+      claimWhy: 'Until you do, anyone on your Wi‑Fi can open this page and change the rules.',
+      claimPw: 'Password (at least 8 characters)', claimPw2: 'Password again', claimBtn: 'Choose password and continue', claimBusy: 'Saving…',
+      claimShort: 'The password needs at least 8 characters.', claimMismatch: 'The two passwords are not the same.',
+      claimFail: 'The password could not be saved: {e}', claimSignIn: 'Your password is saved. Sign in with it.',
+      setupTitle: 'Get started', setupProgress: '{n} of {t} done', setupHide: 'Hide this list',
+      setupPw: 'Parent password chosen',
+      setupRouter: 'Router points to this box', setupRouterHow: 'No other device at home has used the box yet. See “Setup help” at the bottom of this page.', setupRouterBtn: 'Show setup help',
+      setupChild: 'First child device added', setupChildHow: 'Add your child’s phone or tablet so the rules apply to it.',
+      setupCounterQ: 'Help count Sinko boxes?', setupCounterDone: 'Counter question answered',
+      setupCounterText: 'Optional. Every few hours the box sends a random code, the Sinko version and the kind of box. Nothing about your family. You can change this in My box.',
+      setupDone: 'done', setupTodo: 'not done yet',
+      setupYes: 'Yes', setupNotNow: 'Not now', setupLaterToast: 'Okay. You can change this in My box.', setupDoneToast: 'Everything is set up.',
+      updateReady: 'Sinko {v} is ready: open My box', updateRunning: 'Sinko is updating: open My box to follow it',
+      updateFailed: 'The last update did not work: open My box'
+    },
+    ar: {
+      tagline: 'إنترنت العائلة',
+      claimTitle: 'مرحبًا بك في سينكو', claimLead: 'اختر كلمة مرور الوالدين لهذا الصندوق. ستستخدمها لتسجيل الدخول في هذه الصفحة.',
+      claimWhy: 'إلى أن تفعل ذلك، يستطيع أي شخص على شبكة Wi‑Fi فتح هذه الصفحة وتغيير القواعد.',
+      claimPw: 'كلمة المرور (8 أحرف على الأقل)', claimPw2: 'أعد كتابة كلمة المرور', claimBtn: 'اختيار كلمة المرور والمتابعة', claimBusy: 'جارٍ الحفظ…',
+      claimShort: 'يجب أن تتكوّن كلمة المرور من 8 أحرف على الأقل.', claimMismatch: 'كلمتا المرور غير متطابقتين.',
+      claimFail: 'تعذّر حفظ كلمة المرور: {e}', claimSignIn: 'تم حفظ كلمة المرور. سجّل الدخول بها.',
+      setupTitle: 'ابدأ من هنا', setupProgress: 'تم {n} من {t}', setupHide: 'إخفاء هذه القائمة',
+      setupPw: 'تم اختيار كلمة مرور الوالدين',
+      setupRouter: 'الراوتر يوجّه الأجهزة إلى هذا الصندوق', setupRouterHow: 'لم يستخدم أي جهاز آخر في البيت الصندوق بعد. راجع «مساعدة في الإعداد» أسفل هذه الصفحة.', setupRouterBtn: 'عرض المساعدة',
+      setupChild: 'إضافة أول جهاز لطفل', setupChildHow: 'أضف هاتف طفلك أو جهازه اللوحي لتُطبَّق عليه القواعد.',
+      setupCounterQ: 'هل تساعد في عدّ صناديق سينكو؟', setupCounterDone: 'تمت الإجابة عن سؤال العدّاد',
+      setupCounterText: 'اختياري. يرسل الصندوق كل بضع ساعات رمزًا عشوائيًا ورقم إصدار سينكو ونوع الصندوق. لا شيء عن عائلتك. يمكنك تغيير ذلك من «صندوقي».',
+      setupDone: 'تم', setupTodo: 'لم يتم بعد',
+      setupYes: 'نعم', setupNotNow: 'ليس الآن', setupLaterToast: 'حسنًا. يمكنك تغيير ذلك من «صندوقي».', setupDoneToast: 'تم إعداد كل شيء.',
+      updateReady: 'الإصدار {v} من سينكو جاهز: افتح صندوقي', updateRunning: 'يجري تحديث سينكو: افتح صندوقي للمتابعة',
+      updateFailed: 'لم ينجح آخر تحديث: افتح صندوقي'
+    }
+  };
+  Object.keys(FIRST_STR.en).forEach(function (k) { STR.en[k] = FIRST_STR.en[k]; });
+  Object.keys(FIRST_STR.ar).forEach(function (k) { STR.ar[k] = FIRST_STR.ar[k]; });
+  // The My box sheet's strings (pb-box.js is loaded before this file).
+  if (window.PBBox) {
+    Object.keys(PBBox.strings.en).forEach(function (k) { STR.en[k] = PBBox.strings.en[k]; });
+    Object.keys(PBBox.strings.ar).forEach(function (k) { STR.ar[k] = PBBox.strings.ar[k]; });
+  }
+
   // ------------------------------------------------------------------ state
   var lang = safeGet(localStorage, LANG_KEY) === 'ar' ? 'ar' : (safeGet(localStorage, LANG_KEY) ? 'en' : guessLang());
   var sid = safeGet(sessionStorage, SID_KEY) || '';
@@ -290,6 +339,8 @@
   var pollTimer = null, tickTimer = null;
   var timerMode = 'free', timerMinutes = 0, pickedDevice = null;
   var serverOffsetMs = 0;            // box clock minus this device's clock, from the Date header of every API answer
+  var pageVersion = '';              // the version this page was loaded with (pb/version.txt at boot); the box may be newer after an update
+  var UPDATED_KEY = 'pb.updated';    // set just before the page reloads itself after an update, so it can say what happened
 
   function $(id) { return document.getElementById(id); }
   function safeGet(store, key) { try { return store.getItem(key); } catch (e) { return null; } }
@@ -342,29 +393,39 @@
 
   var toastTimer = null;
   function toast(msg, isError) {
-    var n = $('toast'); n.textContent = msg; n.classList.toggle('toast-error', !!isError); n.classList.add('show');
+    // Everything outside an open modal dialog is hidden behind it, so while My box is open its messages show inside it.
+    var inBox = $('boxDialog').open;
+    var n = inBox ? $('boxToast') : $('toast');
+    $('toast').classList.remove('show'); $('boxToast').classList.remove('show');
+    n.textContent = msg; n.classList.toggle('toast-error', !!isError); n.classList.add('show');
     clearTimeout(toastTimer); toastTimer = setTimeout(function () { n.classList.remove('show'); }, isError ? 6000 : 2600);
   }
 
   // ------------------------------------------------------------------ API
-  function ApiError(status, message) { this.status = status; this.message = message; }
-  function call(method, path, body) {
-    var headers = { Accept: 'application/json' };
-    if (body !== undefined) headers['Content-Type'] = 'application/json';
-    if (sid) headers.sid = sid;
-    return fetch(path, { method: method, headers: headers, credentials: 'omit', cache: 'no-store',
-      body: body === undefined ? undefined : JSON.stringify(body) })
+  // `body` is a JSON value. opts (all optional): blob = the answer is a file, resolves { blob }; form = a FormData to send as is (the browser
+  // writes the multipart header); noSid / sid = send no session / this one; quiet401 = an answer of 401 does not sign the page out.
+  // An ApiError carries the status (0 = the box did not answer), a message for people, and `body`, the parsed answer.
+  function ApiError(status, message, body) { this.status = status; this.message = message; this.body = body; }
+  function call(method, path, body, opts) {
+    opts = opts || {};
+    var headers = { Accept: opts.blob ? 'application/zip, */*' : 'application/json' }, payload;
+    if (opts.form) payload = opts.form;
+    else if (body !== undefined) { headers['Content-Type'] = 'application/json'; payload = JSON.stringify(body); }
+    var useSid = opts.sid !== undefined ? opts.sid : (opts.noSid ? '' : sid);
+    if (useSid) headers.sid = useSid;
+    return fetch(path, { method: method, headers: headers, credentials: 'omit', cache: 'no-store', body: payload })
       .catch(function () { throw new ApiError(0, t('noConnection')); })
       .then(function (r) {
         var boxTime = Date.parse(r.headers.get('Date') || '');
         if (!isNaN(boxTime)) serverOffsetMs = boxTime - Date.now();
+        if (opts.blob && r.ok) return r.blob().then(function (b) { return { blob: b }; });
         return r.text().then(function (txt) {
           var j = {}; try { j = txt ? JSON.parse(txt) : {}; } catch (e) { j = {}; }
-          if (r.status === 401) { endSession(); throw new ApiError(401, t('sessionEnded')); }
+          if (r.status === 401) { if (!opts.quiet401) endSession(); throw new ApiError(401, t('sessionEnded'), j); }
           if (!r.ok) {
             var e = j && j.error; var m = e ? (e.message || e.key || String(e)) : ('HTTP ' + r.status);
             if (e && e.hint) m += ' (' + e.hint + ')';
-            throw new ApiError(r.status, m);
+            throw new ApiError(r.status, m, j);
           }
           return j;
         });
@@ -380,14 +441,21 @@
   }
 
   // ------------------------------------------------------------------ auth
-  function endSession() {
+  // `note` is one calm line for the sign-in screen: "your password was changed", "the box restarted".
+  function endSession(note) {
     sid = ''; safeSet(sessionStorage, SID_KEY, null);
     stopPolling();
+    if (window.PBBox) PBBox.reset();
     if (window.PBPicture) { PBPicture.stop(); picInited = false; }
-    showLogin();
+    showLogin(typeof note === 'string' ? note : '');
   }
-  function showLogin() { $('app').hidden = true; $('login').hidden = false; setTimeout(function () { $('pw').focus(); }, 0); }
-  function showApp() { $('login').hidden = true; $('app').hidden = false; }
+  function showLogin(note) {
+    $('app').hidden = true; $('claim').hidden = true; $('login').hidden = false;
+    var n = $('loginNote'); n.textContent = note || ''; n.hidden = !note;
+    $('loginErr').textContent = '';
+    setTimeout(function () { $('pw').focus(); }, 0);
+  }
+  function showApp() { $('login').hidden = true; $('claim').hidden = true; $('app').hidden = false; }
 
   function probeAuth() {
     return call('GET', '/api/auth').then(function (j) {
@@ -399,10 +467,63 @@
       throw e;
     });
   }
+  // ------------------------------------------------------------------ first run: choosing the parent password
+  // A box with no password answers GET /api/auth with a valid session even when no session id is sent. That is asked WITHOUT the
+  // stored session id: with one, "valid" would only say that the session is fine, not that no password exists.
+  function noPasswordSet() {
+    return fetch('/api/auth', { headers: { Accept: 'application/json' }, credentials: 'omit', cache: 'no-store' })
+      .then(function (r) { return r.json().then(function (j) { return !!(r.ok && j && j.session && j.session.valid); }, function () { return false; }); });
+  }
+  // Only a box that has Sinko on it is claimed here: without Sinko's groups there is nothing for this page to protect yet.
+  function sinkoInstalled() {
+    return fetch('/api/groups', { headers: { Accept: 'application/json' }, credentials: 'omit', cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : { groups: [] }; })
+      .then(function (j) { return (j.groups || []).some(function (g) { return g.name === G.state; }); })
+      .catch(function () { return false; });
+  }
+  function showClaim() {
+    $('app').hidden = true; $('login').hidden = true; $('claim').hidden = false;
+    $('claimErr').textContent = '';
+    setTimeout(function () { $('claimPw').focus(); }, 0);
+  }
+  function claim(ev) {
+    ev.preventDefault();
+    var pw = $('claimPw').value, again = $('claimPw2').value, err = $('claimErr'), btn = $('claimBtn');
+    err.textContent = '';
+    var problem = PBBox.pure.passwordProblem('', pw, again);
+    if (problem === 'boxPwShort') { err.textContent = t('claimShort'); $('claimPw').focus(); return; }
+    if (problem === 'boxPwMismatch') { err.textContent = t('claimMismatch'); $('claimPw2').focus(); return; }
+    btn.disabled = true; btn.textContent = t('claimBusy');
+    var finish = function () { btn.disabled = false; btn.textContent = t('claimBtn'); };
+    var saved = false;
+    call('PATCH', '/api/config', { config: { webserver: { api: { password: pw } } } }, { noSid: true, quiet401: true })
+      .then(function () {
+        saved = true;
+        // Pi-hole may be busy applying the change for a moment: signing in is tried a few times before giving up.
+        var attempt = function (left) {
+          return call('POST', '/api/auth', { password: pw }, { noSid: true, quiet401: true }).catch(function (e) {
+            if (left > 1 && (!e.status || e.status >= 500)) return new Promise(function (res) { setTimeout(res, 1200); }).then(function () { return attempt(left - 1); });
+            throw e;
+          });
+        };
+        return attempt(4);
+      })
+      .then(function (j) {
+        $('claimPw').value = ''; $('claimPw2').value = '';
+        sid = (j.session && j.session.sid) || ''; safeSet(sessionStorage, SID_KEY, sid);
+        finish();
+        return start();
+      }, function (e) {
+        finish();
+        if (saved) { $('claimPw').value = ''; $('claimPw2').value = ''; showLogin(t('claimSignIn')); return; }   // the password exists: only signing in failed
+        err.textContent = t('claimFail', { e: e && e.message ? e.message : String(e) });
+      });
+  }
+
   function login(ev) {
     ev.preventDefault();
     var pw = $('pw').value, code = $('totp').value.trim();
-    var btn = $('loginBtn'); $('loginErr').textContent = '';
+    var btn = $('loginBtn'); $('loginErr').textContent = ''; $('loginNote').hidden = true;
     if (!pw) { $('pw').focus(); return; }
     btn.disabled = true;
     var body = { password: pw };
@@ -814,9 +935,87 @@
   // ------------------------------------------------------------------ render
   function banner(msg) { var b = $('banner'); b.hidden = !msg; b.textContent = msg || ''; }
 
+  // The banner for a newer Sinko (or an update that is running or failed): opens My box, where the update is done.
+  function renderUpdateBanner() {
+    var b = $('updateBanner');
+    var view = PBBox.pure.updateView(M.state, { now: serverNowSec(), current: pageVersion });
+    var text = '';
+    if (view.phase === 'available') text = t('updateReady', { v: view.latest });
+    else if (view.phase === 'starting' || view.phase === 'running') text = t('updateRunning');
+    else if (view.phase === 'failed' && view.latest) text = t('updateFailed');
+    b.hidden = !text; b.textContent = text;
+    b.setAttribute('data-phase', view.phase);
+  }
+
+  // ---- the setup list: shown until it is dismissed or every step is done
+  function routerPointsHere() {
+    // A device other than the parent's own phone (and other than the box itself) has asked the box something: the router sends devices here.
+    var now = serverNowSec();
+    return M.devices.some(function (d) {
+      if (!d.lastQuery || now - d.lastQuery > 7 * 86400) return false;
+      var ips = (d.ips || []).map(function (i) { return i.ip; });
+      if (M.myIp && ips.indexOf(M.myIp) >= 0) return false;
+      return !ips.some(function (ip) { return ip === '127.0.0.1' || ip === '::1' || ip === location.hostname; });
+    });
+  }
+  var setupSig = '', setupSaving = false, setupWasShown = false;
+  function renderSetup() {
+    var card = $('setup'), s = M.state;
+    var items = [
+      { id: 'pw', done: true, title: t('setupPw') },
+      { id: 'router', done: routerPointsHere(), title: t('setupRouter'), how: t('setupRouterHow'), btn: t('setupRouterBtn'), act: 'setupHelp' },
+      { id: 'child', done: M.kids.length > 0, title: t('setupChild'), how: t('setupChildHow'), btn: t('addDevice'), act: 'openAdd' },
+      { id: 'counter', done: s.telemetry.on !== null, title: t('setupCounterQ'), doneTitle: t('setupCounterDone'), how: t('setupCounterText') }
+    ];
+    var doneCount = items.filter(function (i) { return i.done; }).length;
+    var all = doneCount === items.length;
+    if (all && !s.setup.done && !setupSaving) {
+      // Everything is ticked: remember it, so the list does not come back if the router changes later.
+      setupSaving = true;
+      writeState(function (st) { st.setup.done = true; }).then(function () { if (setupWasShown) toast(t('setupDoneToast')); }, function () {})
+        .then(function () { setupSaving = false; });
+    }
+    var hide = s.setup.done || all;
+    card.hidden = hide;
+    if (hide) { setupSig = ''; setupWasShown = false; return; }
+    setupWasShown = true;
+    var sig = lang + '|' + items.map(function (i) { return i.id + (i.done ? '1' : '0'); }).join('');
+    if (sig === setupSig) return;                     // the list is only rebuilt when it changed, so a button being pressed is not replaced
+    setupSig = sig;
+    $('setupProgress').textContent = t('setupProgress', { n: doneCount, t: items.length });
+    var ul = $('setupList'); ul.textContent = '';
+    items.forEach(function (i) {
+      var kids = [el('span', { class: 'setup-check', 'aria-hidden': 'true' }, [icon(i.done ? 'i-check' : 'i-dot')])];
+      var text = [el('span', { class: 'setup-title', text: i.done && i.doneTitle ? i.doneTitle : i.title }),
+        el('span', { class: 'sr-only', text: ' (' + t(i.done ? 'setupDone' : 'setupTodo') + ')' })];
+      var li = el('li', { class: 'setup-item' + (i.done ? ' is-done' : ''), 'data-item': i.id });
+      if (!i.done && i.how) text.push(el('span', { class: 'setup-how', text: i.how }));
+      var body = el('div', { class: 'setup-text' }, text);
+      if (!i.done && i.act) body.appendChild(el('div', { class: 'setup-actions' }, [el('button', { type: 'button', class: 'btn btn-small', 'data-act': i.act, text: i.btn })]));
+      if (!i.done && i.id === 'counter') {
+        body.appendChild(el('div', { class: 'setup-actions' }, [
+          el('button', { type: 'button', class: 'btn btn-small btn-primary', 'data-act': 'counterYes', text: t('setupYes') }),
+          el('button', { type: 'button', class: 'btn btn-small', 'data-act': 'counterNo', text: t('setupNotNow') })]));
+      }
+      li.appendChild(kids[0]); li.appendChild(body);
+      ul.appendChild(li);
+    });
+  }
+  function answerCounter(yes) {
+    run(function () { return writeState(function (st) { st.telemetry = { on: yes }; }); }, t(yes ? 'boxCounterOnToast' : 'setupLaterToast'));
+  }
+  function hideSetup() { run(function () { return writeState(function (st) { st.setup.done = true; }); }); }
+  function showSetupHelp() {
+    var h = $('help'); h.open = true;
+    if (h.scrollIntoView) h.scrollIntoView({ behavior: window.PBLive && PBLive.reducedMotion() ? 'auto' : 'smooth', block: 'center' });
+    $('help').querySelector('summary').focus({ preventScroll: true });
+  }
+
   function render() {
     if (!M) return;
     renderHero();
+    renderUpdateBanner();
+    renderSetup();
     renderServices();
     renderDevices();
     renderBedtime(false);
@@ -996,6 +1195,7 @@
       n.textContent = t('langSwitch'); n.setAttribute('lang', lang === 'ar' ? 'en' : 'ar');
     });
     $('helpBody').textContent = t('helpBody', { ip: location.hostname });
+    if (window.PBBox) PBBox.relang();
     if (M) { render(); renderBedtime(true); }
   }
 
@@ -1034,6 +1234,12 @@
       case 'pause': togglePause(n.getAttribute('data-client')); break;
       case 'remove': removeKid(n.getAttribute('data-client')); break;
       case 'saveBed': saveBedtime(); break;
+      case 'box': PBBox.open(); break;
+      case 'boxClose': closeDialog('boxDialog'); break;
+      case 'setupHelp': showSetupHelp(); break;
+      case 'counterYes': answerCounter(true); break;
+      case 'counterNo': answerCounter(false); break;
+      case 'setupHide': hideSetup(); break;
     }
   }
   function onChipClick(ev) {
@@ -1063,10 +1269,27 @@
   function boot() {
     applyLang();
     fetch('/pb/version.txt', { cache: 'no-store' }).then(function (r) { return r.ok ? r.text() : ''; })
-      .then(function (v) { $('version').textContent = v ? 'v' + v.trim() : ''; }).catch(function () {});
+      .then(function (v) {
+        v = (v || '').trim();
+        pageVersion = PBBox.pure.parseSemver(v) ? v : '';          // a 404 page or garbage is not a version
+        $('version').textContent = pageVersion ? 'v' + pageVersion : '';
+        if (M) renderUpdateBanner();
+      }).catch(function () {});
+    PBBox.init({
+      t: t, el: el, icon: icon, lang: function () { return lang; }, locale: locale, fmtTime: fmtTime,
+      formatCount: function (n) { return PBCore.formatCount(n, locale()); },
+      call: call, model: function () { return M; }, state: function () { return M ? M.state : null; },
+      writeState: writeState, reload: load, openDialog: openDialog, closeDialog: closeDialog, confirm: confirmBox, toast: toast,
+      endSession: endSession, serverNowSec: serverNowSec, clockOffsetMs: function () { return serverOffsetMs; },
+      version: function () { return pageVersion; },
+      rememberUpdate: function (v) { safeSet(sessionStorage, UPDATED_KEY, v); }
+    });
+    var updated = safeGet(sessionStorage, UPDATED_KEY);        // the page just reloaded itself after an update
+    if (updated) { safeSet(sessionStorage, UPDATED_KEY, null); setTimeout(function () { toast(t('boxUpdatedToast', { v: updated })); }, 700); }
     document.addEventListener('click', onClick);
     $('timerChips').addEventListener('click', onChipClick);
     $('loginForm').addEventListener('submit', login);
+    $('claimForm').addEventListener('submit', claim);
     ['bedOn', 'bedStart', 'bedEnd', 'bedDays'].forEach(function (id) {
       $(id).addEventListener('change', function () { bedDirty = true; syncBedOn(); });
     });
@@ -1078,10 +1301,16 @@
     document.addEventListener('visibilitychange', function () {
       if (document.visibilityState === 'visible' && !$('app').hidden && !busy) load().catch(function () {});
     });
-    probeAuth().then(function (valid) {
-      if (valid) return start();
-      if (sid) { sid = ''; safeSet(sessionStorage, SID_KEY, null); }
-      showLogin();
+    noPasswordSet().catch(function () { return false; }).then(function (open) {
+      if (open) {
+        // No password: offer to choose one when Sinko is on the box; otherwise carry on as before (the page explains what is missing).
+        return sinkoInstalled().then(function (installed) { return installed ? showClaim() : start(); });
+      }
+      return probeAuth().then(function (valid) {
+        if (valid) return start();
+        if (sid) { sid = ''; safeSet(sessionStorage, SID_KEY, null); }
+        showLogin();
+      });
     }).catch(function () { showLogin(); $('loginErr').textContent = t('noConnection'); });
   }
 
