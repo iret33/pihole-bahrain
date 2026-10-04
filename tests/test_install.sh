@@ -49,6 +49,8 @@ grep -q '"webserver.serve_all": "true"' "$WORK/ftl.json" || fail "serve_all not 
 grep -q '192.168.1.9 nas.lan, 192.168.1.50 family.lan' "$WORK/ftl.json" || { cat "$WORK/ftl.json"; fail "dns.hosts not merged"; }
 grep -q '/usr/local/bin/pihole -g\|pihole -g' "$ROOT/etc/systemd/system/sinko-lists.service" || fail "unit not rendered"
 grep -q 'systemctl restart sinko.service' "$WORK/calls.log" || fail "service not started"
+cmp -s "$REPO/systemd/sinko.service" "$ROOT/etc/systemd/system/sinko.service" || fail "the installed scheduler unit is not the one in the release"
+[[ "$(stat -c %a "$ROOT/var/lib/sinko")" == 700 ]] || fail "the state folder is not 0700"
 grep -q 'pihole -g' "$WORK/calls.log" || fail "gravity not run"
 grep -q 'Asia/Bahrain' "$WORK/tz" || fail "timezone not set"
 grep -q 'Keeping the existing password' <<<"$out" || fail "password should be kept"
