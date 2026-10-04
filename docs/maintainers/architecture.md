@@ -228,3 +228,39 @@ locks the default root password / password SSH logins, removes Armbian's first-l
 Listed in `docs/hardware-test-checklist.md`; nothing in CI exercises: a real Pi-hole v6 (password config, teleporter,
 sensors), systemd behaviour (`systemd-run`, reboot from the service), Armbian first boot, mDNS on phones, the
 Orange Pi Zero 3's thermal sensor path, and a real GitHub release round trip.
+
+## Amendments agreed after the first review (these override the text above where they differ)
+
+**State**: `update.rolledBack` is `true` (the previous version was put back and passes the self-check), `false` (the update
+failed and going back did not work, or there was nothing to go back to, or the runner died) or `null` (not known / no
+failure). Only the page decides what a parent reads from it: "the previous version is back" is shown only when it is
+`true`. `update.error` is technical text for whoever helps (English, at most 200 characters, **never a command to type**);
+the page does not print it as the reason in the parent's language. Both parsers are strict (ASCII digits, whole-string
+regular expressions, no NaN/Infinity tokens, `timer.snapshot.services` must be an object); `tests/fixtures/state-cases.json`
+is the spec.
+
+**`/pb/box.json`** (written by the box program as root, mode 644, atomically; read by the page without signing in):
+`{"v":1,"version":"3.0.0","ip":"192.168.1.50","tz":"Asia/Bahrain","utcOffset":"+03:00","counter":true,"mdns":true,"at":1790000000}`.
+`ip` is the default-route IPv4 (what the router's DNS setting needs; the page never puts a *name* there), `counter` is
+"the counter address is configured", `mdns` is "avahi answers for this host", `at` is the box clock when it was written.
+Written by `sinko box-info --write` (the installer calls it after the page swap; `sinko configure` and the address watch call
+the same code) and refreshed by the scheduler every 5 minutes (only content changes or a 10-minute age cause a write: it is
+also the **heartbeat**: the page treats a box.json whose `at` is more than 20 minutes behind the box's own clock as "the
+scheduler is not running"). A missing file (an older box) disables every feature that needs it; nothing breaks.
+
+**Counter: switching off forgets.** When the answer becomes "no" (page, `sinko telemetry off`, or `reset-id`), the box sends
+`POST {url}/v1/forget` with `{"id":"<32 hex>"}` (same validation, same transport rules as a ping; answer `200 {"forgotten":true}`
+whether or not the id was known), then deletes its `install-id`. If the request fails it keeps the id plus a
+`forget-pending` marker in the state dir and retries every ping interval until it succeeds. The Worker deletes the row.
+No shell is needed anywhere in this procedure (ready-made boxes have no login).
+
+**Update source**: `SINKO_RELEASE_BASE` and `SINKO_RELEASE_API` must be https (http only to a loopback address under the test
+hooks). The installer's and the updater's lock lives in the state dir, never in `/run/lock`. `sinko update --ref X` pins the box
+(it is saved as `SINKO_REF`); `--ref latest` follows releases again; the command says so.
+
+**Migration**: a legacy `PB_REF=master` is the 2.x default, not a choice: for the official project it becomes
+`SINKO_REF=latest`. A kept lists address (the old `raw.githubusercontent.com/iret33/pihole-bahrain/...`) is **kept**, so
+no list is deleted or re-registered during migration (zero unfiltered window; GitHub's rename redirect serves it); a lists
+address inside the old app folder is rewritten to `/opt/sinko/lists`. The old scheduler is stopped (not disabled) until the
+new one runs. A pre-existing `^.*$` deny rule that is not Sinko's (by comment) keeps its comment and enabled flag, gains
+Sinko's groups, and is never deleted by `remove`.

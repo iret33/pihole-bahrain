@@ -336,6 +336,8 @@
   var UPDATE_STATUSES = ['idle', 'running', 'ok', 'failed'];
   var POWER_ACTIONS = ['reboot', 'poweroff'];
   var HHMM_RE = /^\d\d:\d\d$/;
+  // "Blank" for update.error: the same characters bin/sinko lists (neither language's own idea of whitespace decides).
+  var BLANK_RE = /^[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]*$/;
 
   function defaultState() {
     return {
@@ -343,7 +345,7 @@
       schedule: { enabled: false, start: '21:00', end: '06:00', days: [0, 1, 2, 3, 4, 5, 6] },
       scheduleActive: false,
       update: { auto: false, request: null, checkRequest: null, latest: null, notes: null, checked: 0, status: 'idle',
-        from: null, to: null, at: 0, error: null },
+        from: null, to: null, at: 0, error: null, rolledBack: null },
       power: { request: null, action: null },
       telemetry: { on: null },
       community: null,
@@ -390,7 +392,8 @@
     out.notes = typeof raw.notes === 'string' && NOTES_RE.test(raw.notes) ? raw.notes : null;
     ['checked', 'at'].forEach(function (k) { out[k] = isCount(raw[k]) ? raw[k] : 0; });
     out.status = UPDATE_STATUSES.indexOf(raw.status) >= 0 ? raw.status : 'idle';
-    out.error = typeof raw.error === 'string' && raw.error.trim() ? charSlice(raw.error, 200) : null;
+    out.error = typeof raw.error === 'string' && !BLANK_RE.test(raw.error) ? charSlice(raw.error, 200) : null;
+    out.rolledBack = typeof raw.rolledBack === 'boolean' ? raw.rolledBack : null;
     return out;
   }
   function parsePower(raw) {

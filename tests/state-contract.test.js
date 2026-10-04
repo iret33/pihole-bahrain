@@ -42,7 +42,7 @@ test('a read-modify-write of one field keeps every other field the scheduler wro
     schedule: { enabled: true, start: '22:00', end: '06:30', days: [0, 1, 2, 3, 4] }, scheduleActive: true,
     update: { auto: true, request: null, checkRequest: 1800000001234, latest: '3.1.0',
       notes: 'https://github.com/iret33/sinko/releases/tag/v3.1.0', checked: 1800000000, status: 'running', from: '3.0.0', to: '3.1.0',
-      at: 1800000100, error: null },
+      at: 1800000100, error: null, rolledBack: null },
     power: { request: null, action: null }, telemetry: { on: true }, community: { online: 1234, at: 1800000000 }, setup: { done: true }
   });
   const st = C.parseState(stored);

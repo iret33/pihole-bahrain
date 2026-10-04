@@ -94,15 +94,15 @@ DEFAULT_STATE = {
     "scheduleActive": False,
     # Written by the parent page (auto, request, checkRequest) and by the scheduler (the rest). See parse_state.
     "update": {"auto": False, "request": None, "checkRequest": None, "latest": None, "notes": None,
-               "checked": 0, "status": "idle", "from": None, "to": None, "at": 0, "error": None},
+               "checked": 0, "status": "idle", "from": None, "to": None, "at": 0, "error": None, "rolledBack": None},
     "power": {"request": None, "action": None},      # the page asks for "reboot" or "poweroff"
     "telemetry": {"on": None},                       # None: not asked yet; True/False: the parent's answer
     "community": None,                               # {"online": n, "at": epoch}, set by the scheduler after a ping
     "setup": {"done": False},                        # the first-run checklist was dismissed
 }
 
-SEMVER_RE = re.compile(r"^\d{1,4}\.\d{1,4}\.\d{1,4}$")
-NOTES_RE = re.compile(r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases(/tag/[A-Za-z0-9_.+-]+)?$")
+SEMVER_RE = re.compile(r"\d{1,4}\.\d{1,4}\.\d{1,4}", re.ASCII)      # always used with fullmatch: "$" lets a newline through
+NOTES_RE = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases(/tag/[A-Za-z0-9_.+-]+)?", re.ASCII)
 UPDATE_STATUSES = ("idle", "running", "ok", "failed")
 POWER_ACTIONS = ("reboot", "poweroff")
 
@@ -311,8 +311,8 @@ def read_update_result():
         return None
     err = raw.get("error")
     return {"status": raw["status"],
-            "from": raw.get("from") if isinstance(raw.get("from"), str) and SEMVER_RE.match(raw["from"]) else None,
-            "to": raw.get("to") if isinstance(raw.get("to"), str) and SEMVER_RE.match(raw["to"]) else None,
+            "from": raw.get("from") if isinstance(raw.get("from"), str) and SEMVER_RE.fullmatch(raw["from"]) else None,
+            "to": raw.get("to") if isinstance(raw.get("to"), str) and SEMVER_RE.fullmatch(raw["to"]) else None,
             "error": err[:200] if isinstance(err, str) and err.strip() else None,
             "at": float(raw["at"])}
 
@@ -668,20 +668,20 @@ class Api:
 def parse_state(raw) -> dict:
     state = json.loads(json.dumps(DEFAULT_STATE))
     try:
-        data = json.loads(raw) if raw else {}
-    except ValueError:
+        data = json.loads(raw, parse_constant=_no_constants) if raw else {}
+    except (ValueError, RecursionError):
         data = {}
     if not isinstance(data, dict):
         data = {}
     timer = data.get("timer")
-    if isinstance(timer, dict) and timer.get("mode") in ("free", "block") \
-            and isinstance(timer.get("until"), (int, float)):
+    if isinstance(timer, dict) and timer.get("mode") in ("free", "block") and _is_number(timer.get("until")):
         snap = timer.get("snapshot") if isinstance(timer.get("snapshot"), dict) else {}
+        services = snap.get("services") if isinstance(snap.get("services"), dict) else {}   # a list or text here must not crash the tick
         state["timer"] = {
             "mode": timer["mode"],
             "until": float(timer["until"]),
             "snapshot": {
-                "services": {k: bool(v) for k, v in (snap.get("services") or {}).items()},
+                "services": {str(k): bool(v) for k, v in services.items()},
                 "offline": bool(snap.get("offline", False)),
             },
         }
@@ -694,7 +694,7 @@ def parse_state(raw) -> dict:
                 s[key] = sched[key]
         days = sched.get("days")
         if isinstance(days, list):
-            s["days"] = sorted({int(d) for d in days if isinstance(d, int) and 0 <= d <= 6})
+            s["days"] = sorted({int(d) for d in days if _is_number(d) and d == int(d) and 0 <= d <= 6})
     state["scheduleActive"] = bool(data.get("scheduleActive", False))
     state["update"] = _parse_update(data.get("update"))
     state["power"] = _parse_power(data.get("power"))
@@ -708,6 +708,16 @@ def parse_state(raw) -> dict:
     if isinstance(setup, dict):
         state["setup"] = {"done": setup.get("done") is True}
     return state
+
+
+def _no_constants(token):
+    """json accepts NaN and Infinity, which JSON (and the page's JSON.parse) does not: the whole description is then garbage."""
+    raise ValueError(token)
+
+
+# What counts as "blank" in update.error: the same characters in the page (web/pb-core.js), spelled out so that neither
+# language's idea of whitespace (Python's \x1c-\x1f and \x85, JavaScript's byte order mark) decides.
+_BLANK_RE = re.compile("[\t\n\x0b\x0c\r \xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]*")
 
 
 def _is_number(value) -> bool:
@@ -736,15 +746,16 @@ def _parse_update(raw) -> dict:
     out["checkRequest"] = _nonce(raw.get("checkRequest"))
     for key in ("latest", "from", "to"):
         v = raw.get(key)
-        out[key] = v if isinstance(v, str) and SEMVER_RE.match(v) else None
+        out[key] = v if isinstance(v, str) and SEMVER_RE.fullmatch(v) else None
     notes = raw.get("notes")
-    out["notes"] = notes if isinstance(notes, str) and NOTES_RE.match(notes) else None
+    out["notes"] = notes if isinstance(notes, str) and NOTES_RE.fullmatch(notes) else None
     for key in ("checked", "at"):
         v = raw.get(key)
         out[key] = v if _is_count(v) else 0
     out["status"] = raw.get("status") if raw.get("status") in UPDATE_STATUSES else "idle"
     err = raw.get("error")
-    out["error"] = err[:200] if isinstance(err, str) and err.strip() else None
+    out["error"] = err[:200] if isinstance(err, str) and not _BLANK_RE.fullmatch(err) else None
+    out["rolledBack"] = raw.get("rolledBack") if isinstance(raw.get("rolledBack"), bool) else None
     return out
 
 
@@ -758,14 +769,13 @@ def _parse_power(raw) -> dict:
     return out
 
 
+HHMM_RE = re.compile(r"[0-9]{2}:[0-9]{2}")
+
+
 def valid_hhmm(value) -> bool:
-    if not isinstance(value, str) or len(value) != 5 or value[2] != ":":
+    if not isinstance(value, str) or not HHMM_RE.fullmatch(value):
         return False
-    try:
-        h, m = int(value[:2]), int(value[3:])
-    except ValueError:
-        return False
-    return 0 <= h <= 23 and 0 <= m <= 59
+    return int(value[:2]) <= 23 and int(value[3:]) <= 59
 
 
 def in_schedule(sched: dict, now: dt.datetime) -> bool:
@@ -944,7 +954,7 @@ def pick_release(data):
 def notes_url(slug: str, tag: str):
     """The release page, built from the configured repository, not copied from what a server said."""
     url = "https://github.com/%s/releases/tag/%s" % (slug, tag)
-    return url if NOTES_RE.match(url) else None
+    return url if NOTES_RE.fullmatch(url) else None
 
 
 def fetch_latest_release(settings: dict, fetch=http_fetch):
