@@ -133,6 +133,90 @@ class SetupTests(Base):
         self.assertIn(self.group("pb-svc-youtube")["id"], sara["groups"])
 
 
+class RemoveAdoptedClientTests(Base):
+    """A client row that the owner had before Sinko, or gave a group of their own since, is not Sinko's to delete: on
+    `sinko remove` (and the seal's remove-and-setup) Sinko's groups come off it and the owner's stay. Only a row that
+    holds nothing but Sinko's groups and the Default group goes."""
+
+    def kid(self, client, comment, extra=(), with_default=True):
+        gid = {g["name"]: g["id"] for g in self.store.groups}
+        groups = sorted(set(pb.kid_groups(gid, self.catalog)) | set(extra))
+        if not with_default:
+            groups = [g for g in groups if g != 0]
+        self.api.request("POST", "/api/clients", {"client": client, "comment": comment, "groups": groups})
+
+    def rows(self):
+        return {c["client"]: c for c in self.store.clients}
+
+    def setup(self):
+        self.ctl.setup(run_gravity=False)
+        self.api.request("POST", "/api/groups", {"name": "Adults", "comment": "mine", "enabled": True})
+        self.api.request("POST", "/api/groups", {"name": "NoAds", "comment": "mine too", "enabled": True})
+        return {g["name"]: g["id"] for g in self.store.groups}
+
+    def test_a_row_with_a_group_of_the_owners_survives_with_only_that_group_and_default(self):
+        gid = self.setup()
+        self.kid("AA:BB:CC:00:00:01", "Sara's tablet", extra=[gid["Adults"], gid["NoAds"]])
+        self.ctl.remove()
+        row = self.rows()["AA:BB:CC:00:00:01"]
+        self.assertEqual(sorted(row["groups"]), sorted([0, gid["Adults"], gid["NoAds"]]))
+        self.assertEqual(row["comment"], "Sara's tablet", "and keeps its name")
+        self.assertEqual({g["name"] for g in self.store.groups}, {"Default", "Adults", "NoAds"})
+
+    def test_a_row_that_holds_only_sinkos_groups_and_the_default_one_is_deleted(self):
+        self.setup()
+        self.kid("AA:BB:CC:00:00:02", "Omar")
+        self.ctl.remove()
+        self.assertEqual(self.rows(), {})
+
+    def test_a_row_without_the_default_group_that_holds_only_sinkos_is_deleted_too(self):
+        self.setup()
+        self.kid("AA:BB:CC:00:00:03", "Layla", with_default=False)
+        self.ctl.remove()
+        self.assertEqual(self.rows(), {})
+
+    def test_a_row_with_only_a_group_of_the_owners_and_no_default_keeps_that_group(self):
+        gid = self.setup()
+        self.kid("192.168.1.30", "Hamad", extra=[gid["Adults"]], with_default=False)
+        self.ctl.remove()
+        self.assertEqual(self.rows()["192.168.1.30"]["groups"], [gid["Adults"]])
+
+    def test_each_row_is_judged_on_its_own(self):
+        gid = self.setup()
+        self.kid("AA:BB:CC:00:00:01", "Sara", extra=[gid["Adults"]])
+        self.kid("AA:BB:CC:00:00:02", "Omar")
+        self.api.request("POST", "/api/clients", {"client": "AA:BB:CC:00:00:09", "comment": "mine, never a kid",
+                                                  "groups": [0, gid["Adults"]]})
+        self.ctl.remove()
+        self.assertEqual(sorted(self.rows()), ["AA:BB:CC:00:00:01", "AA:BB:CC:00:00:09"])
+        self.assertEqual(sorted(self.rows()["AA:BB:CC:00:00:09"]["groups"]), sorted([0, gid["Adults"]]), "not touched at all")
+
+    def test_a_paused_device_of_the_owners_loses_only_the_pause(self):
+        gid = self.setup()
+        self.kid("AA:BB:CC:00:00:04", "Noor", extra=[gid["Adults"], gid["pb-paused"]])
+        self.ctl.remove()
+        self.assertEqual(sorted(self.rows()["AA:BB:CC:00:00:04"]["groups"]), sorted([0, gid["Adults"]]))
+
+    def test_the_seals_remove_then_setup_keeps_such_a_row_and_does_not_bring_sinko_back_onto_it(self):
+        gid = self.setup()
+        self.kid("AA:BB:CC:00:00:01", "Sara", extra=[gid["Adults"]])
+        self.kid("AA:BB:CC:00:00:02", "Omar")
+        self.ctl.remove()
+        self.ctl.setup(run_gravity=False)
+        self.assertEqual(sorted(self.rows()), ["AA:BB:CC:00:00:01"])
+        names = {n: g for n, g in {g["name"]: g for g in self.store.groups}.items()}
+        self.assertNotIn(names["pb-kids"]["id"], self.rows()["AA:BB:CC:00:00:01"]["groups"],
+                         "a setup after the removal does not make it a kid device again")
+
+    def test_removing_twice_is_harmless(self):
+        gid = self.setup()
+        self.kid("AA:BB:CC:00:00:01", "Sara", extra=[gid["Adults"]])
+        self.ctl.remove()
+        before = json.dumps(self.store.clients, sort_keys=True)
+        self.ctl.remove()
+        self.assertEqual(json.dumps(self.store.clients, sort_keys=True), before)
+
+
 OLD_COMMENT = "pihole-bahrain: blocks everything for offline/paused kid devices"
 
 

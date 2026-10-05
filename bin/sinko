@@ -2307,15 +2307,22 @@ class Controller:
         return lines
 
     def remove(self) -> None:
+        """Take everything Sinko made out of Pi-hole. A client row that holds only Sinko's groups (and the Default one) is
+        Sinko's own and is deleted. A row that also holds a group of the owner's (the owner had registered the device
+        before, or gave it a group of their own since) is the owner's: Sinko's groups come off it and the row, its name
+        and the owner's groups stay."""
         groups = self.api.group_map()
         ours = {g["id"] for n, g in groups.items() if n.startswith("pb-")}
+        kids_id = groups.get(G_KIDS, {}).get("id")
         for c in self.api.clients():
-            if set(c.get("groups", [])) & ours:
-                if groups.get(G_KIDS) and groups[G_KIDS]["id"] in c.get("groups", []):
-                    self.api.request("DELETE", "/api/clients/" + Api.q(c["client"]))
-                else:
-                    keep = [g for g in c["groups"] if g not in ours] or [DEFAULT_GROUP]
-                    self.api.put_client(c["client"], c.get("comment") or "", keep)
+            held = c.get("groups", [])
+            if not set(held) & ours:
+                continue
+            keep = [g for g in held if g not in ours]
+            if kids_id in held and set(keep) <= {DEFAULT_GROUP}:
+                self.api.request("DELETE", "/api/clients/" + Api.q(c["client"]))
+            else:
+                self.api.put_client(c["client"], c.get("comment") or "", keep or [DEFAULT_GROUP])
         for l in self.api.lists():
             if (l.get("comment") or "").startswith(LIST_COMMENT_PREFIX):
                 self.api.request("DELETE", "/api/lists/%s?type=block" % Api.q(l["address"]))
@@ -5010,7 +5017,8 @@ def cmd_remove(args) -> int:
         Controller(api, load_catalog()).remove()
     finally:
         drop_session(api)
-    print("sinko: removed its groups, lists, rules and kid devices from Pi-hole")
+    print("sinko: removed its groups, lists and rules from Pi-hole, and the devices that were registered only for it "
+          "(a device that also has a group of yours stays, without Sinko's groups)")
     return 0
 
 
