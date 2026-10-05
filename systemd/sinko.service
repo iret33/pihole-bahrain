@@ -15,6 +15,13 @@ TimeoutStopSec=30
 # Runtime data (update results, the counter's id, rollback copies): created here, root only. The installer also makes it.
 StateDirectory=sinko
 StateDirectoryMode=0700
+# The scheduler's pulse (heartbeat.json: "I finished a pass just now") is kept in memory, in /run/sinko, so that writing it
+# every few seconds costs the memory card nothing. systemd makes the folder before the scheduler starts (root only, as the
+# program itself insists), keeps it while the service is restarted (the installer restarts the scheduler in the middle of
+# every update) and deletes it when the service is stopped, so a pulse never outlives the scheduler that made it.
+RuntimeDirectory=sinko
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=restart
 # What the scheduler does that a sandbox could get in the way of, and why the options below are what they are:
 #   * it talks to Pi-hole's API on localhost and to GitHub (update check)             -> network stays open
 #   * it starts updates with systemd-run (a transient unit sinko-update, outside this sandbox) and asks systemd to

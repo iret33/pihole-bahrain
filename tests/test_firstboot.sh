@@ -9,6 +9,7 @@ PORT="${PORT:-18084}"
 fake_system_init
 FIRSTBOOT="$ROOT/opt/sinko/tools/firstboot.sh"
 export SINKO_FIRSTBOOT_WAIT=0                       # do not wait for an address in the tests
+export SINKO_FIRSTBOOT_TLS_WAIT=0                   # ... nor for Pi-hole's HTTPS key
 cat >"$WORK/os-release" <<'EOF'
 PRETTY_NAME="Armbian 25.8 trixie"
 ID=debian
@@ -32,6 +33,8 @@ make_box() {
   printf '%s\n' 0123456789abcdef0123456789abcdef >"$ROOT/var/lib/sinko/install-id"
   ( umask 077; printf 'hostname=sinko\n' >"$ROOT/var/lib/sinko/firstboot" )
   touch "$WORK/units/sinko-firstboot.service.enabled" "$WORK/units/ssh.service.enabled"
+  # The seal removed the golden unit's HTTPS key; Pi-hole's FTL made a new one when it started (before this unit runs).
+  printf -- '-----BEGIN EC PRIVATE KEY-----\nnew\n-----END EC PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\nnew\n-----END CERTIFICATE-----\n' >"$ROOT/etc/pihole/tls.pem"
   echo 10.0.0.77 >"$WORK/ipaddr"
   : >"$WORK/calls.log"
 }
@@ -73,6 +76,7 @@ diff <(grep -v '^SINKO_IP=' "$ROOT/etc/sinko/config") "$WORK/config.before" >/de
 [[ "$(stat -c %a "$ROOT/etc/sinko/config")" == 644 ]] || fail "the settings file lost its mode"
 [[ ! -e "$ROOT/var/lib/sinko/firstboot" ]] || fail "the flag is still there after a complete first start"
 [[ ! -e "$WORK/units/sinko-firstboot.service.enabled" ]] || fail "the first-start service was not disabled"
+grep -q "restart pihole-FTL" "$WORK/calls.log" && fail "Pi-hole was restarted although its HTTPS key was already there (a pointless break of the home's DNS)"
 echo "--- and when it runs again it does nothing"
 after_first="$(world_digest)"
 run_firstboot again || fail "a second run failed"
@@ -91,14 +95,70 @@ grep -q '^hostname=sinko$' "$ROOT/var/lib/sinko/firstboot" || fail "the flag los
 [[ "$(cat "$ROOT/etc/hostname")" == sinko && ! -e "$ROOT/var/lib/sinko/install-id" ]] || fail "the local steps were not done"
 grep -q '^SINKO_IP=192.168.1.50$' "$ROOT/etc/sinko/config" || fail "SINKO_IP changed without an address"
 first_keys="$(keys_digest)"
+grep -q '^ids=done$' "$ROOT/var/lib/sinko/firstboot" || fail "the flag does not remember that the id was dealt with"
+grep -q '^tries=1$' "$ROOT/var/lib/sinko/firstboot" || fail "the flag does not count the start that went without an address"
+echo "    a retry does not delete the counter's id again (the scheduler has made one since, and the parent may have said yes)"
+printf '%s\n' fedcba9876543210fedcba9876543210 >"$ROOT/var/lib/sinko/install-id"
 run_firstboot down2 || fail "the second start without a network failed"
 [[ "$(keys_digest)" == "$first_keys" ]] || fail "the host keys were made a second time"
+[[ "$(cat "$ROOT/var/lib/sinko/install-id")" == fedcba9876543210fedcba9876543210 ]] || fail "a retry deleted the counter's id: the box would be counted twice"
 echo "    the cable arrives: the next start finishes"
 rm "$WORK/net-down"
 run_firstboot up || { cat "$WORK/up.out"; fail "the start with a network failed"; }
 [[ ! -e "$ROOT/var/lib/sinko/firstboot" && "$(keys_digest)" == "$first_keys" ]] || fail "the retry did not finish cleanly, or made new keys"
+[[ -f "$ROOT/var/lib/sinko/install-id" ]] || fail "the counter's id was deleted by the start that finished"
 grep -q '^SINKO_IP=10.0.0.77$' "$ROOT/etc/sinko/config" || fail "SINKO_IP not updated after the retry"
 [[ "$(grep -c '^ssh-keygen' "$WORK/calls.log")" == 1 ]] || fail "ssh-keygen ran more than once"
+
+echo "--- three starts without an address: the first-start service lets go, the scheduler's address watch takes over"
+make_box
+touch "$WORK/net-down"
+run_firstboot give1 || fail "start 1 without a network failed"
+run_firstboot give2 || fail "start 2 without a network failed"
+[[ -f "$ROOT/var/lib/sinko/firstboot" ]] || fail "the flag was removed after two starts without a network"
+run_firstboot give3 || { cat "$WORK/give3.out"; fail "start 3 without a network failed"; }
+grep -q "left to the scheduler's address watch" "$WORK/give3.out" || { cat "$WORK/give3.out"; fail "no note that the address watch sets the address"; }
+[[ ! -e "$ROOT/var/lib/sinko/firstboot" && ! -e "$WORK/units/sinko-firstboot.service.enabled" ]] || fail "the service stays armed: it would hold back SSH and the scheduler at every start"
+grep -q '^SINKO_IP=192.168.1.50$' "$ROOT/etc/sinko/config" || fail "SINKO_IP was changed without an address"
+
+echo "--- Pi-hole's HTTPS key: not touched when it is there; when it is not, FTL is restarted once, and the first start only ends well when the key exists"
+echo "    no key yet, and Pi-hole makes one when it is restarted"
+make_box
+rm "$ROOT/etc/pihole/tls.pem"
+touch "$WORK/ftl-makes-cert"
+run_firstboot tls1 || { cat "$WORK/tls1.out"; fail "the first start failed without an HTTPS key"; }
+grep -q "systemctl restart pihole-FTL.service" "$WORK/calls.log" || fail "Pi-hole was not restarted to make its key"
+[[ "$(grep -c 'systemctl restart pihole-FTL.service' "$WORK/calls.log")" == 1 ]] || fail "Pi-hole was restarted more than once"
+grep -q 'PRIVATE KEY' "$ROOT/etc/pihole/tls.pem" || fail "there is no HTTPS key"
+[[ ! -e "$ROOT/var/lib/sinko/firstboot" ]] || fail "the first start did not finish although the key is there now"
+echo "    Pi-hole cannot make one: the flag stays (everything else is done), and the next start finishes when it can"
+make_box
+rm "$ROOT/etc/pihole/tls.pem"
+run_firstboot tls2 || { cat "$WORK/tls2.out"; fail "a missing key must not fail the unit"; }
+grep -q "still has no HTTPS key" "$WORK/tls2.out" || fail "no note that the key is missing"
+[[ -f "$ROOT/var/lib/sinko/firstboot" ]] || fail "the first start declared success although Pi-hole has no HTTPS key"
+grep -q '^SINKO_IP=192.168.1.50$' "$ROOT/etc/sinko/config" || fail "the address step ran before the key was there"
+touch "$WORK/ftl-makes-cert"
+run_firstboot tls3 || fail "the retry failed"
+[[ ! -e "$ROOT/var/lib/sinko/firstboot" && -s "$ROOT/etc/pihole/tls.pem" ]] || fail "the retry did not finish with a key"
+echo "    a file without a private key in it (an empty or half-written one) does not count"
+make_box
+echo "-----BEGIN CERTIFICATE-----" >"$ROOT/etc/pihole/tls.pem"
+touch "$WORK/ftl-makes-cert"
+run_firstboot tls4 || fail "start with a half-written key failed"
+grep -q 'PRIVATE KEY' "$ROOT/etc/pihole/tls.pem" || fail "a certificate without a key was accepted as Pi-hole's HTTPS key"
+echo "    the file Pi-hole's settings name is the one that counts, and without https there is nothing to wait for"
+make_box
+mkdir -p "$ROOT/etc/pihole/custom"; mv "$ROOT/etc/pihole/tls.pem" "$ROOT/etc/pihole/custom/web.pem"
+pihole-FTL --config webserver.tls.cert "$ROOT/etc/pihole/custom/web.pem"
+run_firstboot tls5 || fail "start with a custom key path failed"
+grep -q "restart pihole-FTL" "$WORK/calls.log" && fail "Pi-hole was restarted although the key it names is there"
+make_box
+rm "$ROOT/etc/pihole/tls.pem"
+pihole-FTL --config webserver.port 80
+run_firstboot tls6 || fail "start without https failed"
+grep -q "restart pihole-FTL" "$WORK/calls.log" && fail "Pi-hole was restarted for a key although it serves no https"
+[[ ! -e "$ROOT/var/lib/sinko/firstboot" ]] || fail "the first start did not finish on a box without https"
 
 echo "--- Pi-hole not ready for the address: the flag stays and the exit is clean"
 make_box

@@ -22,7 +22,7 @@ fake_system_init() {
   export WORK ROOT PORT
   : >"$WORK/calls.log"
   printf '%s\n' git curl ca-certificates python3 iproute2 >"$WORK/dpkg-installed"
-  touch "$WORK/units/pihole-FTL.service.active"
+  touch "$WORK/units/pihole-FTL.service.active" "$WORK/units/pihole-FTL.service.enabled"      # a Pi-hole that was installed: running and enabled
   trap fake_system_cleanup EXIT
   guard_snapshot
   make_stubs
@@ -30,6 +30,7 @@ fake_system_init() {
   export PATH="$STUBS:$PATH" SINKO_ROOT="$ROOT" SINKO_NONINTERACTIVE=1
   export SINKO_API_URL="http://127.0.0.1:$PORT" SINKO_CLI_PW_FILE="$WORK/cli_pw"
   export SINKO_APP_DIR="$ROOT/opt/sinko" SINKO_CONFIG_FILE="$ROOT/etc/sinko/config" SINKO_STATE_DIR="$ROOT/var/lib/sinko"
+  export SINKO_RUN_DIR="$WORK/run"          # where the scheduler's heartbeat would be (the stub of systemctl writes it)
   touch "$ROOT/etc/pihole/pihole.toml"
   command -v pihole-FTL >/dev/null || fail "stub missing"
 }
@@ -62,9 +63,11 @@ make_stubs() {
 #!/usr/bin/env bash
 [[ -e "$WORK/net-down" ]] && exit 0
 addr="$(cat "$WORK/ipaddr" 2>/dev/null || echo 192.168.1.50)"
+# $WORK/ip-static: the address is a fixed one (no "dynamic" in the line), not one from the router's DHCP.
+dyn="dynamic "; [[ -e "$WORK/ip-static" ]] && dyn=""
 case "$*" in
   *"route show default"*) echo "default via 192.168.1.1 dev eth0 proto dhcp src $addr metric 100" ;;
-  *"addr show dev eth0"*) echo "2: eth0    inet $addr/24 brd 192.168.1.255 scope global dynamic eth0" ;;
+  *"addr show dev eth0"*) echo "2: eth0    inet $addr/24 brd 192.168.1.255 scope global ${dyn}eth0" ;;
 esac
 EOF
   # dpkg -s PKG answers from a list the apt-get stub extends.
@@ -76,7 +79,10 @@ EOF
   cat >"$STUBS/apt-get" <<'EOF'
 #!/usr/bin/env bash
 echo "apt-get $*" >>"$WORK/calls.log"
+[[ -z "${SINKO_PASSWORD+x}${PB_PASSWORD+x}" ]] || echo "apt-get $*" >>"$WORK/password-in-env"
 if [[ -e "$WORK/apt-fail" ]]; then echo "E: apt is not available (stub)" >&2; exit 100; fi
+# $WORK/apt-update-fail: "apt-get update" fails (a package source is unreachable), everything else works from the lists apt has.
+if [[ " $* " == *" update "* && -e "$WORK/apt-update-fail" ]]; then echo "E: Failed to fetch (stub)" >&2; exit 100; fi
 if [[ " $* " == *" install "* ]]; then
   for a in "$@"; do
     case "$a" in -*|install) ;; *) echo "$a" >>"$WORK/dpkg-installed" ;; esac
@@ -84,15 +90,37 @@ if [[ " $* " == *" install "* ]]; then
 fi
 exit 0
 EOF
+  # apt-cache policy PKG: every package has a candidate, unless $WORK/apt-nocandidate says the sources have none.
+  cat >"$STUBS/apt-cache" <<'EOF'
+#!/usr/bin/env bash
+echo "apt-cache $*" >>"$WORK/calls.log"
+[[ "$1" == policy ]] || exit 0
+shift
+for p in "$@"; do
+  echo "$p:"
+  echo "  Installed: (none)"
+  if [[ -e "$WORK/apt-nocandidate" ]]; then echo "  Candidate: (none)"; else echo "  Candidate: 1.0-1"; fi
+done
+EOF
+  # python3: the installer asks which version it runs on; $WORK/py-old makes the answer 3.8. Everything else is the real one.
+  cat >"$STUBS/python3" <<EOF
+#!/usr/bin/env bash
+if [[ -e "\$WORK/py-old" && "\$*" == *"sys.version_info[:2]"* ]]; then echo 3.8; exit 0; fi
+exec "$(command -v python3)" "\$@"
+EOF
   # systemctl keeps "active" and "enabled" as marker files, so tests can ask what the scripts did.
   cat >"$STUBS/systemctl" <<'EOF'
 #!/usr/bin/env bash
 echo "systemctl $*" >>"$WORK/calls.log"
+# Every program the installer starts must find the parent password out of its environment (see test_install.sh).
+[[ -z "${SINKO_PASSWORD+x}${PB_PASSWORD+x}" ]] || echo "systemctl $*" >>"$WORK/password-in-env"
 mkdir -p "$WORK/units"
-cmd=""; units=(); now=0
+cmd=""; units=(); now=0; props=(); skip=0
 for a in "$@"; do
+  if (( skip )); then props+=("$a"); skip=0; continue; fi
   case "$a" in
     --now) now=1 ;;
+    -p) skip=1 ;;
     -*) ;;
     *) if [[ -z "$cmd" ]]; then cmd="$a"; else units+=("$a"); fi ;;
   esac
@@ -101,8 +129,58 @@ norm() { case "$1" in *.*) echo "$1" ;; *) echo "$1.service" ;; esac; }
 case "$cmd" in
   is-active)  u="$(norm "${units[0]}")"; if [[ -e "$WORK/units/$u.active" ]]; then echo active; exit 0; else echo inactive; exit 3; fi ;;
   is-enabled) u="$(norm "${units[0]}")"; if [[ -e "$WORK/units/$u.enabled" ]]; then echo enabled; exit 0; else echo disabled; exit 1; fi ;;
-  start|restart) for u in "${units[@]}"; do touch "$WORK/units/$(norm "$u").active"; done ;;
-  stop) for u in "${units[@]}"; do rm -f "$WORK/units/$(norm "$u").active"; done ;;
+  # show -p ActiveState -p ActiveEnterTimestampMonotonic -p MainPID -p NRestarts UNIT: what the program's scheduler check
+  # reads. A scheduler that was started is healthy: up for a long time, no restarts, and it has finished passes (the stub
+  # writes the heartbeat the real scheduler would have written, with the version of the installed release).
+  # Switches for a test: $WORK/sched-crashloop (restarted again and again: up 3 s, 3 restarts, no heartbeat),
+  # $WORK/sched-starting (a number: that many answers say "started 5 s ago, no pass yet", then it is healthy),
+  # $WORK/sched-age (seconds the unit has been up).
+  show) u="$(norm "${units[0]}")"
+        python3 - "$WORK" "$u" "${SINKO_RUN_DIR:-$WORK/run}" "$ROOT/opt/sinko/VERSION" "${props[@]}" <<'PYEOF2'
+import json, os, sys, time
+work, unit, run_dir, version_file = sys.argv[1:5]
+def flag(name):
+    return os.path.exists(os.path.join(work, name))
+active = os.path.exists(os.path.join(work, "units", unit + ".active"))
+age, restarts, beat = 100, 0, True
+if unit == "sinko.service" and active:
+    if flag("sched-age"):
+        age = float(open(os.path.join(work, "sched-age")).read().strip())
+    if flag("sched-crashloop"):
+        age, restarts, beat = 3, 3, False
+    elif flag("sched-starting"):
+        path = os.path.join(work, "sched-starting")
+        left = int(open(path).read().strip() or "1")
+        if left > 0:
+            age, beat = 5, False
+            open(path, "w").write(str(left - 1))
+now = time.monotonic()
+props = {"ActiveState": "active" if active else "inactive",
+         "ActiveEnterTimestampMonotonic": int((now - age) * 1e6) if active else 0,
+         "MainPID": 4242 if active else 0, "NRestarts": restarts}
+if unit == "sinko.service" and active and beat:
+    try:
+        version = open(version_file).read().strip()
+    except OSError:
+        version = ""
+    os.makedirs(run_dir, exist_ok=True)
+    with open(os.path.join(run_dir, "heartbeat.json"), "w") as fh:
+        json.dump({"v": 1, "pid": 4242, "version": version, "ticks": 5, "mono": now}, fh)
+for key in sys.argv[5:] or props:
+    if key in props:
+        print("%s=%s" % (key, props[key]))
+PYEOF2
+        exit 0 ;;
+  start|restart) for u in "${units[@]}"; do touch "$WORK/units/$(norm "$u").active"; done
+                 # $WORK/ftl-makes-cert: Pi-hole's FTL writes its HTTPS key and certificate when it starts without them.
+                 if [[ -e "$WORK/ftl-makes-cert" && " ${units[*]} " == *" pihole-FTL.service "* ]]; then
+                   mkdir -p "$ROOT/etc/pihole"
+                   printf -- '-----BEGIN EC PRIVATE KEY-----\n%s\n-----END EC PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\ncert\n-----END CERTIFICATE-----\n' "$RANDOM$RANDOM" >"$ROOT/etc/pihole/tls.pem"
+                   echo "certificate" >"$ROOT/etc/pihole/tls.crt"
+                 fi ;;
+  stop) # $WORK/ftl-stop-fails: Pi-hole's FTL cannot be stopped.
+        if [[ -e "$WORK/ftl-stop-fails" && " ${units[*]} " == *" pihole-FTL.service "* ]]; then exit 1; fi
+        for u in "${units[@]}"; do rm -f "$WORK/units/$(norm "$u").active"; done ;;
   enable) for u in "${units[@]}"; do touch "$WORK/units/$(norm "$u").enabled"; (( now )) && touch "$WORK/units/$(norm "$u").active"; done ;;
   disable) for u in "${units[@]}"; do rm -f "$WORK/units/$(norm "$u").enabled"; (( now )) && rm -f "$WORK/units/$(norm "$u").active"; done ;;
 esac
@@ -129,10 +207,18 @@ assert args[0] == "--config", args
 if os.path.exists(work + "/ftl-fail"):
     sys.exit(1)
 if len(args) == 2:
-    print(conf.get(args[1], ""))
+    value = conf.get(args[1], "")
+    if args[1] == "webserver.api.totp_secret":          # like FTL: a write-only secret prints ******** when set, nothing when not
+        value = "********" if value else ""
+    print(value)
     # Like FTL: with -q, a true/false setting is also the exit status.
     sys.exit(1 if "-q" in sys.argv and conf.get(args[1]) == "false" else 0)
 val = args[2]
+if args[1] in ("webserver.api.totp_secret", "webserver.api.app_pwhash", "webserver.api.app_sudo"):
+    with open(work + "/calls.log", "a") as log:
+        log.write("pihole-FTL --config %s <%s>\n" % (args[1], "empty" if not val else "set"))
+    if os.path.exists(work + "/credential-stuck"):      # a secret that cannot be cleared
+        sys.exit(0)
 if args[1] in ("webserver.api.password", "webserver.api.pwhash"):
     # $WORK/password-stuck: nothing removes the password. $WORK/password-needs-pwhash: only clearing the hash does.
     with open(work + "/calls.log", "a") as log:
@@ -150,17 +236,50 @@ if args[1] == "dns.hosts":
 conf[args[1]] = val
 json.dump(conf, open(db, "w"))
 EOF
+  # With $WORK/pihole-g-block present, "pihole -g" (gravity) hangs, like a slow list download: the test can then end the
+  # installer in the middle of `sinko setup`. $WORK/pihole-g-started and pihole-g-pid tell it where the hang is.
   cat >"$STUBS/pihole" <<'EOF'
 #!/usr/bin/env bash
 echo "pihole $*" >>"$WORK/calls.log"
+[[ -z "${SINKO_PASSWORD+x}${PB_PASSWORD+x}" ]] || echo "pihole $*" >>"$WORK/password-in-env"
+if [[ "${1:-}" == -g && -e "$WORK/pihole-g-fail" ]]; then echo "gravity failed (stub)" >&2; exit 1; fi
+if [[ "${1:-}" == -g && -e "$WORK/pihole-g-block" ]]; then
+  echo $$ >"$WORK/pihole-g-pid"; : >"$WORK/pihole-g-started"
+  exec sleep 600
+fi
 EOF
   # The installer's internet check probes github.com; everything else goes to the real curl (local servers only).
   # With $WORK/offline present the probe fails like it does on a box that has lost its internet.
+  # Every call is written to $WORK/curl.log, so a test can see which protocol limits the installer put on it.
   cat >"$STUBS/curl" <<EOF
 #!/usr/bin/env bash
+echo "curl \$*" >>"\$WORK/curl.log"
 if [[ "\$*" == *" https://github.com" ]]; then [[ -e "\$WORK/offline" ]] && exit 7; exit 0; fi
 exec "$(command -v curl)" "\$@"
 EOF
+  # install, mv and rm: the real ones, except that while $WORK/tripwire exists each call first checks that the files an
+  # update must never take away are all there (the program, every list, the page folder, the start page, the units).
+  # A violation is written to $WORK/tripwire-hit: a power cut at that moment would have left the box broken.
+  local tool
+  for tool in install mv rm; do
+    cat >"$STUBS/$tool" <<EOF
+#!/usr/bin/env bash
+if [[ -e "\$WORK/tripwire" ]]; then
+  need_lists="\$(cat "\$WORK/tripwire")"
+  have_lists="\$(ls "\$ROOT"/opt/sinko/lists/*.txt 2>/dev/null | wc -l)"
+  web="\$ROOT/var/www/html"
+  problem=""
+  (( have_lists >= need_lists )) || problem="only \$have_lists lists"
+  [[ -s "\$ROOT/opt/sinko/bin/sinko" ]] || problem="no program"
+  [[ -s "\$ROOT/opt/sinko/lists/services.json" ]] || problem="no services.json"
+  [[ -s "\$web/index.html" ]] || problem="no start page"
+  [[ -d "\$web/pb" || -d "\$web/pb.old" ]] || problem="no page folder"
+  [[ -s "\$ROOT/etc/systemd/system/sinko.service" ]] || problem="no scheduler unit"
+  [[ -z "\$problem" ]] || echo "$tool \$*: \$problem" >>"\$WORK/tripwire-hit"
+fi
+exec "$(command -v "$tool")" "\$@"
+EOF
+  done
   cat >"$STUBS/hostnamectl" <<'EOF'
 #!/usr/bin/env bash
 echo "hostnamectl $*" >>"$WORK/calls.log"
@@ -216,10 +335,29 @@ EOF
 }
 
 start_mock() {
-  python3 - "$PORT" "$REPO" <<'EOF' &
+  python3 - "$PORT" "$REPO" "$WORK/cli_pw" <<'EOF' &
 import sys, time
 sys.path.insert(0, sys.argv[2] + "/tests")
 import mock_pihole
+
+# Pi-hole's command-line password (webserver.api.cli_pw, the contents of /etc/pihole/cli_pw) is a second credential that
+# always signs in, whatever the web password is: the sinko program relies on it, and so a test can change the web
+# password (the installer does, through the API) without locking the program out.
+_cli_pw_file = sys.argv[3]
+_check = mock_pihole.Store.check_password
+
+
+def check_password(self, password):
+    if _check(self, password):
+        return True
+    try:
+        with open(_cli_pw_file, encoding="utf-8") as fh:
+            return isinstance(password, str) and password != "" and password == fh.read().strip()
+    except OSError:
+        return False
+
+
+mock_pihole.Store.check_password = check_password
 httpd, store = mock_pihole.serve(int(sys.argv[1]))
 while True:
     time.sleep(3600)
@@ -232,6 +370,15 @@ EOF
 
 # Mock API controls
 mock_auth()  { curl -s -X POST "http://127.0.0.1:$PORT/__mock__/require_auth" -d "{\"value\": $1}" >/dev/null; }
+# What Pi-hole itself does: PATCH /api/config with webserver.api.password ("" = no password, like a fresh Pi-hole).
+mock_set_password() {  # password
+  mock_api PATCH /api/config "{\"config\":{\"webserver\":{\"api\":{\"password\":\"$1\"}}}}" >/dev/null
+}
+# Does Pi-hole sign this web password in? (a real session id comes back) With no password set, nothing can be checked: fails.
+mock_password_works() {  # password
+  curl -s -X POST "http://127.0.0.1:$PORT/api/auth" -H 'Content-Type: application/json' -d "{\"password\":\"$1\"}" \
+    | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin)["session"].get("sid") else 1)'
+}
 
 # A tiny authenticated client for the mock API, for tests that look at Pi-hole's objects.
 # usage: mock_api METHOD /api/path [json-body]   (prints the JSON answer)
@@ -271,6 +418,8 @@ make_release() {
     cp -a "$from/$p" "$stage/sinko/$p"
   done
   printf '%s\n' "$version" >"$stage/sinko/VERSION"
+  # The program of a release says which release it is (the installer's self-check compares it with the page's version).
+  sed -i "s/^VERSION = \"[^\"]*\"/VERSION = \"$version\"/" "$stage/sinko/bin/sinko"
   tar -C "$stage" --sort=name --owner=0 --group=0 --numeric-owner -cf - sinko | gzip -n -9 >"$out/sinko.tar.gz"
   ( cd "$out" && sha256sum sinko.tar.gz >sinko.tar.gz.sha256 )
   rm -rf "$stage"
@@ -280,9 +429,13 @@ make_release() {
 fresh_start() {
   if [[ -n "${MOCK_PID:-}" ]]; then { kill "$MOCK_PID" 2>/dev/null || true; wait "$MOCK_PID" 2>/dev/null || true; }; fi
   rm -rf "$ROOT" "$WORK/units" "$WORK/ftl.json" "$WORK/tz" "$WORK/ipaddr" "$WORK/net-down" "$WORK/offline" "$WORK/apt-fail" \
-    "$WORK/ftl-fail" "$WORK/password-stuck" "$WORK/password-needs-pwhash" "$WORK/keygen-fail" "$WORK/sshd-open"
+    "$WORK/ftl-fail" "$WORK/password-stuck" "$WORK/password-needs-pwhash" "$WORK/keygen-fail" "$WORK/sshd-open" \
+    "$WORK/pihole-g-block" "$WORK/pihole-g-fail" "$WORK/pihole-g-started" "$WORK/pihole-g-pid" "$WORK/apt-update-fail" "$WORK/apt-nocandidate" \
+    "$WORK/py-old" "$WORK/password-in-env" "$WORK/curl.log" "$WORK/ftl-makes-cert" "$WORK/ftl-cert-fail" \
+    "$WORK/ip-static" "$WORK/ftl-stop-fails" "$WORK/credential-stuck" "$WORK/sched-crashloop" "$WORK/sched-starting" "$WORK/sched-age" \
+    "$WORK/run" "$WORK/setpassword-needs-stdin"
   mkdir -p "$ROOT/etc/pihole" "$ROOT/etc/ssh" "$ROOT/var/www/html" "$ROOT/var/log" "$WORK/units"
-  touch "$ROOT/etc/pihole/pihole.toml" "$WORK/units/pihole-FTL.service.active"
+  touch "$ROOT/etc/pihole/pihole.toml" "$WORK/units/pihole-FTL.service.active" "$WORK/units/pihole-FTL.service.enabled"
   : >"$WORK/calls.log"
   printf '%s\n' git curl ca-certificates python3 iproute2 >"$WORK/dpkg-installed"
   start_mock

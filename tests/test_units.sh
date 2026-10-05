@@ -26,6 +26,9 @@ active() { grep -E "^$1=" "$svc" || true; }   # directives only: comment lines s
 echo "--- sinko.service: state directory, restart policy, the hardening it already had"
 [[ "$(active StateDirectory)" == "StateDirectory=sinko" ]] || fail "StateDirectory=sinko missing"
 [[ "$(active StateDirectoryMode)" == "StateDirectoryMode=0700" ]] || fail "the state directory is not 0700"
+[[ "$(active RuntimeDirectory)" == "RuntimeDirectory=sinko" ]] || fail "RuntimeDirectory=sinko missing (the scheduler's pulse lives in /run/sinko)"
+[[ "$(active RuntimeDirectoryMode)" == "RuntimeDirectoryMode=0700" ]] || fail "the runtime directory is not 0700 (the program refuses a looser one, or changes it)"
+[[ "$(active RuntimeDirectoryPreserve)" == "RuntimeDirectoryPreserve=restart" ]] || fail "the runtime directory would be deleted at every restart (the installer restarts the scheduler in an update)"
 [[ "$(active Restart)" == "Restart=always" ]] || fail "the scheduler is not always restarted"
 [[ "$(active RestartSec)" =~ ^RestartSec=([0-9]|[12][0-9]|30)$ ]] || fail "RestartSec is missing or longer than 30 seconds"
 grep -q '^StartLimitIntervalSec=0$' "$svc" || fail "the unit can give up restarting (StartLimitIntervalSec=0 missing)"
@@ -52,7 +55,30 @@ grep -q '^Type=oneshot$' "$fb" || fail "the first-start unit is not a oneshot"
 grep -q '^ExecStart=/opt/sinko/tools/firstboot.sh$' "$fb" || fail "the first-start unit does not run tools/firstboot.sh"
 grep -E '^Before=' "$fb" | grep -q 'ssh.service' || fail "SSH could start before its new host keys exist"
 grep -E '^Before=' "$fb" | grep -q 'sinko.service' || fail "the scheduler could start (and make an install id) before firstboot"
+grep -E '^Before=' "$fb" | grep -q 'ssh.socket' && fail "Before=ssh.socket makes an ordering loop with the default dependencies (basic.target waits for sockets.target); systemd then drops a job at random"
 grep -E '^After=' "$fb" | grep -q 'network-online.target' || fail "the first-start unit does not wait for the network"
 grep -q '^WantedBy=multi-user.target$' "$fb" || fail "the first-start unit cannot be enabled"
 grep -q '^Restart=' "$fb" && fail "a restart policy would loop on a box that has no network yet"
+echo "--- sinko-firstboot.service makes no ordering cycle where ssh is socket-activated (ssh.socket enabled)"
+if command -v systemd-analyze >/dev/null; then
+  CYC="$(mktemp -d -t sinko-test.XXXXXX)"
+  trap 'rm -rf "$CYC" "${WORK:-}"' EXIT
+  printf '[Unit]\nDescription=ssh socket\n[Socket]\nListenStream=22\n[Install]\nWantedBy=sockets.target\n' >"$CYC/ssh.socket"
+  printf '[Unit]\nDescription=ssh\nAfter=network.target\n[Service]\nExecStart=/bin/true\n' >"$CYC/ssh.service"
+  sed -E 's|^(ExecStart=).*|\1/bin/true|' "$fb" >"$CYC/real.service"
+  sed -E 's|^(ExecStart=).*|\1/bin/true|; s|^(Before=.*)|\1 ssh.socket|' "$fb" >"$CYC/looping.service"
+  # The units are verified together with the targets the default dependencies hang on (basic.target waits for sockets.target).
+  has_cycle() {
+    local out
+    out="$( cd "$CYC" && systemd-analyze verify "./$1" ./ssh.socket ./ssh.service basic.target sockets.target multi-user.target 2>&1 || true )"
+    grep -q "ordering cycle" <<<"$out"
+  }
+  if has_cycle looping.service; then
+    has_cycle real.service && fail "sinko-firstboot.service makes an ordering cycle with ssh.socket"
+  else
+    echo "    (this systemd-analyze does not report cycles: not verified)"
+  fi
+else
+  echo "    (systemd-analyze is not installed: ordering not verified)"
+fi
 echo "units tests passed"

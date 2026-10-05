@@ -7,7 +7,10 @@ ConditionPathExists=/var/lib/sinko/firstboot
 After=local-fs.target pihole-FTL.service network-online.target
 Wants=network-online.target
 # The SSH server must find its new host keys, and the scheduler must not start before the counter's old id is gone.
-Before=ssh.service sshd.service ssh.socket sinko.service
+# Not ssh.socket: a unit that is ordered before a socket while it has the default dependencies (it runs after basic.target,
+# which waits for sockets.target, which waits for the sockets) makes a loop, and systemd then drops one of the jobs at
+# random. A connection that arrives early still waits: it starts ssh.service, and that is ordered after this unit.
+Before=ssh.service sshd.service sinko.service
 
 [Service]
 Type=oneshot

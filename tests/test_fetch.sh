@@ -102,6 +102,15 @@ ls "$ROOT"/opt/sinko/.download.* >/dev/null 2>&1 && fail "the temporary download
 [[ "$(find "$ROOT/opt/sinko/tools" -type f | wc -l)" == 2 ]] || fail "something other than seal.sh and firstboot.sh is in /opt/sinko/tools"
 [[ -f "$ROOT/etc/systemd/system/sinko-firstboot.service" && ! -e "$WORK/units/sinko-firstboot.service.enabled" ]] || fail "the first-start unit must be installed, not enabled"
 
+echo "--- a password given to the one-liner survives the start of the downloaded installer, and is in no program's environment"
+rm -f "$WORK/password-in-env"
+run_install pw-oneliner SINKO_RELEASE_BASE="$BASE" SINKO_PASSWORD="Oneliner-Pass-2024" || { cat "$WORK/pw-oneliner.out"; fail "the one-liner with a password failed"; }
+grep -q "Starting the installer from the downloaded version" "$WORK/pw-oneliner.out" || fail "test setup: the downloaded installer was not started"
+mock_password_works "Oneliner-Pass-2024" || fail "the password given to the one-liner did not reach Pi-hole (lost when the downloaded installer was started?)"
+[[ ! -e "$WORK/password-in-env" ]] || { cat "$WORK/password-in-env"; fail "SINKO_PASSWORD was in the environment of a program the installer started"; }
+grep -qF "Oneliner-Pass-2024" "$WORK/pw-oneliner.out" "$ROOT/var/log/sinko-install.log" && fail "the password reached the output or the log"
+mock_set_password test                       # the password the rest of this file signs in with
+
 echo "--- a failed download does not damage the installed program or its source"
 echo marker >"$ROOT/opt/sinko/src/marker"
 if run_install failed-update SINKO_RELEASE_BASE="http://127.0.0.1:1/releases"; then fail "install from an unreachable server succeeded"; fi
@@ -175,12 +184,52 @@ SINKO_LISTS_BASE=https://example.org/my-lists SINKO_SRC="$EXTRACT/sinko" bash "$
 SINKO_REPO_SLUG=me/fork2 SINKO_SRC="$EXTRACT/sinko" bash "$EXTRACT/sinko/install.sh" >"$WORK/lists2.out" 2>&1 || fail "run with a new slug failed"
 grep -q '^SINKO_LISTS_BASE=https://example.org/my-lists$' "$ROOT/etc/sinko/config" || fail "a lists address somebody chose was replaced"
 
-echo "--- only one installer at a time"
-exec 8>"$ROOT/var/lock/sinko-install.lock"
+echo "--- only one installer at a time, and the lock is where only root can reach it (not in the world-writable /run/lock)"
+LOCKFILE="$ROOT/var/lib/sinko/install.lock"
+[[ -f "$LOCKFILE" && "$(stat -c %a "$LOCKFILE")" == 600 && "$(stat -c %a "$ROOT/var/lib/sinko")" == 700 ]] || fail "the lock file is missing, or it or its folder is open to other users"
+[[ ! -e "$ROOT/var/lock/sinko-install.lock" ]] || fail "the installer still uses a lock in the shared lock folder"
+exec 8>>"$LOCKFILE"
 flock -n 8 || fail "test could not take the lock"
 if SINKO_SRC="$EXTRACT/sinko" bash "$EXTRACT/sinko/install.sh" >"$WORK/lock.out" 2>&1; then fail "a second installer ran while the first held the lock"; fi
 grep -q "Another Sinko installation or update is running" "$WORK/lock.out" || fail "no message about the lock"
 exec 8>&-
 SINKO_SRC="$EXTRACT/sinko" bash "$EXTRACT/sinko/install.sh" >"$WORK/lock2.out" 2>&1 || { cat "$WORK/lock2.out"; fail "the installer did not run after the lock was released"; }
+echo "    the updater's own lock (a different file: it holds it while it runs the installer) does not stop the installer"
+exec 8>>"$ROOT/var/lib/sinko/lock"
+flock -n 8 || fail "test could not take the updater's lock"
+SINKO_SRC="$EXTRACT/sinko" bash "$EXTRACT/sinko/install.sh" >"$WORK/lock3.out" 2>&1 || { cat "$WORK/lock3.out"; fail "the installer was stopped by the updater's lock, which it is started under"; }
+exec 8>&-
+
+echo "--- the update source: https only (plain http only to this machine itself), no redirect to anything else, and it is saved"
+for plain in http://example.org/releases http://127.0.0.1.example.org/releases http://localhost@example.org/releases ftp://example.org/x; do
+  if run_install plain-base SINKO_RELEASE_BASE="$plain"; then fail "the update source $plain was accepted"; fi
+  grep -q "SINKO_RELEASE_BASE .* must be an https:// address" "$WORK/plain-base.out" || { cat "$WORK/plain-base.out"; fail "no https message for the update source $plain"; }
+done
+if run_install plain-api SINKO_RELEASE_API="http://api.example.org/latest"; then fail "a plain-http SINKO_RELEASE_API was accepted"; fi
+grep -q "SINKO_RELEASE_API .* must be an https:// address" "$WORK/plain-api.out" || fail "no https message for SINKO_RELEASE_API"
+: >"$WORK/curl.log"
+if run_install https-base SINKO_RELEASE_BASE="https://127.0.0.1:1/releases"; then fail "an https update source that is not there was accepted"; fi
+grep -q "Could not reach" "$WORK/https-base.out" || { cat "$WORK/https-base.out"; fail "no message that the update source cannot be reached"; }
+grep -q -- "--proto =https --proto-redir =https .*https://127.0.0.1:1/releases" "$WORK/curl.log" || { cat "$WORK/curl.log"; fail "curl was not limited to https (and https redirects) for an https update source"; }
+grep -q -- "--proto =http,https" "$WORK/curl.log" && fail "an https update source was fetched with plain http allowed"
+: >"$WORK/curl.log"
+run_install loopback-base SINKO_RELEASE_BASE="$BASE" || { cat "$WORK/loopback-base.out"; fail "a server on this machine itself was refused"; }
+grep -q -- "--proto =http,https --proto-redir =http,https .*$BASE/latest/download/sinko.tar.gz" "$WORK/curl.log" || { cat "$WORK/curl.log"; fail "the test server was not fetched under the test-hook protocol rule"; }
+echo "    the first connection check is limited to https as well"
+touch "$WORK/offline"; rm -rf "$ROOT/opt/sinko/src"; : >"$WORK/curl.log"
+run_install dev-offline2 SINKO_REF=master SINKO_REPO=https://github.com/iret33/sinko.git || true
+rm -f "$WORK/offline"
+grep -q -- "--proto =https --proto-redir =https .*https://github.com" "$WORK/curl.log" || fail "the internet check is not limited to https"
+echo "    a mirror that was given once is saved (so updates and the update check use it), the project's own address is not"
+grep -q "^SINKO_RELEASE_BASE=$BASE\$" "$ROOT/etc/sinko/config" || { cat "$ROOT/etc/sinko/config"; fail "the update source was not saved"; }
+run_install saved-base || { cat "$WORK/saved-base.out"; fail "a run without the variable failed"; }
+grep -q "Downloaded and verified" "$WORK/saved-base.out" || fail "the saved update source was not used by the next run"
+run_install dflt-base SINKO_REPO_SLUG=iret33/sinko SINKO_RELEASE_BASE=https://github.com/iret33/sinko/releases SINKO_SRC="$EXTRACT/sinko" \
+  || { cat "$WORK/dflt-base.out"; fail "install with the project's own update address failed"; }
+grep -q '^SINKO_RELEASE_BASE=' "$ROOT/etc/sinko/config" && fail "the project's own address was saved as if it were a mirror"
+grep -q '^SINKO_RELEASE_API=' "$ROOT/etc/sinko/config" && fail "the project's own release address was saved"
+run_install api-mirror SINKO_REPO_SLUG=iret33/sinko SINKO_RELEASE_API="https://mirror.example.org/latest" SINKO_SRC="$EXTRACT/sinko" \
+  || { cat "$WORK/api-mirror.out"; fail "an https SINKO_RELEASE_API was refused"; }
+grep -q '^SINKO_RELEASE_API=https://mirror.example.org/latest$' "$ROOT/etc/sinko/config" || fail "SINKO_RELEASE_API was not saved"
 
 echo "fetch tests passed"
