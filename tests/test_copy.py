@@ -32,6 +32,7 @@ JARGON = re.compile(r"\b(ip|mac|dhcp|ssh|sudo|systemctl|api|json|hash|teleporter
 # The unavoidable exceptions to BANNED, by key. Anything else that names Pi-hole is a bug.
 BANNED_EXCEPTIONS = {
     "boxAboutTrademark": "the trademark notice has to name Pi-hole (and the company that owns the name)",
+    "boxAboutPihole": "About says which Pi-hole version the box runs (what a seller or a helper checks against the program's own report)",
 }
 
 OVERCLAIM = r"(?i)\b(protected|secure|safe from)\b|محمي|مؤمَّن"
@@ -148,9 +149,22 @@ class FirstRunCopy(Copy, unittest.TestCase):
         self.assertEqual(set(self.table()["en"]) - used, set(), "defined but never used")
 
     def test_the_names(self):
+        # One tagline per language everywhere (README, site, social preview, page): the brand tool's constants are the source.
         s = self.table()
-        self.assertEqual(s["en"]["tagline"], "Family internet")
-        self.assertEqual(s["ar"]["tagline"], "إنترنت العائلة")
+        brand = pbstrings.brand()
+        self.assertEqual(s["en"]["tagline"], brand["TAGLINE_EN"])
+        self.assertEqual(s["ar"]["tagline"], brand["TAGLINE_AR"])
+        self.assertEqual(brand["TAGLINE_EN"], "Calm internet for the family")
+        self.assertEqual(brand["TAGLINE_AR"], "إنترنت هادئ للعائلة")
+
+    def test_the_login_and_claim_screens_say_the_same_as_the_string_table(self):
+        # index.html carries the English text before the script runs; it must be the table's own words, and no old name may be left.
+        found = re.findall(r'data-i18n="tagline">([^<]*)</p>', INDEX)
+        self.assertEqual(len(found), 2, "the sign-in and the claim screen")
+        for text in found:
+            self.assertEqual(text, pbstrings.brand()["TAGLINE_EN"])
+        for old in ("Family internet", "إنترنت العائلة"):
+            self.assertNotIn(old, INDEX + APP + BOX_JS, "the old tagline is gone")
 
 
 class BoxCopy(Copy, unittest.TestCase):
@@ -200,6 +214,23 @@ class BoxCopy(Copy, unittest.TestCase):
         ar = " ".join(self.table()["ar"][k] for k in self.table()["ar"] if k.startswith("boxCounter"))
         for must in ("رمز عشوائي", "الدولة", "عنوان الإنترنت", "كلمات المرور", "اللغة", "المنطقة الزمنية", "اختياري"):
             self.assertIn(must, ar, "the Arabic counter text must say: %s" % must)
+
+    def test_the_online_line_has_its_own_words_for_two_and_never_reads_one_of_one(self):
+        s = self.table()
+        for lang in ("en", "ar"):
+            self.assertIn("{n}", s[lang]["boxCounterOnline"], lang)
+            self.assertNotIn("{n}", s[lang]["boxCounterOnlineTwo"], "%s: exactly two is said without a number" % lang)
+        # the Arabic used to stack two 'من' in a row around the number
+        self.assertNotRegex(s["ar"]["boxCounterOnline"], r"من\s*\{n\}\s*من")
+        self.assertRegex(s["en"]["boxCounterOnlineTwo"], r"(?i)one other")
+        self.assertIn("متصلان", s["ar"]["boxCounterOnlineTwo"], "the dual: two boxes are متصلان")
+
+    def test_about_names_the_pihole_version_with_the_version_in_it(self):
+        s = self.table()
+        for lang in ("en", "ar"):
+            self.assertIn("{v}", s[lang]["boxAboutPihole"], lang)
+            self.assertRegex(s[lang]["boxAboutPihole"], r"Pi-hole")
+        self.assertEqual(s["en"]["boxAboutPihole"], "Pi-hole {v}")
 
     def test_a_backup_is_said_to_be_private_and_a_restore_to_leave_the_password_alone(self):
         en = self.table()["en"]

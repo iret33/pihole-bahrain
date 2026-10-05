@@ -287,7 +287,7 @@
   // (the My box sheet's own strings live in pb-box.js). tests/test_copy.py checks both languages and the plain-words rule.
   var FIRST_STR = {
     en: {
-      tagline: 'Family internet',
+      tagline: 'Calm internet for the family',
       claimTitle: 'Welcome to Sinko', claimLead: 'Choose a parent password for this box. You will use it to sign in on this page.',
       claimWhy: 'Until you do, anyone on your Wi‑Fi can open this page and change the rules.',
       claimPw: 'Password (at least 8 characters)', claimPw2: 'Password again', claimBtn: 'Choose password and continue', claimBusy: 'Saving…',
@@ -305,7 +305,7 @@
       updateFailed: 'The last update did not work: open My box'
     },
     ar: {
-      tagline: 'إنترنت العائلة',
+      tagline: 'إنترنت هادئ للعائلة',
       claimTitle: 'مرحبًا بك في سينكو', claimLead: 'اختر كلمة مرور الوالدين لهذا الصندوق. ستستخدمها لتسجيل الدخول في هذه الصفحة.',
       claimWhy: 'إلى أن تفعل ذلك، يستطيع أي شخص على شبكة Wi‑Fi فتح هذه الصفحة وتغيير القواعد.',
       claimPw: 'كلمة المرور (8 أحرف على الأقل)', claimPw2: 'أعد كتابة كلمة المرور', claimBtn: 'اختيار كلمة المرور والمتابعة', claimBusy: 'جارٍ الحفظ…',
@@ -344,8 +344,14 @@
   var serverOffsetMs = 0;            // box clock minus this device's clock, from the Date header of every API answer
   var boxInfo = null;                // /pb/box.json as the box program writes it (parsed and checked); null = an older box, which has none
   var heartbeatLateSince = 0;        // local time (ms) this page first saw the box's pulse late, 0 while it is not late
-  var pageVersion = '';              // the version this page was loaded with (pb/version.txt at boot); the box may be newer after an update
+  var pageStamp = '';                // the release the installer stamped into index.html ('' = not stamped: development, or a page copied by hand)
+  var pageVersion = '';              // the version this page is: the stamp, else pb/version.txt at boot; the box may be newer after an update
+  var offsetKnown = false;           // serverOffsetMs has been read from an answer at least once
+  var clockStepHoldUntil = 0;        // local time (ms) until which the box's clock is taken to be catching up after a jump, see noteBoxClock
+  var staleCheckedAt = 0, staleReloading = false;
   var UPDATED_KEY = 'pb.updated';    // set just before the page reloads itself after an update, so it can say what happened
+  var RELOADED_KEY = 'pb.reloadedFor';   // the version this tab last reloaded itself for: a page that is still not that version does not reload again
+  var CLOCK_STEP_MS = 30000;         // the box's clock moving by more than this between two answers (beyond the Date header's whole seconds) is a jump
 
   function $(id) { return document.getElementById(id); }
   function safeGet(store, key) { try { return store.getItem(key); } catch (e) { return null; } }
@@ -374,6 +380,13 @@
   }
   // Timers and "last online" are compared by the box with ITS clock, so the page must use the box's time, not the phone's.
   function serverNowSec() { return (Date.now() + serverOffsetMs) / 1000; }
+  // The box has no real-time clock: after a long time without internet it can step by hours or days at once when it reaches a time server. The
+  // scheduler then needs a pass (up to five minutes) to write box.json again, so for that time the file's age says nothing about the scheduler.
+  function noteBoxClock(offsetMs) {
+    if (offsetKnown && Math.abs(offsetMs - serverOffsetMs) > CLOCK_STEP_MS) clockStepHoldUntil = Date.now() + PBBox.timing.clockStepHold;
+    serverOffsetMs = offsetMs;
+    offsetKnown = true;
+  }
   function locale() { return lang === 'ar' ? 'ar-BH-u-nu-latn' : 'en-GB'; }
   function fmtTime(date) { return date.toLocaleTimeString(locale(), { hour: 'numeric', minute: '2-digit' }); }
   function fmtHHMM(hhmm) { var d = new Date(); d.setHours(+hhmm.slice(0, 2), +hhmm.slice(3), 0, 0); return fmtTime(d); }
@@ -423,7 +436,7 @@
       .catch(function () { throw new ApiError(0, t('noConnection')); })
       .then(function (r) {
         var boxTime = Date.parse(r.headers.get('Date') || '');
-        if (!isNaN(boxTime)) serverOffsetMs = boxTime - Date.now();
+        if (!isNaN(boxTime)) noteBoxClock(boxTime - Date.now());
         if (opts.blob && r.ok) return r.blob().then(function (b) { return { blob: b }; });
         return r.text().then(function (txt) {
           var j = {}; try { j = txt ? JSON.parse(txt) : {}; } catch (e) { j = {}; }
@@ -467,6 +480,7 @@
   // not written while an update runs, and it is only believed once this page has seen it late for a minute (right after the box's clock is
   // corrected the file is a few seconds behind).
   function schedulerSilent() {
+    if (Date.now() < clockStepHoldUntil) { heartbeatLateSince = 0; return false; }       // the box's clock just jumped: give the scheduler a pass to catch up
     var tm = M.state.timer, now = serverNowSec();
     if (tm && tm.until < now - 90) return true;
     var late = PBBox.pure.heartbeatLate(boxInfo, now) && M.state.update.status !== 'running';
@@ -1300,8 +1314,38 @@
   }
   function stopPolling() { clearInterval(pollTimer); clearInterval(tickTimer); }
 
+  // pb/version.txt is the version the box has installed now ('' when it cannot be read or is not a version).
+  function fetchInstalled() {
+    return fetch('/pb/version.txt', { cache: 'no-store' }).then(function (r) { return r.ok ? r.text() : ''; })
+      .then(function (v) { v = (v || '').trim(); return PBBox.pure.parseSemver(v) ? v : ''; }, function () { return ''; });   // a 404 page or garbage is not a version
+  }
+  // Pi-hole's web server lets a browser keep a page and its scripts for an hour, so a phone can be running a release that is gone from the box:
+  // one that stayed open through an update, or another phone's, or the night's automatic update. A page that was stamped by the installer knows
+  // what it is; when the box has another version it reloads itself (a reload fetches the page afresh, and every script and style is addressed by the
+  // new version). Not while an update runs (the files are being replaced), not twice for one version, and only where a tab can remember it.
+  function checkStale() {
+    if (!pageStamp || staleReloading) return Promise.resolve(false);
+    if (M && M.state.update.status === 'running') return Promise.resolve(false);
+    return fetchInstalled().then(function (v) {
+      var target = PBBox.pure.staleTarget(pageStamp, v, safeGet(sessionStorage, RELOADED_KEY));
+      if (!target || staleReloading) return false;
+      safeSet(sessionStorage, UPDATED_KEY, target);
+      if (safeGet(sessionStorage, UPDATED_KEY) !== target) return false;                   // no memory in this tab (private mode): never risk a loop
+      staleReloading = true;
+      location.reload();
+      return true;
+    });
+  }
+  // Coming back to the page: look at the version, but not while something is open or being typed, and not more than once a minute.
+  function checkStaleLater() {
+    var now = Date.now();
+    if (now - staleCheckedAt < PBBox.timing.staleEvery || $('app').hidden || document.querySelector('dialog[open]') || bedDirty || busy) return;
+    staleCheckedAt = now;
+    checkStale().catch(function () {});
+  }
+
   function start() {
-    return load().then(function () { showApp(); startPolling(); })
+    return load().then(function () { showApp(); startPolling(); staleCheckedAt = Date.now(); checkStale(); })
       .catch(function (e) {
         if (e && e.status === 401) return;
         showApp(); banner(e && e.message ? e.message : t('noConnection'));
@@ -1310,13 +1354,18 @@
 
   function boot() {
     applyLang();
-    fetch('/pb/version.txt', { cache: 'no-store' }).then(function (r) { return r.ok ? r.text() : ''; })
-      .then(function (v) {
-        v = (v || '').trim();
-        pageVersion = PBBox.pure.parseSemver(v) ? v : '';          // a 404 page or garbage is not a version
+    var meta = document.querySelector('meta[name="sinko-version"]');
+    pageStamp = PBBox.pure.pageStamp(meta && meta.getAttribute('content'));
+    if (pageStamp) {
+      pageVersion = pageStamp;                                  // the page says what it is: the box's version file may already be newer
+      $('version').textContent = 'v' + pageVersion;
+    } else {
+      fetchInstalled().then(function (v) {                      // development or a copy that was not stamped: the box's own version is the best there is
+        pageVersion = v;
         $('version').textContent = pageVersion ? 'v' + pageVersion : '';
         if (M) renderUpdateBanner();
       }).catch(function () {});
+    }
     PBBox.init({
       t: t, el: el, icon: icon, lang: function () { return lang; }, locale: locale, fmtTime: fmtTime,
       formatCount: function (n) { return PBCore.formatCount(n, locale()); },
@@ -1325,10 +1374,16 @@
       endSession: endSession, serverNowSec: serverNowSec, clockOffsetMs: function () { return serverOffsetMs; },
       version: function () { return pageVersion; },
       boxInfo: function () { return boxInfo; }, refreshBoxInfo: loadBoxInfo,
-      rememberUpdate: function (v) { safeSet(sessionStorage, UPDATED_KEY, v); }
+      rememberUpdate: function (v) { safeSet(sessionStorage, UPDATED_KEY, v); },
+      reloadedFor: function () { return safeGet(sessionStorage, RELOADED_KEY) || ''; }
     });
     var updated = safeGet(sessionStorage, UPDATED_KEY);        // the page just reloaded itself after an update
-    if (updated) { safeSet(sessionStorage, UPDATED_KEY, null); setTimeout(function () { toast(t('boxUpdatedToast', { v: updated })); }, 700); }
+    if (updated) {
+      safeSet(sessionStorage, UPDATED_KEY, null);
+      safeSet(sessionStorage, RELOADED_KEY, updated);            // remembered for this tab: see checkStale
+      // Said only when the page really is that version now (an unstamped page cannot tell): a reload that brought the same old page back says nothing.
+      if (!pageStamp || pageStamp === updated) setTimeout(function () { toast(t('boxUpdatedToast', { v: updated })); }, 700);
+    }
     document.addEventListener('click', onClick);
     $('timerChips').addEventListener('click', onChipClick);
     $('loginForm').addEventListener('submit', login);
@@ -1342,7 +1397,7 @@
       });
     });
     document.addEventListener('visibilitychange', function () {
-      if (document.visibilityState === 'visible' && !$('app').hidden && !busy) load().catch(function () {});
+      if (document.visibilityState === 'visible' && !$('app').hidden && !busy) load().catch(function () {}).then(checkStaleLater);
     });
     noPasswordSet().catch(function () { return false; }).then(function (open) {
       if (open) {

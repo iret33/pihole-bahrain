@@ -344,3 +344,45 @@ test('both languages have exactly the same strings, with the same placeholders',
     assert.equal(ph(S.en[k]), ph(S.ar[k]), k);
   }
 });
+
+test('the "boxes online" line is shown from two boxes up, with its own words for exactly two, and never reads "one of 1"', () => {
+  for (const n of [0, 1, -3, NaN, Infinity, '5', null, undefined, {}, [2]]) assert.equal(B.counterOnlineKey(n), null, String(n));
+  assert.equal(B.counterOnlineKey(2), 'boxCounterOnlineTwo');
+  for (const n of [3, 10, 1234, 1e6]) assert.equal(B.counterOnlineKey(n), 'boxCounterOnline', String(n));
+  const S = require('../web/pb-box.js').strings;
+  for (const lang of ['en', 'ar']) {
+    assert.ok(S[lang].boxCounterOnline.includes('{n}'), lang);
+    assert.ok(!S[lang].boxCounterOnlineTwo.includes('{n}'), lang + ': two is said in words, so the number is not repeated');
+  }
+});
+
+test('the Pi-hole version is read from /api/info/version as "v6.3", and anything that is not a release number is nothing', () => {
+  const info = (v) => ({ version: { core: { local: { branch: 'master', version: v, hash: 'abc' }, remote: { version: 'v6.4' } }, web: { local: { version: 'v6.2' } } } });
+  assert.equal(B.piholeVersion(info('v6.3')), 'v6.3');
+  assert.equal(B.piholeVersion(info('v6.1.4')), 'v6.1.4');
+  assert.equal(B.piholeVersion(info('6.3')), 'v6.3', 'written the way `pihole -v` writes it, with the v');
+  assert.equal(B.piholeVersion(info(' v6.3\n')), 'v6.3');
+  for (const bad of ['vDev-a1b2c3d', 'v6', 'v6.3-beta', 'v6.3; ls', 'v<b>6.3</b>', 'v1234.5', '', null, 63, undefined, {}]) {
+    assert.equal(B.piholeVersion(info(bad)), '', String(bad));
+  }
+  for (const bad of [null, undefined, {}, [], 'text', { version: null }, { version: { core: null } }, { version: { core: { local: null } } }, { version: { core: {} } }]) {
+    assert.equal(B.piholeVersion(bad), '', JSON.stringify(bad));
+  }
+});
+
+test('a page knows the release it was installed as from the stamp, and an unstamped page (development) knows nothing', () => {
+  assert.equal(B.pageStamp('3.1.0'), '3.1.0');
+  assert.equal(B.pageStamp(' 3.1.0 '), '3.1.0');
+  for (const bad of ['@VERSION@', '', null, undefined, '3.1', 'v3.1.0', '3.1.0-beta', 'latest', '3.1.0; x']) assert.equal(B.pageStamp(bad), '', String(bad));
+});
+
+test('a page reloads for the box\'s version only when it is stamped, differs, and has not already reloaded for it in this tab', () => {
+  assert.equal(B.staleTarget('3.0.0', '3.1.0', ''), '3.1.0', 'the box was updated under the page');
+  assert.equal(B.staleTarget('3.1.0', '3.0.0', ''), '3.0.0', 'a rollback is also a different page');
+  assert.equal(B.staleTarget('3.0.0', '3.0.0', ''), '', 'nothing to do');
+  assert.equal(B.staleTarget('3.0.0', '3.1.0', '3.1.0'), '', 'already reloaded for 3.1.0 in this tab: never a loop');
+  assert.equal(B.staleTarget('3.0.0', '3.1.0', '3.0.5'), '3.1.0', 'an earlier reload was for another version');
+  assert.equal(B.staleTarget('', '3.1.0', ''), '', 'an unstamped page (development, a copy) has nothing to compare');
+  assert.equal(B.staleTarget('@VERSION@', '3.1.0', ''), '');
+  for (const v of ['', null, undefined, '<html>404</html>', 'v3.1.0', '3.1']) assert.equal(B.staleTarget('3.0.0', v, ''), '', 'an unreadable version file says nothing: ' + String(v));
+});

@@ -325,6 +325,9 @@ class InfoTests(MockCase):
     def test_version_keeps_the_old_core_path_and_adds_the_rest(self):
         v = self.box.json("GET", "/api/info/version")[1]["version"]
         self.assertEqual(v["core"]["local"]["version"], "v6.3")
+        self.assertNotEqual(v["web"]["local"]["version"], v["core"]["local"]["version"], "each component has its own number")
+        self.store.core_version = "vDev-5f2c3d1"
+        self.assertEqual(self.box.json("GET", "/api/info/version")[1]["version"]["core"]["local"]["version"], "vDev-5f2c3d1")
         self.assertTrue({"core", "web", "ftl", "docker"} <= set(v))
 
     def test_host_names_the_box(self):
@@ -510,6 +513,99 @@ class BoxJsonTests(MockCase):
         text = json.dumps(self.store.box_info)
         for word in ("password", "pwhash", "family", "child"):
             self.assertNotIn(word, text.lower())
+
+
+class SlowStateTests(MockCase):
+    """`state_read_delay`: a read of the shared state takes that long, and nothing else does."""
+
+    def setUp(self):
+        super().setUp()
+        self.box.login()
+
+    def timed(self, path):
+        started = time.time()
+        status, _ = self.box.json("GET", path)
+        return status, time.time() - started
+
+    def test_only_the_reading_of_the_state_is_slow(self):
+        self.assertLess(self.timed("/api/groups/pb-state")[1], 0.3)
+        self.store.state_read_delay = 0.6
+        status, took = self.timed("/api/groups/pb-state")
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(took, 0.55)
+        self.assertLess(self.timed("/api/groups")[1], 0.4, "other reads are as fast as before")
+        self.store.state_read_delay = 0.0
+        self.assertLess(self.timed("/api/groups/pb-state")[1], 0.3)
+
+
+class StaticFilesTests(MockCase):
+    """The page's own files, served the way the browser tests need them: plain by default, and on request like Pi-hole's web server
+    (civetweb: a cache lifetime of an hour for every file) and like the installer left them (@VERSION@ filled in)."""
+
+    def setUp(self):
+        super().setUp()
+        self.httpd.RequestHandlerClass.web_dir = os.path.join(HERE, "..", "web")
+
+    def get(self, path, headers=None):
+        return Box(self.httpd.server_port).req("GET", path, headers=headers)
+
+    def test_a_query_string_is_ignored_and_nothing_says_how_long_to_keep_a_file_by_default(self):
+        status, plain, headers = self.get("/pb/app.js")
+        self.assertEqual(status, 200)
+        status, versioned, _ = self.get("/pb/app.js?v=@VERSION@")
+        self.assertEqual((status, versioned), (200, plain), "the development page asks for /pb/app.js?v=@VERSION@ and gets the file")
+        self.assertEqual(self.get("/pb/style.css?v=3.1.0")[0], 200)
+        self.assertNotIn("Cache-Control", headers)
+        self.assertNotIn("ETag", headers)
+        self.assertIn(b"@VERSION@", self.get("/")[1], "index.html is served as it is in the repository: @VERSION@ is the installer's to fill in")
+
+    def test_like_civetweb_a_file_is_kept_for_an_hour_and_a_revalidation_gets_304(self):
+        self.store.static_cache = True
+        for path in ("/pb/app.js?v=3.0.0", "/", "/pb/version.txt", "/pb/box.json", "/pb/services.json"):
+            status, body, headers = self.get(path)
+            self.assertEqual(status, 200, path)
+            self.assertEqual(headers["Cache-Control"], "max-age=3600", path)
+            self.assertTrue(headers["ETag"].startswith('"'), path)
+        status, body, headers = self.get("/pb/app.js")
+        again = self.get("/pb/app.js", {"If-None-Match": headers["ETag"]})
+        self.assertEqual((again[0], again[1]), (304, b""))
+        self.assertEqual(again[2]["ETag"], headers["ETag"])
+        self.assertEqual(self.get("/pb/app.js", {"If-None-Match": '"something else"'})[0], 200)
+
+    def test_a_new_version_is_a_new_file_for_the_validator_too(self):
+        self.store.static_cache = True
+        self.store.stamp_pages = True
+        self.store.version = "3.0.0"
+        old = self.get("/pb/app.js")[2]["ETag"]
+        self.store.version = "3.1.0"
+        status, body, headers = self.get("/pb/app.js", {"If-None-Match": old})
+        self.assertEqual(status, 200, "a release changes every script, so a browser that asks again gets the new one")
+        self.assertNotEqual(headers["ETag"], old)
+
+    def test_the_installers_stamp_fills_in_the_version_and_each_script_names_its_release(self):
+        self.store.stamp_pages = True
+        self.store.version = "3.1.0"
+        page = self.get("/")[1].decode()
+        self.assertNotIn("@VERSION@", page)
+        self.assertIn('<meta name="sinko-version" content="3.1.0">', page)
+        for name in ("style.css", "pb-core.js", "pb-live.js", "pb-picture.js", "pb-box.js", "app.js"):
+            self.assertIn("/pb/%s?v=3.1.0" % name, page, name)
+        js = self.get("/pb/pb-box.js?v=3.1.0")[1].decode()
+        self.assertIn('["pb-box.js"] = "3.1.0"', js)
+        self.assertNotIn("__pbAssets", self.get("/pb/style.css")[1].decode())
+        self.store.version = None
+        self.assertIn('content="%s"' % mock_pihole.VERSION, self.get("/")[1].decode(), "without a set version it is the repository's VERSION")
+        self.store.stamp_pages, self.store.version = "2.9.9", "3.1.0"
+        self.assertIn('content="2.9.9"', self.get("/")[1].decode(), "a string stamps that version whatever the box has (a page that was stamped wrongly)")
+
+    def test_what_the_page_asked_for_is_kept_when_asked(self):
+        self.get("/pb/app.js?v=3.0.0")
+        self.assertEqual(self.store.static_hits, [], "off by default: a long-running dev server must not grow a list")
+        self.store.log_static = True
+        self.get("/pb/app.js?v=3.0.0")
+        self.get("/pb/style.css?v=3.0.0")
+        self.get("/pb/missing.js")
+        self.assertEqual(self.store.static_hits, ["/pb/app.js?v=3.0.0", "/pb/style.css?v=3.0.0"])
 
 
 class GravityTests(MockCase):
