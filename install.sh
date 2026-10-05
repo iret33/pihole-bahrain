@@ -69,7 +69,7 @@ main() {
   LEGACY_BIN="$R/usr/local/bin/pihole-bahrain"
   LEGACY_LOG="$R/var/log/pihole-bahrain-install.log"
   LEGACY_UNITS=(pihole-bahrain.service pihole-bahrain-lists.service pihole-bahrain-lists.timer)
-  MIGRATING=0 LEGACY_STOPPED=0 NEW_SCHEDULER_UP=0
+  MIGRATING=0 LEGACY_STOPPED=0 NEW_SCHEDULER_UP=0 EXISTING_INSTALL=0 PASSWORD_SHOWN=0
 
   mkdir -p "$(dirname "$LOG_FILE")"
   if [[ "${SINKO_REEXEC:-}" != 1 ]]; then
@@ -136,6 +136,7 @@ main() {
   install_services
   install_local_name
   install_os_updates
+  write_box_info "the settings and the local name are final now"
   step "Final check"
   "$BIN_LINK" doctor || warn "Some checks failed — see above. Run 'sudo sinko doctor' again later."
   finish_legacy_migration   # the very last change: the running installer may live inside the old folder
@@ -175,6 +176,10 @@ on_exit() {
     done
     printf 'The previous version keeps running: its scheduler was started again. Run the installer again after fixing the problem.\n' >&2
   fi
+  # A password that was generated and set in Pi-hole is shown at the very end of a good run. When the run fails after
+  # that point (gravity, the scheduler) the next run keeps "the existing password": it would be set and nobody would
+  # know it. So it is shown (or saved) now.
+  if [[ -n "${SHOW_PASSWORD:-}" && "$PASSWORD_SHOWN" != 1 ]]; then show_generated_password || true; fi
   return 0
 }
 
@@ -633,7 +638,9 @@ fetch_branch() {
   mkdir -p "$APP_DIR"
   local dest="$APP_DIR/src"
   rm -rf "$dest.tmp"
-  git clone --quiet --depth 1 --branch "$SINKO_REF" -- "$SINKO_REPO" "$dest.tmp" </dev/null \
+  # https, ssh and a local folder only: git follows redirects, and a repository that has moved from an https address to a
+  # plain http one would otherwise be fetched without protection (the rule the downloads above follow too).
+  GIT_ALLOW_PROTOCOL=https:ssh:file git clone --quiet --depth 1 --branch "$SINKO_REF" -- "$SINKO_REPO" "$dest.tmp" </dev/null \
     || die "Could not download '$SINKO_REF' from $SINKO_REPO. Check the internet connection and that the name exists."
   rm -rf "$dest"
   mv "$dest.tmp" "$dest"
@@ -731,6 +738,9 @@ detect_legacy() {
     step "Found an earlier version (pihole-bahrain): moving it to Sinko"
     ok "Its settings, children's devices, rules and timers are kept"
   fi
+  # A box that has run Sinko (its scheduler unit is installed) or pihole-bahrain before is not a new installation: an
+  # update must never choose a parent password (see set_password).
+  if (( MIGRATING )) || [[ -e "$UNIT_DIR/sinko.service" ]]; then EXISTING_INSTALL=1; fi
 }
 
 # The old scheduler stops before `sinko setup`, so two schedulers never work on the same Pi-hole groups. It is only
@@ -802,7 +812,9 @@ put() {  # mode source destination
 clean_interrupted_leftovers() {
   find "$APP_DIR" -name '*.sinko-new' -delete 2>/dev/null || true
   find "$UNIT_DIR" "$(dirname "$BIN_LINK")" -maxdepth 1 -name '*.sinko-new' -delete 2>/dev/null || true
-  rm -rf "$APP_DIR/src.tmp"
+  # A download or an unpacking that was cut short (up to 20 MB each). Nothing else runs now: the lock is held, and the
+  # download of this very run is finished and was removed.
+  rm -rf "$APP_DIR/src.tmp" "$APP_DIR"/.download.*
 }
 
 install_files() {
@@ -877,10 +889,19 @@ install_files() {
   rm -rf "$WEBROOT/pb.old"
   put 644 "$SRC/web/index.html" "$WEBROOT/index.html"
   # The page reads /pb/box.json (address, version, heartbeat) at once: write it now, not at the scheduler's next round.
-  # An older program has no such command: that is not an error.
-  "$BIN_LINK" box-info --write >/dev/null 2>&1 || warn "The box information file was not written now (the scheduler writes it a few minutes after it starts)."
+  write_box_info "the page is in place"
   sync
   ok "Page installed in $WEBROOT"
+}
+
+# Writes /pb/box.json (what the page may know about the box). Called twice: once the page is in place, so that the file
+# exists from the first minute, and again at the end, when the settings and the local name that it reports (the counter,
+# .local) are final. An older program has no such command, and a failure is not an error: the scheduler writes the file
+# every few minutes anyway.
+write_box_info() {  # why (for the message)
+  "$BIN_LINK" box-info --write >/dev/null 2>&1 \
+    || warn "The box information file was not written now ($1). The scheduler writes it a few minutes after it starts."
+  return 0
 }
 
 write_settings() {
@@ -1037,6 +1058,13 @@ set_password() {
       [[ "$pw" == "$again" ]] && break
       echo "  The two passwords are different, try again."
     done
+  elif [[ -z "$pw" ]] && (( EXISTING_INSTALL )); then
+    # An update that nobody is watching (the one the page starts, an installer run from a script) finds no password on a
+    # box that is waiting for its parent: a ready-made box that has not been claimed yet shows its welcome screen. A
+    # password chosen here would lock the parent out of their own box, and nobody could even read it (such a box has no
+    # login). So an update leaves "no password" alone; the page asks for one when it is opened.
+    warn "This box has no parent password yet. The parent page asks for one the first time it is opened (an update does not choose one)."
+    return
   elif [[ -z "$pw" ]]; then
     pw="$(gen_password)"
     SHOW_PASSWORD="$pw"
@@ -1195,6 +1223,7 @@ system_hostname() {
 # It goes to the terminal only; without a terminal it is saved in a root-only file instead.
 show_generated_password() {
   [[ -n "${SHOW_PASSWORD:-}" ]] || return 0
+  PASSWORD_SHOWN=1
   if has_tty; then
     sleep 0.3   # let the copy of stdout (tee) finish printing, so this lands last on the screen
     printf '\n  %sParent password: %s%s\n  Shown on this screen only. Change it any time with: sudo pihole setpassword\n\n' \

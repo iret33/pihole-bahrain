@@ -132,9 +132,11 @@ echo "--- what an interrupted update left behind is cleaned up or repaired by th
 echo partial >"$ROOT/opt/sinko/bin/sinko.sinko-new"; echo partial >"$ROOT/etc/systemd/system/sinko.service.sinko-new"
 echo partial >"$ROOT/var/www/html/index.html.sinko-new"; mkdir -p "$ROOT/var/www/html/pb.new"; echo partial >"$ROOT/var/www/html/pb.new/app.js"
 mv "$ROOT/var/www/html/pb" "$ROOT/var/www/html/pb.old"                  # stopped between the two renames of the page swap
+mkdir -p "$ROOT/opt/sinko/.download.AbCdEf" "$ROOT/opt/sinko/src.tmp"; echo partial >"$ROOT/opt/sinko/.download.AbCdEf/sinko.tar.gz"   # a download cut short
 SINKO_HOSTNAME=kids.home bash "$REPO/install.sh" >"$WORK/repair1.out" 2>&1 || { cat "$WORK/repair1.out"; fail "the run after an interrupted swap failed"; }
 [[ -f "$ROOT/var/www/html/pb/app.js" && "$(cat "$ROOT/var/www/html/pb/version.txt")" == "$(cat "$REPO/VERSION")" ]] || fail "the page was not restored and updated"
 [[ ! -e "$ROOT/var/www/html/pb.old" && ! -e "$ROOT/var/www/html/pb.new" && -z "$(find "$ROOT" -name '*.sinko-new')" ]] || fail "leftovers of the interrupted run are still there"
+[[ -z "$(find "$ROOT/opt/sinko" -maxdepth 1 \( -name '.download.*' -o -name 'src.tmp' \))" ]] || fail "a cut-short download is still on the box (up to 20 MB each time)"
 echo "    the old page folder that was left next to a good one is simply removed"
 mkdir -p "$ROOT/var/www/html/pb.old"; echo stale >"$ROOT/var/www/html/pb.old/app.js"
 SINKO_HOSTNAME=kids.home bash "$REPO/install.sh" >"$WORK/repair2.out" 2>&1 || fail "the run with a stale pb.old failed"
@@ -148,16 +150,21 @@ cat >"$SRC2/bin/sinko" <<EOF
 #!/usr/bin/env bash
 if [[ "\${1:-}" == box-info ]]; then
   echo "\$* page-index=\$(test -s "$ROOT/var/www/html/index.html" && echo yes) page-version=\$(cat "$ROOT/var/www/html/pb/version.txt" 2>/dev/null)" >>"$WORK/boxinfo.calls"
+  echo "boxinfo-call \$*" >>"$WORK/calls.log"
   [[ -e "$WORK/boxinfo-fail" ]] && exit 2
   echo '{"v":1}' >"$ROOT/var/www/html/pb/box.json"; exit 0
 fi
 exec python3 "$SRC2/bin/sinko-real" "\$@"
 EOF
 chmod +x "$SRC2/bin/sinko"
-: >"$WORK/boxinfo.calls"
+: >"$WORK/boxinfo.calls"; : >"$WORK/calls.log"
 SINKO_SRC="$SRC2" bash "$SRC2/install.sh" >"$WORK/boxinfo1.out" 2>&1 || { cat "$WORK/boxinfo1.out"; fail "install with box-info failed"; }
 grep -q "^box-info --write page-index=yes page-version=$(cat "$REPO/VERSION")\$" "$WORK/boxinfo.calls" || { cat "$WORK/boxinfo.calls"; fail "box-info --write was not called after the page was swapped in"; }
 [[ -f "$ROOT/var/www/html/pb/box.json" ]] || fail "box.json does not exist from the first minute"
+echo "    ... and again at the end, when the settings and the local name it reports are final"
+last_write="$(grep -n "^boxinfo-call box-info --write" "$WORK/calls.log" | tail -n1 | cut -d: -f1 || true)"
+scheduler_on="$(grep -n '^systemctl enable --quiet sinko.service' "$WORK/calls.log" | tail -n1 | cut -d: -f1 || true)"
+if [[ -z "$last_write" || -z "$scheduler_on" ]] || (( last_write < scheduler_on )); then cat "$WORK/calls.log"; fail "box.json was not written again after the scheduler was switched on"; fi
 echo "    a failing box-info does not fail the installation"
 touch "$WORK/boxinfo-fail"
 SINKO_SRC="$SRC2" bash "$SRC2/install.sh" >"$WORK/boxinfo2.out" 2>&1 || { cat "$WORK/boxinfo2.out"; fail "a failing box-info stopped the installation"; }
@@ -199,7 +206,17 @@ mkdir -p "$THROW/tools"; printf '#!/bin/sh\n' >"$THROW/tools/build-release.sh"  
 git -C "$THROW" init -q -b master && git -C "$THROW" add -A && git -C "$THROW" -c user.name=t -c user.email=t@t commit -qm test
 LOG="$ROOT/var/log/sinko-install.log"
 rm -rf "$ROOT/opt/sinko/src"
+cat >"$STUBS/git" <<EOF
+#!/usr/bin/env bash
+[[ "\${1:-}" == clone ]] && echo "git \$* proto=\${GIT_ALLOW_PROTOCOL:-unset}" >>"$WORK/git.log"
+exec "$(command -v git)" "\$@"
+EOF
+chmod +x "$STUBS/git"; : >"$WORK/git.log"
 SINKO_REPO="file://$THROW" SINKO_REF=master bash <"$REPO/install.sh" >"$WORK/piped.out" 2>&1 || { cat "$WORK/piped.out"; fail "piped install.sh failed"; }
+rm -f "$STUBS/git"
+grep -q "proto=https:ssh:file" "$WORK/git.log" || { cat "$WORK/git.log"; fail "the developer path did not limit the transfer protocols (a redirect to plain http would be followed)"; }
+if GIT_ALLOW_PROTOCOL=https:ssh:file git clone --quiet http://127.0.0.1:9/none "$WORK/no-clone" >"$WORK/git-http.out" 2>&1; then fail "a clone over plain http worked with the limit set"; fi
+grep -q "not allowed" "$WORK/git-http.out" || { cat "$WORK/git-http.out"; fail "the protocol limit does not make the transfer refuse plain http (this version does not know it?)"; }
 grep -q "Starting the installer from the downloaded version" "$WORK/piped.out" || fail "the piped run did not start the downloaded installer"
 grep -q "Installing version $(cat "$REPO/VERSION") from $ROOT/opt/sinko/src" "$WORK/piped.out" || fail "the downloaded copy was not the one installed"
 grep -q "Sinko is ready" "$WORK/piped.out" || fail "the piped run did not finish"
@@ -213,8 +230,10 @@ echo "--- a generated parent password never reaches the install log, and Pi-hole
 LOG="$ROOT/var/log/sinko-install.log"
 printf '  Password:      OLD-OLD-OLD-OLD   (written by an older version)\n' >>"$LOG"
 chmod 644 "$LOG"
-mock_set_password ""                            # Pi-hole has no password: the installer generates one
+mock_set_password ""                            # Pi-hole has no password: the installer generates one (on a new installation)
+new_installation() { rm -f "$ROOT/etc/systemd/system/sinko.service"; }   # no scheduler unit yet: a box that has never run Sinko
 echo "    without a terminal"
+new_installation
 SINKO_TTY="$WORK/no-such-dir/tty" bash "$REPO/install.sh" >"$WORK/pw1.out" 2>&1 || { cat "$WORK/pw1.out"; fail "install without a password failed"; }
 PWFILE="$ROOT/etc/sinko/initial-password"
 pw1="$(cat "$PWFILE")"
@@ -231,6 +250,7 @@ grep -q "$PWFILE" "$WORK/pw1.out" || fail "the path of the saved password was no
 echo "    with a terminal"
 rm -f "$PWFILE"; : >"$WORK/fake_tty"
 mock_set_password ""
+new_installation
 SINKO_TTY="$WORK/fake_tty" bash "$REPO/install.sh" >"$WORK/pw2.out" 2>&1 || { cat "$WORK/pw2.out"; fail "install with a terminal failed"; }
 pw2="$(sed -n 's/.*Parent password: \([^ ]*\).*/\1/p' "$WORK/fake_tty" | tail -1)"
 [[ -n "$pw2" && "$pw2" != "$pw1" ]] || fail "second run did not generate a new password"
@@ -239,6 +259,45 @@ grep -qF "$pw2" "$LOG" && fail "generated password is in the install log (termin
 grep -qF "$pw2" "$WORK/pw2.out" && fail "generated password was printed to stdout (terminal run)"
 [[ ! -e "$PWFILE" ]] || fail "password file written although a terminal was available"
 [[ "$(stat -c %a "$LOG")" == 600 ]] || fail "install log mode changed"
+
+echo "    a run that fails after the password was set still hands it over (the next run would only 'keep the existing password')"
+rm -f "$PWFILE"
+mock_set_password ""
+new_installation
+touch "$WORK/pihole-g-fail"
+if SINKO_TTY="$WORK/no-such-dir/tty" bash "$REPO/install.sh" >"$WORK/pw2b.out" 2>&1; then fail "a failing gravity run was ignored"; fi
+rm -f "$WORK/pihole-g-fail"
+[[ -s "$PWFILE" && "$(stat -c %a "$PWFILE")" == 600 ]] || { cat "$WORK/pw2b.out"; fail "the generated password was lost when the run failed after it was set"; }
+mock_password_works "$(cat "$PWFILE")" || fail "the saved password is not the one Pi-hole has"
+grep -qF "$(cat "$PWFILE")" "$LOG" "$WORK/pw2b.out" && fail "the generated password reached the log or the output (failed run)"
+rm -f "$PWFILE"; : >"$WORK/fake_tty"
+mock_set_password ""
+new_installation
+touch "$WORK/pihole-g-fail"
+if SINKO_TTY="$WORK/fake_tty" bash "$REPO/install.sh" >"$WORK/pw2c.out" 2>&1; then fail "a failing gravity run was ignored (terminal)"; fi
+rm -f "$WORK/pihole-g-fail"
+pw2c="$(sed -n 's/.*Parent password: \([^ ]*\).*/\1/p' "$WORK/fake_tty" | tail -1)"
+[[ -n "$pw2c" ]] || fail "the generated password was not shown when the run failed after it was set (terminal)"
+mock_password_works "$pw2c" || fail "the password that was shown after the failed run is not the one Pi-hole has"
+[[ ! -e "$PWFILE" ]] || fail "password file written although a terminal was available (failed run)"
+echo "    an update never chooses a password: a box that waits for its parent (welcome screen) stays that way"
+bash "$REPO/install.sh" >"$WORK/pw2d0.out" 2>&1 || { cat "$WORK/pw2d0.out"; fail "the run that completes the installation failed"; }
+[[ -f "$ROOT/etc/systemd/system/sinko.service" ]] || fail "test setup: no scheduler unit, so this is not an update"
+mock_set_password ""
+rm -f "$PWFILE"
+SINKO_TTY="$WORK/no-such-dir/tty" bash "$REPO/install.sh" >"$WORK/pw2d.out" 2>&1 || { cat "$WORK/pw2d.out"; fail "an update on a box without a password failed"; }
+grep -q "This box has no parent password yet" "$WORK/pw2d.out" || fail "no note that the box still waits for its parent"
+[[ ! -e "$PWFILE" ]] || fail "an update saved a password nobody can read (a ready-made box has no login)"
+rc=0; "$ROOT/usr/local/bin/sinko" password-state || rc=$?
+[[ "$rc" == 3 ]] || fail "an update set a password on a box that had none (rc=$rc): the parent would be locked out of the welcome screen"
+grep -q "Password set" "$WORK/pw2d.out" && fail "an update claims to have set a password"
+echo "    ... unless somebody is there to be asked, or gives one"
+printf '%s\n%s\n' "Chosen-Pass-2024" "Chosen-Pass-2024" >"$WORK/answer"
+env -u SINKO_NONINTERACTIVE SINKO_TTY="$WORK/answer" bash "$REPO/install.sh" >"$WORK/pw2e.out" 2>&1 || { cat "$WORK/pw2e.out"; fail "an interactive update failed"; }
+mock_password_works "Chosen-Pass-2024" || fail "an interactive update did not set the password that was typed"
+mock_set_password ""
+SINKO_PASSWORD="Given-Update-2024" bash "$REPO/install.sh" >"$WORK/pw2f.out" 2>&1 || { cat "$WORK/pw2f.out"; fail "an update with a given password failed"; }
+mock_password_works "Given-Update-2024" || fail "an update did not set the password it was given"
 
 echo "--- a password given in the environment: used, kept out of every program's environment, arguments and the log"
 mock_set_password ""
