@@ -752,6 +752,30 @@ class PageAndSchedulerTests(unittest.TestCase):
         self.finish(box, page)
 
 
+    def test_while_an_update_installs_box_json_is_left_alone_and_the_page_does_not_call_that_silence(self):
+        """The installer swaps the folder box.json lives in, so the scheduler does not write it during an update; the page, for its part, does
+        not call a late pulse silence while the state says running. Two halves of one contract, and the scheduler writes it again at once afterwards."""
+        box = Box(self, offer=NEW)
+        page = self.open(box)
+        page.evaluate("() => { PBBox.timing.heartbeatGrace = 1; }")
+        self.press_update_now(box, page, "en", watch=False)
+        written = box.box_json()["at"]
+        box.store.clock_skew = 40 * 60                   # the installation takes forty minutes of the box's clock
+        box.tick(3, advance=40 * 60)
+        self.assertEqual(box.box_json()["at"], written, "the scheduler left box.json alone while the update ran")
+        for _ in range(3):
+            self.look_again(page)
+            page.wait_for_timeout(700)
+        self.assertFalse(self.banner(page), "and the page does not say that the timer is not running: it is installing an update")
+        box.finish_update("failed", "The installer stopped with an error (exit status 1). The previous version (%s) was put back." % VERSION, True)
+        box.tick(2)
+        self.assertGreaterEqual(box.box_json()["at"], written + 40 * 60 - 5, "the first pass after the update wrote box.json again, on the box's clock")
+        for _ in range(3):
+            self.look_again(page)
+            page.wait_for_timeout(700)
+        self.assertFalse(self.banner(page), "so there is no banner once the update is over either")
+        self.finish(box, page)
+
     # ----------------------------------------------------------------------------------------------------------------
     # (5) both sides write the same description
     # ----------------------------------------------------------------------------------------------------------------
