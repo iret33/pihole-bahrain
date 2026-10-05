@@ -42,7 +42,7 @@
       advanced: 'Advanced settings', helpTitle: 'Setup help',
       helpBody: 'For the rules to work, your router must send all devices to this box for DNS. In the router settings, set the DNS server to {ip} and reserve that address for the box. Then turn Wi\u2011Fi off and on again on each child\u2019s device.',
       // When the page does not know the box's number address (no /pb/box.json, and the page was opened by a name): never a name in its place.
-      helpBodyNoIp: 'For the rules to work, your router must send all devices to this box for DNS. In the router settings, set the DNS server to the box\u2019s number address (four numbers with dots, such as 192.168.1.50) and reserve that address for the box. You can find the number in your router\u2019s list of connected devices: look for the box. Then turn Wi\u2011Fi off and on again on each child\u2019s device.', close: 'Close', cancel: 'Cancel', start: 'Start', add: 'Add',
+      helpBodyNoIp: 'For the rules to work, your router must send all devices to this box for DNS. In the router settings, set the DNS server to the box\u2019s number address (four numbers separated by dots) and reserve that address for the box. You can find the number in your router\u2019s list of connected devices: look for the box. Then turn Wi\u2011Fi off and on again on each child\u2019s device.', close: 'Close', cancel: 'Cancel', start: 'Start', add: 'Add',
       customMinutes: 'Or enter minutes', addHint: 'Pick your child\u2019s phone, tablet or console. Devices appear here after they have used the internet at home.',
       manual: 'Enter address by hand', addrLabel: 'MAC or IP address', nameLabel: 'Name',
       macTip: 'Tip: on the child\u2019s device, turn off \u201cPrivate Wi\u2011Fi address\u201d for your home network so it keeps the same address.',
@@ -96,7 +96,7 @@
       pickNight: 'اختر ليلة واحدة على الأقل.', sameTimes: 'يجب أن يختلف وقت الإيقاف عن وقت التشغيل.',
       advanced: 'إعدادات متقدمة', helpTitle: 'مساعدة في الإعداد',
       helpBody: 'لكي تعمل القواعد، يجب أن يوجّه جهاز الراوتر كل الأجهزة إلى صندوق العائلة لخدمة DNS. في إعدادات الراوتر، اجعل خادم DNS هو {ip} واحجز هذا العنوان للصندوق. ثم أطفئ Wi‑Fi وشغّله مجددًا على جهاز كل طفل.',
-      helpBodyNoIp: 'لكي تعمل القواعد، يجب أن يوجّه جهاز الراوتر كل الأجهزة إلى صندوق العائلة لخدمة DNS. في إعدادات الراوتر، اجعل خادم DNS هو العنوان الرقمي للصندوق (أربعة أرقام تفصل بينها نقاط، مثل 192.168.1.50) واحجز هذا العنوان للصندوق. تجد الرقم في قائمة الأجهزة المتصلة في الراوتر: ابحث عن الصندوق. ثم أطفئ Wi‑Fi وشغّله مجددًا على جهاز كل طفل.', close: 'إغلاق', cancel: 'إلغاء', start: 'ابدأ', add: 'إضافة',
+      helpBodyNoIp: 'لكي تعمل القواعد، يجب أن يوجّه جهاز الراوتر كل الأجهزة إلى صندوق العائلة لخدمة DNS. في إعدادات الراوتر، اجعل خادم DNS هو العنوان الرقمي للصندوق (أربعة أرقام تفصل بينها نقاط) واحجز هذا العنوان للصندوق. تجد الرقم في قائمة الأجهزة المتصلة في الراوتر: ابحث عن الصندوق. ثم أطفئ Wi‑Fi وشغّله مجددًا على جهاز كل طفل.', close: 'إغلاق', cancel: 'إلغاء', start: 'ابدأ', add: 'إضافة',
       customMinutes: 'أو أدخل عدد الدقائق', addHint: 'اختر هاتف طفلك أو جهازه اللوحي أو جهاز الألعاب. تظهر الأجهزة هنا بعد استخدامها للإنترنت في المنزل.',
       manual: 'إدخال العنوان يدويًا', addrLabel: 'عنوان MAC أو IP', nameLabel: 'الاسم',
       macTip: 'نصيحة: على جهاز الطفل، أوقف خيار «عنوان Wi‑Fi خاص» لشبكة المنزل حتى يحتفظ الجهاز بعنوان ثابت.',

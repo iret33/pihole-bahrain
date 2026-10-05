@@ -305,7 +305,7 @@ class NoCommandsForParents(unittest.TestCase):
             no_number = s[lang]["helpBodyNoIp"]
             self.assertNotIn("{ip}", no_number)
             self.assertNotRegex(no_number, r"(?i)\.local\b|\.lan\b|family\.|sinko\.", "%s: no host name in the router sentence" % lang)
-            self.assertIn("192.168.1.50", no_number, "%s: an example of what a number address looks like" % lang)
+            self.assertNotRegex(no_number, r"\d+\.\d+\.\d+\.\d+", "%s: no example number: a parent could type it into the router" % lang)
         self.assertIn("number address", s["en"]["helpBodyNoIp"])
         self.assertIn("العنوان الرقمي", s["ar"]["helpBodyNoIp"])
         self.assertEqual(sorted(s["en"]), sorted(s["ar"]))
