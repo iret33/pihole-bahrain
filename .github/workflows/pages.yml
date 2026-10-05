@@ -53,7 +53,7 @@ jobs:
           BASE_URL: ${{ steps.pages.outputs.base_url }}
         run: bash site/assemble.sh _site "$BASE_URL"
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: _site
 
