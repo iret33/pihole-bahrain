@@ -18,7 +18,10 @@ Child's device ──DNS──► │  blocked if the device is in an enabled pb
 - Every service has its own Pi-hole group `pb-svc-<id>` that owns one block
   list. Lists are **always enabled** (Pi-hole leaves disabled lists out when it
   rebuilds), and a service is blocked by **enabling its group**. Changes apply
-  immediately — no DNS restart.
+  immediately, and after every change the box's DNS cache is cleared (a quick resolver restart,
+  `POST /api/action/restartdns`): Pi-hole keeps answers it learned before a block and would otherwise keep serving them,
+  so a freshly blocked app could keep working for a while. A device's own cache and apps that are already open can
+  still take a few minutes.
 - Child devices are clients that belong to `pb-kids`, `pb-guard` (blocks
   outside DNS-over-HTTPS resolvers), `pb-offline` and every `pb-svc-*` group.
   Pausing a device adds it to `pb-paused`.

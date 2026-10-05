@@ -102,9 +102,11 @@ with sync_playwright() as p:
     settle(page)
     expect("Sara's iPad" in page.inner_text("#devices"), "device added from picker")
 
+    restarts = store.dns_restarts
     page.click("[data-id=youtube]")
     settle(page)
     expect(pressed(page, "youtube"), "YouTube blocked by tap")
+    expect(store.dns_restarts == restarts + 1, "a rule change clears the box's DNS cache so it applies at once (%d -> %d)" % (restarts, store.dns_restarts))
 
     page.click("[data-act=homework]")
     settle(page)

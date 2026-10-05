@@ -412,6 +412,30 @@ class TickTests(Base):
         self.assertFalse(self.enabled("pb-svc-tiktok"))
         self.assertIsNone(self.state()["timer"])
 
+    def test_rule_changes_clear_the_dns_cache_once_and_only_when_something_changed(self):
+        now = dt.datetime(2026, 9, 17, 16, 0)
+        before = self.store.dns_restarts
+        self.set_state(timer={"mode": "free", "until": now.timestamp() - 1,
+                              "snapshot": {"services": {"youtube": True}, "offline": False}})
+        self.ctl.tick(now)
+        self.assertEqual(self.store.dns_restarts, before + 1, "a restored rule set empties the resolver's cache, once")
+        self.ctl.tick(now)                                        # nothing to do now
+        self.assertEqual(self.store.dns_restarts, before + 1, "and an idle pass does not touch the resolver")
+
+    def test_a_failed_cache_flush_never_undoes_the_rule_change(self):
+        now = dt.datetime(2026, 9, 17, 16, 0)
+        real_request = self.api.request
+
+        def request(method, path, *a, **k):
+            if path == "/api/action/restartdns":
+                raise RuntimeError("the resolver did not answer")
+            return real_request(method, path, *a, **k)
+        self.api.request = request
+        self.set_state(timer={"mode": "free", "until": now.timestamp() - 1,
+                              "snapshot": {"services": {"youtube": True}, "offline": False}})
+        self.ctl.tick(now)
+        self.assertTrue(self.enabled("pb-svc-youtube"))
+
     def test_block_timer_restores_previous_not_everything(self):
         now = dt.datetime(2026, 9, 17, 16, 0)
         self.api.put_group("pb-offline", "", True)

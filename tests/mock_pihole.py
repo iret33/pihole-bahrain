@@ -137,6 +137,7 @@ class Store:
         self.box_info_age = 0             # seconds the file's `at` is behind the box's clock (a scheduler that stopped writing it)
         self.box_raw = None               # bytes served as /pb/box.json instead of the above (to test garbage)
         self.gravity_runs = 0             # POST /api/action/gravity calls
+        self.dns_restarts = 0             # POST /api/action/restartdns calls (clears the resolver's cache)
         self.gravity_seconds = 0.0        # how long a run takes
         self.gravity_fail = False         # the run ends with a failure line
         self.scheduler = None             # a SchedulerSim
@@ -581,6 +582,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.top_clients(query)
             if parts == ["queries"]:
                 return self.queries(query)
+            if parts == ["action", "restartdns"] and method == "POST":
+                s.dns_restarts += 1
+                return self.send(200, {"status": "success"})
             if parts == ["dns", "blocking"] and method == "GET":
                 if "blocking" in s.info_fail:
                     return self.err(500, "internal_error", "Simulated failure of /api/dns/blocking")

@@ -452,11 +452,21 @@
       });
   }
   function q(s) { return encodeURIComponent(s); }
+  // Pi-hole keeps answers it learned before a block, so a rule change only reaches an app once that cache is cleared.
+  // Every rule change marks the box dirty; after the action, one quick resolver restart empties the cache.
+  var rulesDirty = false;
+  function flushDns() {
+    if (!rulesDirty) return Promise.resolve();
+    rulesDirty = false;
+    return call('POST', '/api/action/restartdns').catch(function () { /* the rule change itself already worked */ });
+  }
   function putGroup(g, enabled) {
+    rulesDirty = true;
     return call('PUT', '/api/groups/' + q(g.name), { name: g.name, comment: g.comment || '', enabled: !!enabled })
       .then(function () { g.enabled = !!enabled; });
   }
   function putClient(c, groups) {
+    rulesDirty = true;
     return call('PUT', '/api/clients/' + q(c.client), { comment: c.comment || '', groups: groups });
   }
 
@@ -783,6 +793,7 @@
     return Promise.resolve().then(fn)
       .then(function () { if (okMsg) toast(typeof okMsg === 'function' ? okMsg() : okMsg); })
       .catch(function (e) { if (e && e.status !== 401) toast(t('failed', { e: e.message || String(e) }), true); })
+      .then(flushDns)
       .then(function () { busy = false; document.body.classList.remove('is-busy'); return load().catch(function () {}); });
   }
   function timerActive() { return !!(M && M.state.timer); }
