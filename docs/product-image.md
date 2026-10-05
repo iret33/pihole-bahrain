@@ -26,12 +26,22 @@ a computer to flash and copy cards. Read [`selling.md`](selling.md) first for th
      zone and locale you ship with by hand: `timedatectl set-timezone Asia/Bahrain` (or yours) and
      `dpkg-reconfigure locales`. If you made a user anyway, delete it before you seal (`userdel -r NAME`): it would keep its
      password and its `sudo` right on the console of every box.
-3. Install Sinko from the latest release: `curl -fsSL https://github.com/iret33/sinko/releases/latest/download/install.sh | sudo bash`
-   (answer the counter question *no*: it is asked again in the customer's page). Open the page, check that it works.
+3. Install Sinko from the latest release:
+   `curl --proto '=https' --proto-redir '=https' -fsSL https://github.com/iret33/sinko/releases/latest/download/install.sh | sudo bash`
+   (if the installer asks the counter question, answer *no*: it is asked again in the customer's page, and only when this
+   copy of Sinko has a counter address). Open the page, check that it works.
 4. Run `sudo sinko doctor` and `sudo sinko selfcheck`; fix anything that is not `ok`.
 5. Check what the customer's first minutes depend on, **before** you seal, because nothing can be repaired afterwards:
    * `systemctl is-enabled avahi-daemon sinko pihole-FTL sinko-lists.timer` all say `enabled`, and `avahi-daemon` is
      installed (it is what makes `http://sinko.local` work; if the install could not fetch it, install it now);
+   * Debian's automatic security updates are really on (`apt-config dump | grep -i Unattended` shows the periodic setting
+     `"1"`, and `systemctl is-enabled apt-daily.timer apt-daily-upgrade.timer` says `enabled`) and a time service runs
+     (`timedatectl` says `NTP service: active`): the boards have no clock battery, and nobody can fix either on a box that
+     is shipped. The installer sets both up, but it leaves an `unattended-upgrades` that was already there exactly as it
+     found it, so a unit where it is installed but switched off stays that way until you switch it on
+     (`dpkg-reconfigure -plow unattended-upgrades`);
+   * the unit follows releases: `grep SINKO_REF /etc/sinko/config` shows nothing or `latest`. A unit that was pinned
+     (`sinko update --ref v3.0.0`) or installed from a branch would ship boxes that are never offered an update;
    * the box's address comes from DHCP (`ip -4 addr` shows `dynamic`), not from a fixed setting you made;
    * the console shows a login prompt, not a shell that is already logged in (Armbian removes its automatic root login
      when the first-login wizard has run; if you never ran the wizard on this unit, run it or remove the drop-ins under
@@ -49,13 +59,34 @@ and the parent is not locked out by yours), children's devices, timers and bedti
 (including Armbian's on-disk copy in `/var/log.hdd`), shell history, SSH host keys (each box makes its own on first
 start), Pi-hole's HTTPS key (each box makes its own), Wi-Fi profiles, the machine id, the counter's install id and answer,
 and Armbian's first-login wizard file. It sets the host name
-(`--hostname`, default `sinko`, so `http://sinko.local` works), installs the hardware watchdog so a hung box reboots by
-itself, arms the first-start service, and **locks the root password and turns off SSH password logins last** (so a seal that
+(`--hostname`, default `sinko`, so `http://sinko.local` works), installs the hardware watchdog (15 seconds, the most the
+Orange Pi's driver accepts) so a hung box reboots by itself, arms the first-start service, and **locks the root password and turns off SSH password logins last** (so a seal that
 stops halfway leaves you able to log in and run it again; `--keep-ssh-access` leaves the lock off, for a test unit).
 **It keeps** the Sinko program and `/var/lib/sinko/cache`, the copy of the installed release that lets a box go back to its
 previous version without internet: that is on purpose, and it is not private.
 By default it ends by writing zeros over the free space, which makes the compressed image much smaller (it takes a few
-minutes; `--no-zerofill` skips it, for a test unit you will not image).
+minutes; `--no-zerofill` skips it, for a test unit you will not image). The zero-fill counts as done only when the disk
+really is full ("No space left on device"): any other end (a read error, a card that went read-only, a kill) fails the
+seal and removes the zero file. A zero file left by a seal that was cut short is deleted by the next seal and by a box's
+first start, so a card never ships full.
+
+**Before it changes anything the seal checks the unit, and refuses to go on** (it names every problem, and `--dry-run`
+shows the list without changing anything) when: a Sinko service or timer, or Pi-hole, is not enabled; `avahi-daemon` is
+missing or not enabled; `unattended-upgrades` is not installed or not switched on, or its timers are off (unless the unit
+was set up with `SINKO_OS_UPDATES=0`); no time service is on; the unit is pinned to a version or follows a branch; the
+address is a fixed one; or **an account other than root can log in on the console** (the user that Armbian's first-login
+wizard makes keeps the password you gave it and its `sudo` right on every box: delete it with `userdel -r NAME`, or lock
+it with `passwd -l NAME`). For a test unit, `--skip-checks` skips this list, but the seal looks for another login again
+just before its last step (and stops there: the root password is not locked yet, so you can still fix it), and
+`--keep-ssh-access` is the only way past that.
+
+**The watchdog and the page's two buttons.** *Shut down* disarms the watchdog first: that is what systemd 257 (the one in
+Debian Trixie) does for a power-off, which is read in its source and not measured; whether the board's driver lets it be
+disarmed, and whether its power-off cuts the power, only the real board shows ([`hardware-test-checklist.md`](hardware-test-checklist.md),
+sections B and E). A *Restart* keeps the watchdog armed at 15 seconds during the shutdown, and systemd feeds it once per
+unmount pass, not during the first write-out of the card: on a very slow card with a backlog a restart can therefore be
+cut off by the watchdog in the middle of the shutdown. The file system recovers from its journal at the next start; the
+checklist asks you to try it on the slowest card you sell.
 
 **Close every other SSH or console session, then run `unset HISTFILE; sudo poweroff` and do not start the unit again before
 you image it.** Starting it runs the first-start service, which uses up the seal, and powering off from a login shell

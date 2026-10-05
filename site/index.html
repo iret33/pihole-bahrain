@@ -173,7 +173,7 @@
             <li data-i18n="own3">Run this one line and answer the questions:</li>
           </ol>
           <div class="cmd">
-            <code id="installCmd" dir="ltr">curl -fsSL https://github.com/iret33/sinko/releases/latest/download/install.sh | sudo bash</code>
+            <code id="installCmd" dir="ltr">curl --proto '=https' --proto-redir '=https' -fsSL https://github.com/iret33/sinko/releases/latest/download/install.sh | sudo bash</code>
             <button class="btn btn-small" id="copyBtn" type="button" data-i18n="ownCopy">Copy</button>
           </div>
           <p class="sr-only" id="copyStatus" role="status" aria-live="polite"></p>

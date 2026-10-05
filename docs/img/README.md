@@ -61,8 +61,10 @@ visibly.
 
 ## The social preview
 
-Flat teal, the mark and "Sinko" on one baseline, the English tagline and the Arabic one under them, and very faint
-rings echoing the arcs. Text is set in Plex (inlined as data into a temporary page, so nothing is fetched). The script
+Flat teal, the mark and "Sinko" on one baseline, the English tagline ("Calm internet for the family") and the Arabic one
+(إنترنت هادئ للعائلة) under them, and very faint rings echoing the arcs. These two lines are the only taglines: the same
+words are in the README, on the website (`site/strings.js`) and on the parent page's sign-in and welcome screens, and the
+constants `TAGLINE_EN` and `TAGLINE_AR` at the top of `tools/make-brand.py` are their source; a test compares them all. Text is set in Plex (inlined as data into a temporary page, so nothing is fetched). The script
 refuses to write the PNG if the fonts do not load, or if any character of either tagline is painted by a different
 font (it asks Chromium which fonts painted each line; a single fallback glyph would break the Arabic joining).
 The Arabic tagline renders joined and right to left. Keep the important content inside the middle 1200 x 600: some

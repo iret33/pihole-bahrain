@@ -63,8 +63,8 @@ IPv6 and DNS settings.
 [`troubleshooting.md`](troubleshooting.md). A card that is worn out from years of writing is the usual cause of repeated
 trouble: use a high-endurance card and keep a backup (*My box → Backup*).
 
-**How do I remove it?** Own install: `sudo /opt/sinko/uninstall.sh` removes Sinko and its rules and keeps Pi-hole (a device
-that you had also given a group of your own in Pi-hole stays, without Sinko's groups). Ready-made
+**How do I remove it?** Own install: `sudo /opt/sinko/uninstall.sh` removes Sinko and its rules and keeps Pi-hole (a device that
+also holds a group of your own in Pi-hole stays, without Sinko's groups). Ready-made
 box: there is nothing to uninstall, just unplug it. In both cases, point the router's DNS server back to its default so
 that the devices at home do not keep asking a box that is gone.
 

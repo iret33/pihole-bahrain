@@ -81,8 +81,9 @@ Latest-release metadata: `https://api.github.com/repos/<slug>/releases/latest` (
 
 ## Installer contract (`install.sh`)
 
-* `curl -fsSL https://github.com/<slug>/releases/latest/download/install.sh | sudo bash` (also still works from raw
-  `master`).
+* `curl --proto '=https' --proto-redir '=https' -fsSL https://github.com/<slug>/releases/latest/download/install.sh | sudo bash`
+  (also still works from raw `master`). This one hardened form is the only one written anywhere (README, docs, the website):
+  `--proto-redir` keeps a redirect from leaving https.
 * Fetches the release tarball + `.sha256`, verifies it (refuses on mismatch), extracts to `/opt/sinko/src`, then runs
   the `install.sh` shipped inside it (existing re-exec behaviour). `SINKO_SRC=<dir>` uses an already extracted tree and
   skips fetching (used by `sinko update`, tests and the image build). Always non-interactive when `SINKO_NONINTERACTIVE=1`.

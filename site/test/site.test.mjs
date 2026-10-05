@@ -134,6 +134,19 @@ test('the install command in the page is the one for the configured repository',
   assert.ok(html.includes(`https://github.com/${CONFIG.repo}/blob/master/docs/privacy.md`), 'the privacy statement');
 });
 
+test('"Full instructions on GitHub" lands on a heading the README really has, and the page and app.js agree on it', () => {
+  const fromScript = /\[data-readme-link\][^\n]*base \+ '#([\w-]+)'/.exec(appJs);
+  assert.ok(fromScript, 'app.js sets the address of data-readme-link from the repository address and an anchor');
+  const fromPage = new RegExp(`data-readme-link href="https://github.com/${CONFIG.repo.replace(/[.]/g, '\\.')}#([\\w-]+)"`).exec(html);
+  assert.ok(fromPage, 'index.html carries the same address without JavaScript');
+  assert.equal(fromPage[1], fromScript[1]);
+  // GitHub makes the anchor of a heading from its text: lower case, punctuation gone, spaces turned into hyphens.
+  const anchors = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8').split('\n')
+    .filter((line) => /^#{1,6}\s/.test(line))
+    .map((line) => line.replace(/^#+\s+/, '').trim().toLowerCase().replace(/[^\p{L}\p{N}\s-]/gu, '').replace(/\s/g, '-'));
+  assert.ok(anchors.includes(fromScript[1]), `README.md has no heading for #${fromScript[1]} (it has: ${anchors.join(', ')})`);
+});
+
 // ---------------------------------------------------------------- markup
 test('the page is sound: one h1, unique ids, working anchors, alt text, no stray placeholder', () => {
   assert.match(html, /^<!doctype html>\n<html lang="en" dir="ltr">/);

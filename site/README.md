@@ -32,11 +32,11 @@ framework, nothing to install. It is published by `.github/workflows/pages.yml`.
 Arabic, SIL OFL) and `web/icon.svg` to `icon.svg`. It also puts the site's address into the three places that must be
 absolute (canonical link, `og:url`, `og:image`), because link previews do not run JavaScript.
 
-**The screenshots arrive later than the site.** `tools/make-screenshots.py` makes them (it needs a browser, so the Pages
-workflow does not run it) and they are committed to `docs/img/`. Until then the site is published without them, and that
-is meant to work: `assemble.sh` prints one `::warning::` line for each missing picture and carries on, and the page
-asks once (a cheap `HEAD` request) which pictures exist, hides the ones that do not, and keeps the whole "See it"
-section hidden until at least one is there. Nothing to change in the site when they are added: commit them to
+**The screenshots are committed, and the site still copes without them.** `tools/make-screenshots.py` makes them (it needs a
+browser, so the Pages workflow does not run it) and they are in `docs/img/`. A picture that is missing (a fork that did not
+commit them, a rename) does no harm: `assemble.sh` prints one `::warning::` line for each missing picture and carries on,
+and the page asks once (a cheap `HEAD` request) which pictures exist, hides the ones that do not, and keeps the whole "See
+it" section hidden until at least one is there. Nothing to change in the site when they are renewed: commit them to
 `docs/img/` and the next deploy shows them. Without JavaScript the "See it" section stays hidden (the hero picture has
 a `<noscript>` copy): the page never shows a broken picture, at the price that a visitor without JavaScript does not see
 the gallery.
@@ -60,7 +60,8 @@ node --test site/test/*.test.mjs                 # Node 20 or newer
 `site.test.mjs`: both languages have exactly the same keys, the same placeholders, and no Arabic is English by
 mistake; the privacy answer says that the box asks an upstream DNS service and never says that what a family looks up
 "stays on the box"; the Arabic tagline is one; the English written in `index.html` is the English in `strings.js`;
-`config.js` is valid; every file the page names exists; text colours pass WCAG AA in light and dark; the stylesheet has no left/right properties; the
+`config.js` is valid; the install command is the hardened one and the "Full instructions" link lands on a heading the
+README really has; every file the page names exists; text colours pass WCAG AA in light and dark; the stylesheet has no left/right properties; the
 language is picked correctly before the first paint; `assemble.sh` builds the right folder and refuses an unsafe
 address. `lib.test.mjs`: what the numbers strip shows and leaves out, with a fake `fetch`.
 
