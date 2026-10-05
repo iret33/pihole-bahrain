@@ -142,8 +142,8 @@ mounting the card on a computer.
       KILL sinko-update`, then `sudo reboot -f`). After the start the box still filters, and `sudo sinko selfcheck` says the
       page and the program are of different versions. Within about a quarter of an hour (ten minutes of difference, a minute
       for the look, then the installer) the box repairs itself: `sudo journalctl -u sinko` says the page and the program
-      have been of different versions and that it installs this version again, `/var/lib/sinko/repair.json` exists, the
-      selfcheck passes and *My box* says the update worked. Do it once more with the network cable out during the repair:
+      have been of different versions and that it installs this version again, `sudo journalctl -u sinko-repair` has the
+      installer's output, `/var/lib/sinko/repair.json` exists, the selfcheck passes and *My box* says the update worked. Do it once more with the network cable out during the repair:
       write down whether the installer's `sinko setup` (it runs `pihole -g`) gets through with the lists the box already
       has, because the repair downloads nothing of Sinko itself but a refresh of the lists still asks the internet.
 - [ ] **A cut after the page swap.** Same, but pull the power a few seconds later, while the services are set up

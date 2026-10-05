@@ -153,7 +153,8 @@ None of these requests carries anything about your family, and GitHub's own priv
 When you install Sinko yourself, the installer also downloads the programs it needs from the operating system's package
 servers (Debian's and, on an Orange Pi, Armbian's), Pi-hole's own installer from `install.pi-hole.net` if Pi-hole is not
 there yet, and Sinko from GitHub; those servers see your internet address and what was asked for, as in any download. A
-ready-made box has all of this done already, and after that makes only the requests described above. The installer ends
+ready-made box has all of this done already, and Sinko itself then makes only the requests described above (what the
+operating system and Pi-hole do by themselves is under "Other things on the box that are not Sinko's"). The installer ends
 every run with the same check as `sudo sinko doctor`: a ready-made box therefore makes that small request after every
 update, and on your own box you can make it yourself by running the command.
 
@@ -310,8 +311,8 @@ something new, this statement changes first, with the release that does it.
 ### ماذا يحدث عند التحديث
 
 **البحث عن إصدار جديد.** بعد دقيقتين تقريبًا من تشغيل الصندوق، ثم مرة كل يوم تقريبًا، وكلما ضغطت «افحص مجددًا»، يسأل
-الصندوق GitHub (`api.github.com`) عن أحدث إصدار. والدقيقتان تُحسبان من كل تشغيل للصندوق (أو لسينكو عليه)، فتُحسبان
-أيضًا بعد انقطاع الكهرباء وبعد كل تحديث. وإن تعذّر الوصول إلى GitHub (لانقطاع الإنترنت أو لانشغاله) أعاد الصندوق السؤال
+الصندوق GitHub (`api.github.com`) عن أحدث إصدار. والدقيقتان تبدآن من كل تشغيل للصندوق (أو لسينكو عليه)، فتبدآن من
+جديد أيضًا بعد انقطاع الكهرباء وبعد كل تحديث. وإن تعذّر الوصول إلى GitHub (لانقطاع الإنترنت أو لانشغاله) أعاد الصندوق السؤال
 بعد نصف ساعة إلى ساعة، فالصندوق الذي لا إنترنت عنده يسأل أكثر من مرة في اليوم. أما الصندوق الذي ثُبّت عمدًا على إصدار
 واحد (`sudo sinko update --ref v3.0.1` على صندوقك الذي بنيته بنفسك) فلا يسأل عن أحدث إصدار، والذي يتبع فرعًا تطويريًا لا
 يسأل عن شيء.
@@ -319,8 +320,8 @@ something new, this statement changes first, with the release that does it.
 **التحديث.** عندما تحدّث («حدّث الآن» في الصفحة، أو التحديث التلقائي في الليل، أو الأمر `sudo sinko update`) ينزّل
 الصندوق الإصدار الجديد من GitHub: ملف البرنامج وملف التحقق الخاص به، من `github.com`، الذي يحوّل الملف إلى أحد خوادم
 التنزيل التابعة له. ثم يعيد التحديث تشغيل برنامج تثبيت سينكو على الصندوق، ويتصل هذا بالإنترنت مرتين أخريين. فهو يحدّث
-قوائم الحظر: ينزّل Pi-hole كل قائمة من المكان الذي تُنشر فيه، وهو لقوائم سينكو الصغيرة، وعددها نحو عشرين، الموقع
-`raw.githubusercontent.com`، ولأي قائمة أضفتها أنت موضعها هي. ثم يختم بالفحص نفسه الذي يجريه الأمر `sudo sinko doctor`،
+قوائم الحظر: ينزّل Pi-hole كل قائمة من المكان الذي تُنشر فيه، فقوائم سينكو الصغيرة، وعددها نحو عشرين، من
+`raw.githubusercontent.com`، وأي قائمة أضفتها أنت من موضعها هي. ثم يختم بالفحص نفسه الذي يجريه الأمر `sudo sinko doctor`،
 فيجلب ملفًا عامًّا صغيرًا من عنوان قوائم الحظر (الملف `lists/guard.txt` على `raw.githubusercontent.com`) ليتأكد من إمكان
 الوصول إلى ذلك العنوان. وإن كان ينقص الصندوق شيء يحتاجه برنامج التثبيت فإنه يطلبه أيضًا من خوادم الحزم الخاصة بنظام
 التشغيل، وهذا نادر في صندوق يعمل أصلًا.
@@ -333,7 +334,8 @@ something new, this statement changes first, with the release that does it.
 وعندما تثبّت سينكو بنفسك، ينزّل برنامج التثبيت أيضًا ما يحتاجه من البرامج من خوادم الحزم الخاصة بنظام التشغيل (خوادم
 Debian، وخوادم Armbian إن كنت تستعمل Orange Pi)، ومثبّت Pi-hole نفسه من `install.pi-hole.net` إن لم يكن Pi-hole موجودًا
 بعد، وسينكو من GitHub؛ وترى هذه الخوادم عنوان إنترنتك وما طلبتَه، كما في أي تنزيل. والصندوق الجاهز يكون هذا كله قد أُنجز
-فيه من قبل، ولا يطلب بعد ذلك إلا ما ذُكر أعلاه. ويختم برنامج التثبيت كل تشغيل له بالفحص نفسه الذي يجريه الأمر `sudo sinko
+فيه من قبل، ولا يطلب سينكو نفسه بعد ذلك إلا ما ذُكر أعلاه (أما ما يفعله نظام التشغيل وPi-hole من تلقاء نفسيهما فمذكور في
+«أشياء أخرى على الصندوق ليست من سينكو»). ويختم برنامج التثبيت كل تشغيل له بالفحص نفسه الذي يجريه الأمر `sudo sinko
 doctor`: فيجري الصندوق الجاهز ذلك الطلب الصغير بعد كل تحديث، وتستطيع على صندوقك الذي بنيته بنفسك أن تجريه بنفسك بتشغيل
 الأمر.
 

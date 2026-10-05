@@ -375,8 +375,8 @@ class TheUpdateTrafficIsDescribedCompletely(unittest.TestCase):
             self.assertIn(needle, self.faq)
 
     def test_the_retry_rule_is_the_one_in_the_program(self):
-        for needle in ("only because of the internet or the free space on the card", "later in the same night",
-                       "left alone for a week", "never less than five minutes apart"):
+        for needle in ("only because the download could not be made (the internet) or the card has too little room",
+                       "later in the same night", "left alone for a week", "never less than five minutes apart"):
             self.assertIn(needle, self.updating)
 
     def test_the_checklist_lists_what_an_update_really_sends(self):

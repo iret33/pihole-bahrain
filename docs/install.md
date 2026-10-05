@@ -45,9 +45,11 @@ go on if they differ. Then it:
 5. checks that the new scheduler really runs, sets up Debian's automatic security updates and, when the box has no time
    service, `systemd-timesyncd` (the boards have no clock battery), and prints the address and the router step below.
 
-If a step fails, nothing is half-installed: fix the problem and run the same command again. **Running the same command
-again updates everything and keeps your password, devices and rules.** (Updating normally happens from the page,
-see [`updating.md`](updating.md).)
+If a step fails, the installer says which and stops (the log is `/var/log/sinko-install.log`): fix the problem and run the
+same command again, which is always safe. A card that is nearly full is refused at the start (more than 1 GB free for a
+first installation, more than 200 MB for an update), before anything is changed. **Running the same command again updates
+everything and keeps your password, devices and rules.** (Updating normally happens from the page, see
+[`updating.md`](updating.md).)
 
 An existing Pi-hole v6 is used as it is: your groups, lists, clients and rules are never touched. Sinko adds its own, all
 named `pb-…`.

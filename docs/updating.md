@@ -15,9 +15,10 @@ about a minute when the services restart. Leave the box plugged in until the pag
 Switch on **Update automatically at night** to let the box do it between 03:00 and 05:00 (box time). The box looks for a
 new version about two minutes after it starts and then about once a day (and again after half an hour to an hour when
 GitHub could not be reached; [`privacy.md`](privacy.md) says what that asks of GitHub), and installs one it has found
-inside that window. If a night's attempt fails only because of the internet or the free space on the card, the box tries
-the same version again later in the same night (after half an hour, while the window lasts). A version that failed for
-any other reason is left alone for a week. Two attempts are never less than five minutes apart.
+inside that window. If a night's attempt fails only because the download could not be made (the internet) or the card
+has too little room, the box tries the same version again later in the same night (after half an hour, while the window
+lasts). A version that failed for any other reason (the installer or the self-check failed, for example) is left alone for
+a week. Two attempts are never less than five minutes apart.
 
 ## How an update can end
 
