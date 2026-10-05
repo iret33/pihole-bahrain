@@ -47,6 +47,7 @@ import http.client
 import ipaddress
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -261,11 +262,12 @@ def atomic_write(path: str, data, mode: int = 0o600) -> None:
 
 
 def read_json_file(path: str, default=None):
-    """The parsed JSON in `path`, or `default` when it is missing or unreadable (never raises)."""
+    """The parsed JSON in `path`, or `default` when it is missing or unreadable (never raises). An integer of more than
+    400 digits reads as Infinity, which every number check refuses (see _json_int)."""
     try:
         with open(path, encoding="utf-8") as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
+            return json.load(fh, parse_int=_json_int)
+    except (OSError, ValueError, RecursionError):
         return default
 
 
@@ -831,9 +833,36 @@ class Api:
 # State (JSON stored in the pb-state group description)
 # --------------------------------------------------------------------------- #
 def parse_state(raw) -> dict:
+    """The shared state from the text stored in the pb-state group, always a complete and valid one.
+
+    TOTAL: whatever is stored there (the page writes it, but so can anybody who can open Pi-hole's admin pages, and a
+    backup brings back whatever was in it) gives a state, and never an exception: this is called on every pass of the
+    scheduler, and one that raises stops bedtime, timers and every request from the page. Numbers are judged the way the
+    page's JavaScript judges them (see _is_number); `tests/fixtures/state-cases.json` is the spec both parsers meet."""
+    try:
+        return _parse_state(raw)
+    except Exception as err:             # a last net: every field below is checked on its own, so this is "cannot happen"
+        if _PARSE_GATE.allow("parse_state"):
+            log.error("the shared state could not be read (%s: %s); using the default one", type(err).__name__,
+                      short_text(err, 80))
+        return json.loads(json.dumps(DEFAULT_STATE))
+
+
+_PARSE_GATE = LogGate()                  # that message at most every half hour: parse_state runs on every pass
+
+
+def _json_int(text: str):
+    """json's way of reading an integer: as long as it is written, except that a number of more than 400 digits (no finite
+    double has that many: the page's JSON.parse reads it as Infinity, which it then refuses) is Infinity here too. Python
+    would otherwise raise for one of more than 4300 digits and refuse the whole text, where the page keeps the rest."""
+    return float("inf") if len(text) > 400 else int(text)
+
+
+def _parse_state(raw) -> dict:
     state = json.loads(json.dumps(DEFAULT_STATE))
     try:
-        data = json.loads(raw, parse_constant=_no_constants) if raw else {}
+        text = raw if isinstance(raw, (str, bytes, bytearray)) else None          # only text is ever stored there
+        data = json.loads(text, parse_constant=_no_constants, parse_int=_json_int) if text else {}
     except (ValueError, RecursionError):
         data = {}
     if not isinstance(data, dict):
@@ -868,7 +897,7 @@ def parse_state(raw) -> dict:
         state["telemetry"] = {"on": tel["on"]}
     comm = data.get("community")
     if isinstance(comm, dict) and _is_count(comm.get("online")) and _is_number(comm.get("at")):
-        state["community"] = {"online": int(comm["online"]), "at": float(comm["at"])}
+        state["community"] = {"online": int(float(comm["online"])), "at": float(comm["at"])}
     setup = data.get("setup")
     if isinstance(setup, dict):
         state["setup"] = {"done": setup.get("done") is True}
@@ -886,17 +915,31 @@ _BLANK_RE = re.compile("[\t\n\x0b\x0c\r \xa0\u1680\u2000-\u200a\u2028\u2029\u202
 
 
 def _is_number(value) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and value == value and abs(value) != float("inf")
+    """A finite number, exactly as the page's `typeof x === 'number' && isFinite(x)` says. The test is the conversion to
+    a double itself: an integer of more than 308 digits is a valid Python int that the page reads as Infinity, and the
+    first float() of it raises OverflowError (comparing it with infinity would not)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False
 
 
 def _is_count(value) -> bool:
     return _is_number(value) and value >= 0
 
 
+def _plain(value):
+    """The number as the page holds it: an integer that a double cannot hold exactly is the double (the page has no other
+    kind), so both programs write back, and compare, the same value."""
+    return float(value) if isinstance(value, int) and abs(value) > 2 ** 53 else value
+
+
 def _nonce(value):
     """A request marker the page writes (the time in ms) and the scheduler acts on once: a number or a short string."""
     if _is_number(value) and value > 0:
-        return value
+        return _plain(value)
     if isinstance(value, str) and 0 < len(value) <= 40:
         return value
     return None
@@ -916,7 +959,7 @@ def _parse_update(raw) -> dict:
     out["notes"] = notes if isinstance(notes, str) and NOTES_RE.fullmatch(notes) else None
     for key in ("checked", "at"):
         v = raw.get(key)
-        out[key] = v if _is_count(v) else 0
+        out[key] = _plain(v) if _is_count(v) else 0
     out["status"] = raw.get("status") if raw.get("status") in UPDATE_STATUSES else "idle"
     err = raw.get("error")
     out["error"] = err[:200] if isinstance(err, str) and not _BLANK_RE.fullmatch(err) else None
@@ -1157,7 +1200,7 @@ def fetch_latest_release(settings: dict, fetch=http_fetch):
     body = fetch(settings["api"], 1 << 20, CHECK_TIMEOUT, 30)
     try:
         data = json.loads(body.decode("utf-8"))
-    except ValueError:
+    except (ValueError, RecursionError):
         raise UpdateError("The answer about the newest version was not understood.")
     return pick_release(data)
 
@@ -2602,7 +2645,7 @@ def _counter_post(url: str, path: str, body: str, timeout: float):
         raise TelemetryError("the counter could not be reached (%s)" % short_text(getattr(err, "reason", None) or err, 80))
     try:
         return json.loads(raw[:PING_RESPONSE_MAX].decode("utf-8")) if len(raw) <= PING_RESPONSE_MAX else None
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
 
 
