@@ -25,7 +25,7 @@ a computer to flash and copy cards. Read [`selling.md`](selling.md) first for th
    * **do not create a user** (at "Creating a new user account" press Ctrl-C). Ctrl-C ends the wizard, so then set the time
      zone and locale you ship with by hand: `timedatectl set-timezone Asia/Bahrain` (or yours) and
      `dpkg-reconfigure locales`. If you made a user anyway, delete it before you seal (`userdel -r NAME`): it would keep its
-     password and its `sudo` right on the console of every box, and the seal locks only root.
+     password and its `sudo` right on the console of every box.
 3. Install Sinko from the latest release: `curl -fsSL https://github.com/iret33/sinko/releases/latest/download/install.sh | sudo bash`
    (answer the counter question *no*: it is asked again in the customer's page). Open the page, check that it works.
 4. Run `sudo sinko doctor` and `sudo sinko selfcheck`; fix anything that is not `ok`.

@@ -37,7 +37,9 @@ workflow does not run it) and they are committed to `docs/img/`. Until then the 
 is meant to work: `assemble.sh` prints one `::warning::` line for each missing picture and carries on, and the page
 asks once (a cheap `HEAD` request) which pictures exist, hides the ones that do not, and keeps the whole "See it"
 section hidden until at least one is there. Nothing to change in the site when they are added: commit them to
-`docs/img/` and the next deploy shows them.
+`docs/img/` and the next deploy shows them. Without JavaScript the "See it" section stays hidden (the hero picture has
+a `<noscript>` copy): the page never shows a broken picture, at the price that a visitor without JavaScript does not see
+the gallery.
 
 ## Preview it
 
