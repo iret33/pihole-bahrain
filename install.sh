@@ -166,6 +166,10 @@ warn() { printf '  %s!%s %s\n' "$Y" "$N" "$*"; }
 die()  { printf '\n%sError:%s %s\n' "$RD" "$N" "$*" >&2; exit 1; }
 die_with_status() { local code="$1"; shift; printf '\n%sError:%s %s\n' "$RD" "$N" "$*" >&2; exit "$code"; }
 on_error() {
+  # When the whole process group is ended (Ctrl-C, a closed terminal, kill) the log copy of the output (tee) goes first, and
+  # the program that was running ends with a failure: this note, written to the dead pipe, would end bash with SIGPIPE
+  # before on_exit could start the old scheduler again. See on_exit.
+  trap '' PIPE
   printf '\n%sInstallation failed%s (line %s). Full log: %s\n' "$RD" "$N" "$1" "$LOG_FILE" >&2
   printf 'It is safe to run the installer again after fixing the problem.\n' >&2
 }

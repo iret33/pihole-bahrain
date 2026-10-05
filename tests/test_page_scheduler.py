@@ -216,7 +216,18 @@ class Box:
         self.mono[0] += advance
         for _ in range(count):
             self.scheduler.step()
+            self.settle()
         self.publish_box_json()
+
+    def settle(self, timeout=15):
+        """Wait until every background job that has started has finished. On a real box the passes are 15 seconds apart, so a
+        job's answer is always there on the next pass; here the passes follow each other at once, and a ping that takes a few
+        milliseconds longer than the second pass made this test fail now and then."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if all((not job._busy) or job._outcome is not None for job in list(self.maintenance._jobs.values())):
+                return
+            time.sleep(0.01)
 
     def publish_box_json(self):
         """The mock serves /pb/box.json from memory: hand it the file the real writer left in the page's folder."""
