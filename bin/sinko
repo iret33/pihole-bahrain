@@ -10,9 +10,14 @@ Commands
   diagnose     Read-only report on why a service is still reachable after it was blocked.
   watch        Follow the DNS log to see whether a device's queries reach the box.
   update       Update to the newest release (--check, --yes, --ref REF, --force); rolls back by itself if it fails.
+               --ref pins the box to that release or branch; --ref latest follows the newest release again.
   rollback     Go back to the previous version stored on this box.
-  selfcheck    Quick check that the installation works (run after every update).
-  telemetry    The optional anonymous counter: on, off, status, payload (what would be sent), reset-id.
+  selfcheck    Check that the installation works (run after every update): Pi-hole objects, the scheduler (up for a
+               while and finishing its passes), every file of the page.
+  telemetry    The optional anonymous counter: on, off (and the counter forgets this box), status, payload (what
+               would be sent), reset-id (the counter forgets the old id, a new one is made).
+  box-info     Print what the page may know about this box (/pb/box.json); --write puts it in the page folder.
+               The scheduler refreshes that file every five minutes: the page reads it as the scheduler's heartbeat.
   use-mac      Re-register children that were added by IP address under their MAC address.
   remove       Delete everything this add-on created inside Pi-hole.
 
@@ -82,6 +87,13 @@ SVC_PREFIX = "pb-svc-"
 LIST_COMMENT_PREFIX = "pb:"
 BLOCK_ALL_REGEX = "^.*$"
 BLOCK_ALL_COMMENT = "sinko: blocks everything for offline/paused kid devices"
+# pihole-bahrain 2.x made the same rule with its own comment: it is ours too, so that migrating re-owns it. Anything
+# else on "^.*$" belongs to the owner of the Pi-hole (an allow-list-only setup) and is never rewritten or deleted.
+BLOCK_ALL_OURS = (BLOCK_ALL_COMMENT, "pihole-bahrain: blocks everything for offline/paused kid devices")
+
+
+def block_all_is_ours(rule: dict) -> bool:
+    return rule.get("comment") in BLOCK_ALL_OURS
 
 DEFAULT_GROUP = 0
 TICK_SECONDS = 15
@@ -192,8 +204,11 @@ def state_path(name: str) -> str:
 def _private_dir(path: str) -> None:
     os.makedirs(path, mode=0o700, exist_ok=True)
     st = os.stat(path)
+    if st.st_uid != os.geteuid():
+        # Files in a folder that somebody else owns could be swapped under us (the request markers, the update lock).
+        raise OSError("%s belongs to another user" % path)
     # makedirs obeys the umask, and an installer may have made the directory with looser rights.
-    if st.st_uid == os.geteuid() and stat.S_IMODE(st.st_mode) & 0o077:
+    if stat.S_IMODE(st.st_mode) & 0o077:
         os.chmod(path, 0o700)
 
 
@@ -296,9 +311,15 @@ def reset_install_id() -> str:
     return value
 
 
-def write_update_result(status: str, from_version, to_version, error, at: float) -> dict:
-    """What the update runner leaves for the scheduler (see architecture.md, "Update flow")."""
-    result = {"status": status, "from": from_version, "to": to_version, "error": error, "at": at}
+def write_update_result(status: str, from_version, to_version, error, at: float, rolled_back=None,
+                        transient: bool = False) -> dict:
+    """What the update runner leaves for the scheduler (see architecture.md, "Update flow").
+
+    `rolledBack` (copied into the shared state): True when the previous version runs again and passed the self-check,
+    False when the update failed and that could not be shown, None when nothing failed. `transient` (only for the
+    scheduler's own retry rule, never shown): the failure was the network or the disk, not the release."""
+    result = {"status": status, "from": from_version, "to": to_version, "error": error, "at": at,
+              "rolledBack": rolled_back if isinstance(rolled_back, bool) else None, "transient": bool(transient)}
     ensure_state_dir()
     atomic_write(state_path("update-result.json"), json.dumps(result, sort_keys=True))
     return result
@@ -310,11 +331,14 @@ def read_update_result():
     if not isinstance(raw, dict) or raw.get("status") not in RESULT_STATUSES or not _is_count(raw.get("at")):
         return None
     err = raw.get("error")
+    failed = raw["status"] == "failed"
     return {"status": raw["status"],
             "from": raw.get("from") if isinstance(raw.get("from"), str) and SEMVER_RE.fullmatch(raw["from"]) else None,
             "to": raw.get("to") if isinstance(raw.get("to"), str) and SEMVER_RE.fullmatch(raw["to"]) else None,
             "error": err[:200] if isinstance(err, str) and err.strip() else None,
-            "at": float(raw["at"])}
+            "at": float(raw["at"]),
+            "rolledBack": raw.get("rolledBack") if failed and isinstance(raw.get("rolledBack"), bool) else None,
+            "transient": failed and raw.get("transient") is True}
 
 
 def clear_update_result() -> None:
@@ -322,6 +346,76 @@ def clear_update_result() -> None:
         os.unlink(state_path("update-result.json"))
     except FileNotFoundError:
         pass
+
+
+def note_failure(result: dict) -> None:
+    """Keep, for the scheduler's own retry rule, whether the last failed run was only the network or the disk (the
+    state the page sees has no place for it, and it must not: it is not for parents). Never raises."""
+    try:
+        ensure_state_dir()
+        atomic_write(state_path("update-failure.json"), json.dumps(
+            {"at": result["at"], "to": result["to"], "transient": bool(result.get("transient"))}, sort_keys=True))
+    except OSError as err:
+        log.debug("could not note the failure: %s", err)
+
+
+def failure_is_transient(update: dict) -> bool:
+    """Was the failure that the state shows (the same run: same time, same release) only the network or the disk?"""
+    raw = read_json_file(state_path("update-failure.json"))
+    return (isinstance(raw, dict) and raw.get("transient") is True and raw.get("at") == update["at"]
+            and raw.get("to") == update["to"])
+
+
+# --------------------------------------------------------------------------- #
+# The scheduler's pulse: /run/sinko/heartbeat.json (memory, so that writing it every pass costs the SD card nothing)
+# --------------------------------------------------------------------------- #
+DEFAULT_RUN_DIR = "/run/sinko"
+HEARTBEAT_FILE = "heartbeat.json"
+
+
+def run_dir() -> str:
+    return os.environ.get("SINKO_RUN_DIR") or DEFAULT_RUN_DIR
+
+
+def write_heartbeat(ticks: int, pid=None, version=None, mono=None) -> None:
+    """Say that this process has just finished a pass of the scheduler (the rules were read and applied)."""
+    path = run_dir()
+    _private_dir(path)
+    beat = {"v": 1, "pid": os.getpid() if pid is None else pid, "version": VERSION if version is None else version,
+            "ticks": ticks, "mono": time.monotonic() if mono is None else mono}
+    atomic_write(os.path.join(path, HEARTBEAT_FILE), json.dumps(beat, sort_keys=True))
+
+
+def read_heartbeat():
+    """The last heartbeat as {"pid", "version", "ticks", "mono"}, or None when there is none that makes sense.
+    `mono` is on the clock of the whole machine (CLOCK_MONOTONIC), so another process can compare it with its own."""
+    raw = read_json_file(os.path.join(run_dir(), HEARTBEAT_FILE))
+    if not isinstance(raw, dict):
+        return None
+    pid, ticks, mono, version = raw.get("pid"), raw.get("ticks"), raw.get("mono"), raw.get("version")
+    if not (_is_int(pid) and pid > 0 and _is_int(ticks) and ticks >= 0 and _is_number(mono) and isinstance(version, str)):
+        return None
+    return {"pid": pid, "version": version, "ticks": ticks, "mono": float(mono)}
+
+
+class LogGate:
+    """Lets a message through the first time and then at most once every `period` seconds per key: a failure that
+    repeats every few seconds must not fill the log (the box's disk is a memory card)."""
+
+    def __init__(self, period: float = 1800, monotonic=time.monotonic):
+        self.period = period
+        self._mono = monotonic
+        self._last = {}
+
+    def allow(self, key) -> bool:
+        now = self._mono()
+        last = self._last.get(key)
+        if last is not None and now - last < self.period:
+            return False
+        if len(self._last) > 200:                          # a failure that never repeats its words must not grow this
+            self._last.clear()
+        self._last[key] = now
+        return True
 
 
 class RunLock:
@@ -335,14 +429,25 @@ class RunLock:
         self._fh = None
 
     def acquire(self) -> bool:
+        """True when this object now holds the lock. The file lives in the state folder (mode 0700, root only), never
+        in a folder every user can write to (/run/lock): there another user could keep the lock, or, with
+        fs.protected_regular (Debian's default), make root's own open of an existing file fail. It is opened without
+        following a link, and anything but a plain file of ours is refused."""
         ensure_state_dir()
-        fh = open(state_path("lock"), "a+")
+        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(state_path("lock"), flags, 0o600)
         try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            fh.close()
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+                raise OSError("%s is not a plain file of this user" % state_path("lock"))
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
             return False
-        self._fh = fh
+        except BaseException:
+            os.close(fd)
+            raise
+        self._fh = os.fdopen(fd, "r+b", buffering=0)
         return True
 
     def release(self) -> None:
@@ -359,9 +464,12 @@ class RunLock:
     @staticmethod
     def is_held() -> bool:
         probe = RunLock()
-        if probe.acquire():
-            probe.release()
-            return False
+        try:
+            if probe.acquire():
+                probe.release()
+                return False
+        except OSError:
+            return False                   # a lock that cannot even be opened is not held by a runner
         return True
 
 
@@ -536,6 +644,62 @@ def discover_base_url() -> str:
     return "http://127.0.0.1:80"
 
 
+def _session_of(payload) -> dict:
+    """The `session` object of an answer from /api/auth ({} when the answer is not shaped like one)."""
+    sess = payload.get("session") if isinstance(payload, dict) else None
+    return sess if isinstance(sess, dict) else {}
+
+
+def _is_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _text(value) -> str:
+    return value if isinstance(value, str) else ""
+
+
+def _id_list(value) -> list:
+    return [v for v in value if _is_int(v)] if isinstance(value, list) else []
+
+
+def _clean_group(row: dict):
+    if not isinstance(row.get("name"), str) or not _is_int(row.get("id")):
+        return None
+    return dict(row, comment=_text(row.get("comment")), enabled=bool(row.get("enabled")))
+
+
+def _clean_list(row: dict):
+    if not isinstance(row.get("address"), str):
+        return None
+    return dict(row, comment=_text(row.get("comment")), groups=_id_list(row.get("groups")), enabled=bool(row.get("enabled")))
+
+
+def _clean_client(row: dict):
+    if not isinstance(row.get("client"), str):
+        return None
+    return dict(row, comment=_text(row.get("comment")), groups=_id_list(row.get("groups")))
+
+
+def _clean_domain(row: dict):
+    if not isinstance(row.get("domain"), str):
+        return None
+    return dict(row, comment=_text(row.get("comment")), groups=_id_list(row.get("groups")), enabled=bool(row.get("enabled")))
+
+
+def _rows(payload, key: str, clean) -> list:
+    """The entries of `payload[key]` that are shaped the way `clean` needs. Pi-hole answers come from a service that
+    is restarted, restored from backups and edited by hand: one odd row must not stop the scheduler."""
+    rows = payload.get(key) if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return []
+    out = []
+    for row in rows:
+        cleaned = clean(row) if isinstance(row, dict) else None
+        if cleaned is not None:
+            out.append(cleaned)
+    return out
+
+
 class Api:
     def __init__(self, base: str | None = None, password: str | None = None):
         self.base = (base or discover_base_url()).rstrip("/")
@@ -596,24 +760,25 @@ class Api:
 
     def password_set(self) -> bool:
         status, payload = self._raw("GET", "/api/auth")
-        return not (status == 200 and payload.get("session", {}).get("valid"))
+        return not (status == 200 and _session_of(payload).get("valid"))
 
     def login(self):
         self.sid = None
         status, payload = self._raw("GET", "/api/auth")
-        if status == 200 and payload.get("session", {}).get("valid"):
+        if status == 200 and _session_of(payload).get("valid"):
             return  # no password configured
         pw = self._password
         if pw is None:
             with open(CLI_PW_FILE, encoding="utf-8") as fh:   # regenerated on FTL restart
                 pw = fh.read().strip()
         status, payload = self._raw("POST", "/api/auth", {"password": pw})
-        sess = payload.get("session", {}) if isinstance(payload, dict) else {}
+        sess = _session_of(payload)
         if status != 200 or not sess.get("valid"):
             raise ApiError(status, "login to the Pi-hole API failed")
-        self.sid = sess.get("sid")
+        self.sid = sess.get("sid") if isinstance(sess.get("sid"), str) else None
 
     def logout(self):
+        """Give the session back: FTL has a small, fixed number of them (webserver.api.max_sessions)."""
         if self.sid:
             try:
                 self._raw("DELETE", "/api/auth")
@@ -626,26 +791,26 @@ class Api:
         return urllib.parse.quote(value, safe="")
 
     def groups(self) -> list:
-        return self.request("GET", "/api/groups").get("groups", [])
+        return _rows(self.request("GET", "/api/groups"), "groups", _clean_group)
 
     def group_map(self) -> dict:
         return {g["name"]: g for g in self.groups()}
 
     def lists(self) -> list:
-        return self.request("GET", "/api/lists").get("lists", [])
+        return _rows(self.request("GET", "/api/lists"), "lists", _clean_list)
 
     def clients(self) -> list:
-        return self.request("GET", "/api/clients").get("clients", [])
+        return _rows(self.request("GET", "/api/clients"), "clients", _clean_client)
 
     def network_devices(self) -> list:
         """Devices FTL has seen on the network ([] when unavailable)."""
         try:
-            return self.request("GET", NETWORK_QUERY).get("devices", [])
+            return _rows(self.request("GET", NETWORK_QUERY), "devices", lambda d: d)
         except ApiError:
             return []
 
     def domains(self) -> list:
-        return self.request("GET", "/api/domains").get("domains", [])
+        return _rows(self.request("GET", "/api/domains"), "domains", _clean_domain)
 
     def add_group(self, name, comment, enabled):
         self.request("POST", "/api/groups", {"name": name, "comment": comment, "enabled": enabled})
@@ -832,6 +997,16 @@ class UpdateLocked(UpdateError):
     """Another update or rollback is running."""
 
 
+class TransientError(UpdateError):
+    """A failure that goes away by itself: the internet was down, GitHub answered with an error or a limit, the disk
+    was full. The scheduler tries such an update again within the hour; after any other failure it leaves that
+    release alone for a week."""
+
+
+class DownloadError(TransientError):
+    """The release could not be fetched (nothing was installed)."""
+
+
 def parse_version(text):
     """(major, minor, patch) for 'X.Y.Z', else None."""
     if isinstance(text, str) and SEMVER_RE.fullmatch(text):          # fullmatch: "$" alone lets a trailing newline through
@@ -862,10 +1037,30 @@ def release_settings(conf=None) -> dict:
         raise UpdateError("The update source in the settings (%s) is not a GitHub name like owner/name." % short_text(slug, 60))
     base = (pick("SINKO_RELEASE_BASE") or "https://github.com/%s/releases" % slug).rstrip("/")
     api = pick("SINKO_RELEASE_API") or "https://api.github.com/repos/%s/releases/latest" % slug
-    for url in (base, api):
-        if not url.startswith(("http://", "https://")):
-            raise UpdateError("The update address in the settings is not a web address.")
+    if not (web_address(base) and not urllib.parse.urlsplit(base).query):
+        raise UpdateError("The update address in the settings is not a secure web address (it must start with https://).")
+    if not web_address(api):
+        raise UpdateError("The update address in the settings is not a secure web address (it must start with https://).")
     return {"slug": slug, "base": base, "api": api, "repo": repo, "ref": pick("SINKO_REF") or "latest"}
+
+
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def web_address(url) -> bool:
+    """True for an address updates may come from: https, or plain http to this machine only (the tests' local server).
+    The program and the page are replaced with what such an address serves, so nothing that anybody on the home
+    network could alter on the way is acceptable. No user name or password, no fragment."""
+    if not isinstance(url, str) or not url or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url):
+        return False
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host, _ = parts.hostname, parts.port
+    except ValueError:
+        return False
+    if not host or parts.username is not None or parts.password is not None or parts.fragment:
+        return False
+    return parts.scheme == "https" or (parts.scheme == "http" and host in LOOPBACK_HOSTS)
 
 
 def classify_ref(ref):
@@ -879,11 +1074,10 @@ def classify_ref(ref):
 
 
 class _SafeRedirect(urllib.request.HTTPRedirectHandler):
-    """Follow redirects (GitHub serves release files from another host), but never from https down to http."""
+    """Follow redirects (GitHub serves release files from another host), but only to https (or to this machine)."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        old, new = urllib.parse.urlsplit(req.full_url).scheme, urllib.parse.urlsplit(newurl).scheme
-        if new not in ("http", "https") or (old == "https" and new != "https"):
+        if not web_address(newurl):
             raise urllib.error.HTTPError(req.full_url, code, "redirect to an insecure address refused", headers, fp)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
@@ -894,6 +1088,8 @@ def http_fetch(url, max_bytes, timeout=DOWNLOAD_TIMEOUT, deadline=DOWNLOAD_DEADL
     A body over `max_bytes` is refused while it arrives, not after. `timeout` only limits each single wait, so a
     server that sends a byte a second would hold the update lock for hours: `deadline` limits the whole transfer.
     """
+    if not web_address(url):                                  # urllib would also open file:// and ftp:// addresses
+        raise UpdateError("The update address is not a secure web address.")
     request = urllib.request.Request(url, headers={"User-Agent": "sinko/" + VERSION})
     started = time.monotonic()
     total = 0
@@ -909,7 +1105,7 @@ def http_fetch(url, max_bytes, timeout=DOWNLOAD_TIMEOUT, deadline=DOWNLOAD_DEADL
                 raise UpdateError("The download is larger than allowed.")
             while True:
                 if time.monotonic() - started > deadline:
-                    raise UpdateError("The download took too long.")
+                    raise DownloadError("The download took too long.")
                 chunk = read(65536)
                 if not chunk:
                     break
@@ -924,10 +1120,10 @@ def http_fetch(url, max_bytes, timeout=DOWNLOAD_TIMEOUT, deadline=DOWNLOAD_DEADL
         raise
     except urllib.error.HTTPError as err:
         err.close()
-        raise UpdateError("The server answered HTTP %s for %s." % (err.code, url.rsplit("/", 1)[-1][:60]))
+        raise DownloadError("The server answered HTTP %s for %s." % (err.code, url.rsplit("/", 1)[-1][:60]))
     except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as err:
-        raise UpdateError("Could not download %s (%s)." % (url.rsplit("/", 1)[-1][:60],
-                                                          short_text(getattr(err, "reason", None) or err, 80)))
+        raise DownloadError("Could not download %s (%s)." % (url.rsplit("/", 1)[-1][:60],
+                                                            short_text(getattr(err, "reason", None) or err, 80)))
     finally:
         if out:
             out.close()
@@ -1016,12 +1212,30 @@ def download_release(settings: dict, tag, dest: str, fetch=http_fetch) -> None:
             raise UpdateError("The checksum file is not in the expected form.")
         if sha256_file(dest) != want:
             raise UpdateError("The download does not match its checksum, so it was not installed.")
+        fsync_path(dest)                        # the rollback copy must survive a power cut right after the rename
     except BaseException:
         try:
             os.unlink(dest)
         except OSError:
             pass
         raise
+
+
+def fsync_path(path: str) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def sync_disks() -> None:
+    """Flush everything written so far to the memory card. The box loses power without warning, and a file that was
+    only written (not flushed) can come back empty after the next start: the program, the lists, the page."""
+    try:
+        os.sync()
+    except (AttributeError, OSError):
+        pass
 
 
 class _CappedReader:
@@ -1223,35 +1437,62 @@ class Updater:
     def check(self):
         return check_for_update(self.conf, fetch=self.fetch)
 
+    @staticmethod
+    def _take_lock() -> "RunLock":
+        lock = RunLock()
+        try:
+            got = lock.acquire()
+        except OSError as err:
+            raise UpdateError("The folder the update works in (%s) cannot be used (%s)." % (state_dir(), short_text(err, 80)))
+        if not got:
+            raise UpdateLocked("Another update is already running.")
+        return lock
+
     def update(self, ref=None, force=False, confirm=None):
         """Install the newest release (or `ref`). Returns the result dict that was also written to
-        update-result.json, or None when `confirm` said no. Raises UpdateLocked when a run is already going."""
-        lock = RunLock()
-        if not lock.acquire():
-            raise UpdateLocked("Another update is already running.")
+        update-result.json, or None when `confirm` said no. Raises UpdateLocked when a run is already going.
+
+        The result says whether the previous version is back (`rolledBack`, see architecture.md): True only when the
+        box runs the version it had before AND passes its own check, which is only claimed after the check ran."""
+        lock = self._take_lock()
         current = VERSION
-        target = {"to": None}
+        target = {"to": None, "touched": False}      # touched: the installer has been started on this box
         try:
             clear_update_result()                    # a result from an earlier run must never pass for this one
             try:
                 outcome = self._update(ref, force, confirm, current, target)
             except UpdateError as err:
-                outcome = ("failed", target["to"], str(err))
+                outcome = self._failure(target, str(err), isinstance(err, TransientError))
             except Exception as err:                 # a bug or an odd machine must not leave the box half updated and silent
                 log.exception("update failed unexpectedly")
-                outcome = ("failed", target["to"], "The update stopped unexpectedly (%s)." % type(err).__name__)
+                outcome = self._failure(target, "The update stopped unexpectedly (%s)." % type(err).__name__, False)
             if outcome is None:
                 return None
-            status, to_version, error = outcome
-            return write_update_result(status, current, to_version, short_text(error) if error else None, self.clock())
+            status, to_version, error, rolled_back, transient = outcome
+            return write_update_result(status, current, to_version, short_text(error) if error else None, self.clock(),
+                                       rolled_back=rolled_back, transient=transient)
         finally:
             lock.release()
 
+    def _failure(self, target, error, transient):
+        """The outcome of a run that stopped by an exception. Before the installer started the box is as it was, and
+        it is said to be back and working only when its own check agrees; after that, nobody can say."""
+        rolled_back = False
+        if not target["touched"]:
+            try:
+                rolled_back = bool(self.selfcheck()[0])
+            except Exception:
+                rolled_back = False
+        return "failed", target["to"], error, rolled_back, transient
+
     def rollback(self):
         """Put the newest older release stored on this box back. Returns {"status", "from", "to", "error"}."""
-        lock = RunLock()
-        if not lock.acquire():
-            raise UpdateLocked("Another update is already running.")
+        try:
+            lock = self._take_lock()
+        except UpdateLocked:
+            raise
+        except UpdateError as err:
+            return {"status": "failed", "from": VERSION, "to": None, "error": str(err)}
         try:
             ensure_state_dir("cache")
             older = [v for v in cached_versions() if is_newer(VERSION, v)]
@@ -1275,7 +1516,7 @@ class Updater:
         self._clean_leftovers()
         free = shutil.disk_usage(ensure_state_dir("cache")).free
         if free < MIN_FREE_BYTES:
-            raise UpdateError("There is not enough free space on the box (%d MB are needed)." % (MIN_FREE_BYTES >> 20))
+            raise TransientError("There is not enough free space on the box (%d MB are needed)." % (MIN_FREE_BYTES >> 20))
         os.makedirs(APP_DIR, exist_ok=True)
         if kind == "branch":
             if confirm and not confirm(current, None):
@@ -1287,14 +1528,14 @@ class Updater:
             release = self._resolve(kind, value, settings)
             if release is None:
                 self.out("No release is published yet; Sinko %s stays." % current)
-                return "ok", current, None
+                return "ok", current, None, None, False
             if release["version"] and not force and not is_newer(release["version"], current):
                 if kind == "tag":
                     self.out("Sinko %s is installed and %s is not newer (add --force to install it anyway)."
                              % (current, release["tag"]))
                 else:
                     self.out("Sinko %s is already the newest version." % current)
-                return "ok", current, None
+                return "ok", current, None, None, False
             target["to"] = release["version"]
             if confirm and not confirm(current, release["version"]):
                 return None
@@ -1302,27 +1543,30 @@ class Updater:
             version, src = self._fetch_release(settings, release, current, force, target)
             if src is None:
                 self.out("Sinko %s is already the newest version." % current)
-                return "ok", current, None
+                return "ok", current, None, None, False
         self._ensure_rollback_copy(settings, current)
         self.out("Installing Sinko %s ..." % version)
+        target["touched"] = True
         ok, why = self._install_and_check(src, ref)
         if ok:
             prune_cache(version)
             self.out("Sinko is now at version %s." % version)
-            return "ok", version, None
+            return "ok", version, None, None, False
         if version != current:
             drop_cached(version)              # a release that failed here is no rollback target
             self.out("%s Going back to %s ..." % (why, current))
             back_ok, back_why = self._rollback_to(current, ref)
         else:
             back_ok, back_why = False, "it is the version that was just installed"
+        # The reason is for whoever helps (and for the log): English, short, and never a command to type. The page
+        # tells the parent in their own language what to do, from `rolledBack`.
         if back_ok:
             error = "%s The previous version (%s) was put back." % (why, current)
         elif back_why.startswith("no earlier copy"):
             error = "%s There is no earlier copy on this box to go back to." % why
         else:
-            error = "%s Going back to %s did not work either (%s): run sudo sinko doctor." % (why, current, back_why)
-        return "failed", version, error
+            error = "%s Going back to %s did not work either (%s)." % (why, current, back_why)
+        return "failed", version, error, bool(back_ok), False
 
     def _resolve(self, kind, value, settings):
         """{"version", "tag"} of the release to install; version None means "whatever /latest/ is" (see below)."""
@@ -1352,6 +1596,7 @@ class Updater:
             if not release["version"] and not force and not is_newer(version, current):
                 return version, None
             os.replace(tarball, cache_file(version))
+            _fsync_dir(cache)
             try:
                 return version, install_source(os.path.join(stage, "sinko"))
             except BaseException:
@@ -1409,6 +1654,7 @@ class Updater:
         try:
             download_release(settings, "v" + current, tarball, self.fetch)
             os.replace(tarball, cache_file(current))
+            _fsync_dir(cache)
         except UpdateError as err:
             self.out("Note: no copy of the current version is stored and it could not be fetched (%s); "
                      "an update that fails could not be undone automatically." % err)
@@ -1419,7 +1665,11 @@ class Updater:
                 pass
 
     def _install_and_check(self, src, ref):
-        """Run the installer on `src`, then the self-check of what it installed. Returns (ok, reason)."""
+        """Run the installer on `src`, then the self-check of what it installed. Returns (ok, reason).
+
+        Everything is flushed to the card before the installer starts (the downloaded copy and the source tree must
+        survive a power cut in the middle of it) and again before the check."""
+        sync_disks()
         try:
             rc = self.installer(src, ref)
         except Exception:
@@ -1427,6 +1677,7 @@ class Updater:
             return False, "The installer could not be started."
         if rc != 0:
             return False, "The installer stopped with an error (exit status %s)." % rc
+        sync_disks()
         self.out("Checking the installation ...")
         try:
             ok, detail = self.selfcheck()
@@ -1492,8 +1743,124 @@ def unit_active(name: str) -> bool:
         return False
 
 
-def selfcheck_round(catalog: dict) -> list:
-    """[(ok, text)], one per check."""
+# A scheduler that dies a second after every start is "active" for that second and "activating (auto-restart)" for the
+# ten (RestartSec) in between, so a single `systemctl is-active` is wrong about it half the time. What proves a
+# scheduler works is that the same process has stayed up for longer than one such cycle AND has finished passes.
+SCHEDULER_UNIT = "sinko"
+SCHEDULER_PROOF_SECONDS = 20          # up without a restart for this long: longer than RestartSec plus a crash
+SCHEDULER_PROOF_TICKS = 2             # ... and it has finished at least this many passes (the first, then 15 s later)
+SCHEDULER_HEARTBEAT_FRESH = 60        # seconds: four passes
+SCHEDULER_CRASHES = 2                 # restarts by systemd after which "starting" is no longer believed
+
+
+def unit_state(name: str, mono=None):
+    """{"active", "age", "pid", "restarts"} of a systemd unit, or None when systemd cannot be asked. `age` is the time
+    in seconds the unit has been active without a break (None when it is not active)."""
+    mono = mono or time.monotonic
+    try:
+        out = subprocess.run(["systemctl", "show", "-p", "ActiveState", "-p", "ActiveEnterTimestampMonotonic",
+                              "-p", "MainPID", "-p", "NRestarts", name],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    props = dict(line.split("=", 1) for line in out.stdout.splitlines() if "=" in line)
+
+    def number(key):
+        try:
+            return int(props.get(key, "0") or 0)
+        except ValueError:
+            return 0
+    active = props.get("ActiveState") == "active"
+    entered = number("ActiveEnterTimestampMonotonic")
+    # CLOCK_MONOTONIC in microseconds, the same clock as time.monotonic() on Linux
+    age = max(0.0, mono() - entered / 1e6) if active and entered > 0 else None
+    return {"active": active, "age": age, "pid": number("MainPID"), "restarts": number("NRestarts")}
+
+
+def unit_active_for(name: str, seconds: float = SCHEDULER_PROOF_SECONDS) -> bool:
+    """Active, and without a break for at least `seconds`."""
+    state = unit_state(name)
+    return bool(state and state["active"] and state["age"] is not None and state["age"] >= seconds)
+
+
+def scheduler_status(unit: str = SCHEDULER_UNIT, mono=None):
+    """(state, text) about the scheduler. state: "stopped", "starting" (up less than SCHEDULER_PROOF_SECONDS),
+    "crashing" (systemd has had to restart it again and again), "idle" (up, but no finished pass of this very process
+    and this very version), or "ok"."""
+    mono = mono or time.monotonic
+    info = unit_state(unit, mono)
+    if info is None or not info["active"]:
+        return "stopped", "the scheduler service is not running"
+    age = info["age"] if info["age"] is not None else 0.0
+    if info["restarts"] >= SCHEDULER_CRASHES and age < 120:
+        return "crashing", "the scheduler service keeps stopping and being restarted (%d restarts, up for %d s now)" % (
+            info["restarts"], age)
+    if age < SCHEDULER_PROOF_SECONDS:
+        return "starting", "the scheduler service started %d s ago" % age
+    beat = read_heartbeat()
+    if beat is None or beat["pid"] != info["pid"]:
+        return "idle", "the scheduler service is up but has not finished a pass yet"
+    if beat["version"] != VERSION:
+        return "idle", "the scheduler that runs is version %s, not %s" % (short_text(beat["version"], 20), VERSION)
+    if beat["ticks"] < SCHEDULER_PROOF_TICKS:
+        return "idle", "the scheduler has finished only %d pass(es) in %d s" % (beat["ticks"], age)
+    if not 0 <= mono() - beat["mono"] <= SCHEDULER_HEARTBEAT_FRESH:
+        return "idle", "the scheduler has not finished a pass for %d s" % max(0, mono() - beat["mono"])
+    return "ok", "the scheduler service has run for %d s and keeps finishing its passes" % age
+
+
+def referenced_page_files(index_html: str) -> list:
+    """The /pb/... files the start page asks for: scripts, style sheets, icons, the manifest."""
+    found = []
+    for match in re.finditer(r'''(?:src|href)\s*=\s*["']/pb/([^"'?#\s]+)''', index_html):
+        name = match.group(1)
+        if ".." not in name.split("/") and name not in found:
+            found.append(name)
+    return found
+
+
+def page_file_problems(root: str, src_web=None) -> list:
+    """What is missing (or empty) among the page's files: a page that lacks one of its scripts shows nothing at all.
+    `root` is the web root. Checked: index.html, version.txt, every /pb/ file index.html names, and every file the
+    installed release's web folder (`src_web`, when it is there) ships."""
+    wanted = ["index.html", "pb/app.js", "pb/version.txt", "pb/services.json"]       # the page cannot start without these
+    try:
+        with open(os.path.join(root, "index.html"), encoding="utf-8", errors="replace") as fh:
+            wanted += ["pb/" + name for name in referenced_page_files(fh.read(1 << 20))]
+    except OSError:
+        pass
+    if src_web and os.path.isdir(src_web):
+        for here, _dirs, names in os.walk(src_web):
+            for name in names:
+                rel = os.path.relpath(os.path.join(here, name), src_web).replace(os.sep, "/")
+                wanted.append(rel if rel == "index.html" else "pb/" + rel)
+    problems = []
+    for name in dict.fromkeys(wanted):
+        try:
+            size = os.stat(os.path.join(root, name)).st_size
+        except OSError:
+            problems.append(name)
+            continue
+        if size == 0:
+            problems.append(name + " (empty)")
+    return problems
+
+
+def installed_source_web():
+    """The web folder of the source tree the installed version came from (/opt/sinko/src), or None when that tree is
+    not there or is not this version's."""
+    src = os.path.join(APP_DIR, "src")
+    if read_version_file(src) != VERSION:
+        return None
+    path = os.path.join(src, "web")
+    return path if os.path.isdir(path) else None
+
+
+def selfcheck_round(catalog: dict, scheduler=None) -> list:
+    """[(ok, text)], one per check. `scheduler` replaces the check of the scheduler service (the scheduler itself,
+    which has just been started and checks itself, cannot be asked whether it is running)."""
     results = []
 
     def add(ok: bool, text: str) -> None:
@@ -1530,10 +1897,14 @@ def selfcheck_round(catalog: dict) -> list:
             api.logout()
         except (ApiError, OSError, ValueError):
             pass
-    add(unit_active("sinko"), "scheduler service is running")
+    if scheduler is None:
+        state, text = scheduler_status()
+        add(state == "ok", text)
+    else:
+        add(*scheduler())
     root = webroot()
-    absent = [n for n in ("index.html", "pb/app.js", "pb/version.txt") if not os.path.isfile(os.path.join(root, n))]
-    add(not absent, "page files installed in %s%s" % (root, " (missing: %s)" % ", ".join(absent) if absent else ""))
+    problems = page_file_problems(root, installed_source_web())
+    add(not problems, "page files installed in %s%s" % (root, " (missing: %s)" % ", ".join(problems[:3]) if problems else ""))
     try:
         with open(os.path.join(root, "pb", "version.txt"), encoding="utf-8") as fh:
             shown = fh.read().strip()
@@ -1545,7 +1916,8 @@ def selfcheck_round(catalog: dict) -> list:
 
 def run_selfcheck(wait: float = 0, out=print, sleep=time.sleep, clock=time.monotonic, catalog=None) -> int:
     """Print one line per check; the exit status is 1 if any failed. With `wait`, a failing round is repeated until
-    it passes or the time is up: right after an install, FTL and the scheduler are still starting."""
+    it passes or the time is up: right after an install, FTL and the scheduler are still starting (the scheduler is
+    only believed once it has stayed up for SCHEDULER_PROOF_SECONDS and finished passes)."""
     catalog = catalog or load_catalog()
     deadline = clock() + max(0.0, wait)
     while True:
@@ -1637,8 +2009,11 @@ class Controller:
         self._pending_kids = []
 
     # ----- setup -----
-    def setup(self, run_gravity=True) -> None:
-        self.migrate_legacy()
+    def setup(self, run_gravity=True, legacy=True) -> None:
+        """Create or repair every pb-* object. `legacy`: also clean up after the 1.x installer (that touches objects
+        that are not ours, and only makes sense when Sinko is being installed, not when the scheduler repairs itself)."""
+        if legacy:
+            self.migrate_legacy()
         groups = self.api.group_map()
 
         def ensure(name, comment, enabled):
@@ -1663,7 +2038,10 @@ class Controller:
             self.api.put_group(G_STATE, groups[G_STATE].get("comment") or "", False)
         gid = {n: g["id"] for n, g in groups.items()}
 
-        # Block-all regex used by pb-offline and pb-paused.
+        # Block-all regex used by pb-offline and pb-paused. Pi-hole keeps one entry per (type, kind, domain), so when
+        # the owner already has a "^.*$" deny rule of their own (an allow-list-only Pi-hole) Sinko cannot add a second:
+        # whose it is is told by its comment. Sinko's (this release's or pihole-bahrain 2.x's) is rewritten as before;
+        # the owner's keeps its comment, its enabled flag and its groups, and only gains Sinko's two groups.
         regex = next((d for d in self.api.domains()
                       if d.get("kind") == "regex" and d.get("type") == "deny"
                       and d.get("domain") == BLOCK_ALL_REGEX), None)
@@ -1671,6 +2049,15 @@ class Controller:
                 "enabled": True}
         if regex is None:
             self.api.request("POST", "/api/domains/deny/regex", dict(body, domain=BLOCK_ALL_REGEX))
+        elif not block_all_is_ours(regex):
+            merged = sorted(set(regex.get("groups", [])) | set(body["groups"]))
+            if not regex.get("enabled"):
+                log.warning("your own %s rule is switched off, so 'internet off' and 'pause' cannot block anything "
+                            "until it is switched on again", BLOCK_ALL_REGEX)
+            elif merged != sorted(regex.get("groups", [])):
+                self.api.request("PUT", "/api/domains/deny/regex/" + Api.q(BLOCK_ALL_REGEX),
+                                 {"type": "deny", "kind": "regex", "comment": regex.get("comment") or "",
+                                  "groups": merged, "enabled": True})
         elif sorted(regex.get("groups", [])) != sorted(body["groups"]) or not regex.get("enabled"):
             self.api.request("PUT", "/api/domains/deny/regex/" + Api.q(BLOCK_ALL_REGEX),
                              dict(body, type="deny", kind="regex"))
@@ -1697,12 +2084,23 @@ class Controller:
                                  {"comment": comment, "type": "block",
                                   "groups": [group_id], "enabled": True})
 
-        # Services removed from the catalog: drop their list and group.
+        # Services this release does not know. A service that is blocked right now is the parent's decision, and the
+        # release that does not know it may be an older one that was put back by a rollback (a newer release added the
+        # service): its group and its list stay, so that the block holds in the meantime and is still there after the
+        # next update. Only an allowed (disabled) service that is gone from the catalog is removed.
+        kept = {name for name in gid if name.startswith(SVC_PREFIX) and name[len(SVC_PREFIX):] not in wanted
+                and groups[name]["enabled"]}
         for comment, cur in existing.items():
+            if SVC_PREFIX + comment[len(LIST_COMMENT_PREFIX):] in kept:
+                log.info("kept list %s of a blocked service this release does not know", comment)
+                continue
             self.api.request("DELETE", "/api/lists/%s?type=block" % Api.q(cur["address"]))
             log.info("removed stale list %s", comment)
         for name in list(gid):
             if name.startswith(SVC_PREFIX) and name[len(SVC_PREFIX):] not in wanted:
+                if name in kept:
+                    log.info("kept group %s: a service this release does not know is blocked", name)
+                    continue
                 self.api.delete_group(name)
                 log.info("removed stale group %s", name)
                 del gid[name]
@@ -1809,8 +2207,10 @@ class Controller:
             if (l.get("comment") or "").startswith(LIST_COMMENT_PREFIX):
                 self.api.request("DELETE", "/api/lists/%s?type=block" % Api.q(l["address"]))
         for d in self.api.domains():
-            if d.get("kind") == "regex" and d.get("domain") == BLOCK_ALL_REGEX:
+            if (d.get("kind") == "regex" and d.get("type") == "deny" and d.get("domain") == BLOCK_ALL_REGEX
+                    and block_all_is_ours(d)):
                 self.api.request("DELETE", "/api/domains/deny/regex/" + Api.q(BLOCK_ALL_REGEX))
+            # The owner's own rule of that name stays; deleting Sinko's groups below takes them off it.
         for name in groups:
             if name.startswith("pb-"):
                 self.api.delete_group(name)
@@ -1922,7 +2322,7 @@ def apply_pihole_settings(conf: dict, hostname=None, ip=None, remove_hostname=Fa
 def write_config_value(key: str, value: str, path=None) -> None:
     """Change one KEY=value line of the settings file (adding it if there is none). Every other line, and the file's
     rights, stay as they are."""
-    if not re.match(r"^[A-Za-z0-9._:-]+\Z", value):
+    if not re.match(r"^[A-Za-z0-9._:/-]+\Z", value):
         raise ValueError("not a plain value: %r" % value)
     path = path or CONFIG_FILE
     with open(path, encoding="utf-8") as fh:
@@ -1969,6 +2369,101 @@ def apply_new_address(ip: str, conf: dict, config_path=None) -> None:
     """The box got another address: point the local name at it (what `sinko configure --ip` does), then remember it."""
     apply_pihole_settings(conf, hostname=conf.get("SINKO_HOSTNAME", ""), ip=ip)
     write_config_value("SINKO_IP", ip, config_path)
+    refresh_box_info(ip=ip)
+
+
+# --------------------------------------------------------------------------- #
+# /pb/box.json: what the page may know about the box without signing in (architecture.md, "Amendments").
+# It is also the scheduler's heartbeat for the parent: the page treats a file whose `at` is far behind the box's own
+# clock as "the scheduler is not running".
+# --------------------------------------------------------------------------- #
+BOX_INFO_FILE = "box.json"
+BOX_INFO_MAX_AGE = 600                 # a file this old is rewritten even when nothing changed: it is the heartbeat
+TZ_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_+./-]{0,63}\Z")
+
+
+def timezone_name():
+    """The box's time zone as an IANA name ("Asia/Bahrain"), or None when it cannot be told: the target of the
+    /etc/localtime link (what systemd's `timedatectl set-timezone` sets), else Debian's /etc/timezone."""
+    link = os.environ.get("SINKO_LOCALTIME") or "/etc/localtime"
+    names = []
+    try:
+        target = os.readlink(link)
+        if "zoneinfo/" in target:
+            names.append(target.split("zoneinfo/", 1)[1])
+    except OSError:
+        pass
+    try:
+        with open(os.environ.get("SINKO_TIMEZONE_FILE") or "/etc/timezone", encoding="ascii") as fh:
+            names.append(fh.readline().strip())
+    except (OSError, ValueError):
+        pass
+    for name in names:
+        if TZ_NAME_RE.match(name) and ".." not in name.split("/"):
+            return name
+    return None
+
+
+def utc_offset_text(when=None) -> str:
+    """The box's offset from UTC right now as "+03:00"."""
+    offset = (when or dt.datetime.now().astimezone()).utcoffset() or dt.timedelta(0)
+    minutes = int(offset.total_seconds() // 60)
+    sign = "+" if minutes >= 0 else "-"
+    return "%s%02d:%02d" % (sign, abs(minutes) // 60, abs(minutes) % 60)
+
+
+def box_info(conf=None, ip="default", when=None, mdns=None) -> dict:
+    """The content of /pb/box.json: {"v":1,"version","ip","tz","utcOffset","counter","mdns","at"}.
+    `ip` is the default-route IPv4 address (what the router's DNS setting needs; the page never puts a name there),
+    null when the box has no route. `counter` is "a counter address is configured", `mdns` "avahi answers for this
+    host", `at` the box's clock. Nothing that identifies the family is in it: the file is readable by everybody on
+    the network."""
+    conf = read_config() if conf is None else conf
+    if ip == "default":
+        try:
+            ip = default_route_ipv4()
+        except (OSError, ValueError):
+            ip = None
+    if mdns is None:
+        mdns = unit_active("avahi-daemon")
+    now = time.time() if when is None else when
+    return {"v": 1, "version": VERSION, "ip": ip if valid_lan_ip(ip) else None, "tz": timezone_name(),
+            "utcOffset": utc_offset_text(), "counter": bool(telemetry_url(conf)), "mdns": bool(mdns), "at": int(now)}
+
+
+def box_info_path(root=None):
+    """Where box.json goes: the page's folder inside the web root. None when there is no such folder (no page
+    installed, or the installer is between two versions of it): the folder is never made here, because the installer
+    swaps it by renaming and a folder that already exists would make that rename put the new page inside the old."""
+    folder = os.path.join(root or webroot(), "pb")
+    return os.path.join(folder, BOX_INFO_FILE) if os.path.isdir(folder) else None
+
+
+def write_box_info(conf=None, ip="default", force: bool = False, root=None, when=None, mdns=None) -> str:
+    """Write /pb/box.json (atomically, mode 644) when its content changed or the file is older than BOX_INFO_MAX_AGE.
+    Returns "written", "unchanged" or "nowhere" (there is no page folder: nothing to write, and that is not an error).
+    Raises OSError when the file cannot be written."""
+    path = box_info_path(root)
+    if path is None:
+        return "nowhere"
+    info = box_info(conf, ip, when, mdns)
+    old = read_json_file(path)
+    if not force and isinstance(old, dict) and _is_number(old.get("at")):
+        same = {k: v for k, v in old.items() if k != "at"} == {k: v for k, v in info.items() if k != "at"}
+        age = info["at"] - old["at"]
+        if same and -60 <= age < BOX_INFO_MAX_AGE:            # a file from the future (the clock was wrong) is not fresh
+            return "unchanged"
+    atomic_write(path, json.dumps(info, separators=(",", ":")), 0o644)
+    return "written"
+
+
+def refresh_box_info(**kw) -> None:
+    """write_box_info for callers that must never fail because of it (`configure`, the address watch, the installer's
+    last step): whatever goes wrong is logged at debug level and dropped."""
+    try:
+        write_box_info(**kw)
+    except Exception as err:
+        log.debug("could not write %s: %s", BOX_INFO_FILE, err)
 
 
 def start_update_runner() -> bool:
@@ -2008,6 +2503,32 @@ def run_power(action: str) -> None:
     subprocess.run(["systemctl", "--no-block", action], check=True, capture_output=True, timeout=30)
 
 
+def recover_check() -> dict:
+    """After an update whose runner is gone (power cut, killed): does this box work? {"ok": bool, "detail": text}.
+    The self-check, without the question whether the scheduler runs: this is the scheduler asking. Slow (it asks
+    Pi-hole and the disk): run it in a background job."""
+    try:
+        catalog = load_catalog_safely()
+    except CatalogError as err:
+        return {"ok": False, "detail": "the program's lists cannot be read (%s)" % short_text(err, 60)}
+    results = selfcheck_round(catalog, scheduler=lambda: (True, "this is the scheduler"))
+    failed = [text for ok, text in results if not ok]
+    return {"ok": not failed, "detail": short_text(failed[0], 100) if failed else ""}
+
+
+def run_self_heal() -> None:
+    """Put back what Sinko needs inside Pi-hole when it went missing (a group or a list deleted by hand, a backup from
+    another version restored): `sinko setup`, including the gravity update. Only pb-* objects are touched, and not
+    the leftovers of the 1.x installer. Slow: run it in a background job, with a session of its own."""
+    api = Api()
+    try:
+        api.wait_ready(30)
+        api.login()
+        Controller(api, load_catalog_safely()).setup(run_gravity=True, legacy=False)
+    finally:
+        drop_session(api)
+
+
 # --------------------------------------------------------------------------- #
 # Optional anonymous counter ("boxes online"): architecture.md, "Optional anonymous counter"
 # --------------------------------------------------------------------------- #
@@ -2032,7 +2553,7 @@ def telemetry_url(conf=None) -> str:
         return ""
     if not url or not host or parts.username or parts.password or parts.query or parts.fragment:
         return ""
-    if parts.scheme == "https" or (parts.scheme == "http" and host in ("127.0.0.1", "localhost", "::1")):
+    if parts.scheme == "https" or (parts.scheme == "http" and host in LOOPBACK_HOSTS):
         return url.rstrip("/")
     return ""
 
@@ -2064,10 +2585,12 @@ def telemetry_body() -> str:
     return body
 
 
-def send_ping(url: str, body: str, timeout: float = PING_TIMEOUT):
-    """POST `body` to {url}/v1/ping. Returns {"online", "total"} from the answer, or None when the answer holds
-    numbers that make no sense. Raises TelemetryError when the counter cannot be reached."""
-    request = urllib.request.Request(url + "/v1/ping", data=body.encode("utf-8"), method="POST",
+def _counter_post(url: str, path: str, body: str, timeout: float):
+    """POST `body` (JSON) to {url}{path} and return the answer as parsed JSON, or None when the answer is not JSON or
+    far too big. Raises TelemetryError when the counter cannot be reached or answers with an error. One transport for
+    everything the box ever says to the counter, so that one set of rules (https, no redirect to plain http, short
+    timeout, small answer, no cookies) covers all of it."""
+    request = urllib.request.Request(url + path, data=body.encode("utf-8"), method="POST",
                                      headers={"Content-Type": "application/json", "User-Agent": "sinko/" + VERSION})
     try:
         with urllib.request.build_opener(_SafeRedirect).open(request, timeout=timeout) as resp:
@@ -2078,9 +2601,15 @@ def send_ping(url: str, body: str, timeout: float = PING_TIMEOUT):
     except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as err:
         raise TelemetryError("the counter could not be reached (%s)" % short_text(getattr(err, "reason", None) or err, 80))
     try:
-        data = json.loads(raw[:PING_RESPONSE_MAX].decode("utf-8")) if len(raw) <= PING_RESPONSE_MAX else None
+        return json.loads(raw[:PING_RESPONSE_MAX].decode("utf-8")) if len(raw) <= PING_RESPONSE_MAX else None
     except ValueError:
         return None
+
+
+def send_ping(url: str, body: str, timeout: float = PING_TIMEOUT):
+    """POST `body` to {url}/v1/ping. Returns {"online", "total"} from the answer, or None when the answer holds
+    numbers that make no sense. Raises TelemetryError when the counter cannot be reached."""
+    data = _counter_post(url, "/v1/ping", body, timeout)
     if not isinstance(data, dict):
         return None
     online, total = data.get("online"), data.get("total")
@@ -2088,6 +2617,74 @@ def send_ping(url: str, body: str, timeout: float = PING_TIMEOUT):
         if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= MAX_COUNT:
             return None
     return {"online": online, "total": total} if online <= total else None
+
+
+def send_forget(url: str, ident: str, timeout: float = PING_TIMEOUT) -> bool:
+    """Ask the counter to delete everything it holds for `ident` (POST {url}/v1/forget {"id": ...}). True when it said
+    {"forgotten": true}, which it does whether or not it knew the id. Raises TelemetryError otherwise."""
+    if not isinstance(ident, str) or not INSTALL_ID_RE.match(ident):
+        raise TelemetryError("the id is not valid")
+    data = _counter_post(url, "/v1/forget", json.dumps({"id": ident}, separators=(",", ":")), timeout)
+    if not (isinstance(data, dict) and data.get("forgotten") is True):
+        raise TelemetryError("the counter did not confirm that it forgot the id")
+    return True
+
+
+# What the box remembers about the counter, in the state folder (root only):
+#   install-id       the random number sent with every ping (made when the first ping is built)
+#   counter-sent     exists once the id has left this box (made just before the request is sent: a request that fails
+#                    half way may still have arrived)
+#   forget-pending   the answer became "no" (or the id is being replaced) and the counter has not yet confirmed that
+#                    it forgot the id; nothing is sent to the counter, except the forget request, until it has
+def counter_sent() -> bool:
+    return os.path.exists(state_path("counter-sent"))
+
+
+def note_counter_sent() -> None:
+    ensure_state_dir()
+    atomic_write(state_path("counter-sent"), "1\n")
+
+
+def forget_pending() -> bool:
+    return os.path.exists(state_path("forget-pending"))
+
+
+def set_forget_pending() -> None:
+    ensure_state_dir()
+    atomic_write(state_path("forget-pending"), "1\n")
+
+
+def drop_install_id() -> None:
+    """The id and everything that says it was used: after the counter forgot it, or when it never left the box."""
+    for name in ("install-id", "counter-sent", "forget-pending"):
+        try:
+            os.unlink(state_path(name))
+        except FileNotFoundError:
+            pass
+    _fsync_dir(state_dir())
+
+
+def forget_counter_id(url: str, send=None):
+    """Make the counter forget this box's id, then delete it. Returns (status, detail):
+      "none"        there was nothing to forget (no id, or it never left this box): any id file is simply deleted
+      "forgotten"   the counter confirmed; the id and its markers are deleted
+      "pending"     the counter could not be reached or did not confirm: the id is kept with a marker, to be asked again
+      "no-address"  no counter address is configured, so nobody can be asked: the marker stays for when there is one
+    Never raises on a counter that is down; never sends anything but the forget request."""
+    send = send or send_forget
+    ident = install_id(create=False)
+    if ident is None or not (counter_sent() or forget_pending()):
+        drop_install_id()                                  # a number that never left the box needs no forgetting
+        return "none", ""
+    set_forget_pending()                                   # durable before the request leaves
+    if not url:
+        return "no-address", ""
+    try:
+        send(url, ident)
+    except TelemetryError as err:
+        return "pending", short_text(err, 100)
+    drop_install_id()
+    return "forgotten", ""
 
 
 class BackgroundJob:
@@ -2140,21 +2737,28 @@ class Maintenance:
     """
     CHECK_FIRST = 120                 # seconds after start, then every day (or when the page asks)
     CHECK_EVERY = 24 * 3600
+    CHECK_RETRY = 1800                # a check that failed (offline, GitHub's limit) is tried again after this plus up to as much
     ADDRESS_FIRST = 30
     ADDRESS_EVERY = 300
     MIN_RUN_GAP = 300                 # between two update runs
-    STUCK_AFTER = 20 * 60             # a run with no sign of life for this long did not finish
+    RUNNER_GRACE = 180                # a run that says "running" and has no runner (no lock held) for this long is over
     FAILED_BLOCKS_AUTO = 7 * 24 * 3600
+    TRANSIENT_RETRY = 1800            # ... but after a failure of the network or the disk, the same release is tried again after this
     AUTO_WINDOW = (3, 5)              # box time, hours: 03:00 up to 05:00
     COMPLAIN_EVERY = 1800
     PING_FIRST = 300
     PING_EVERY = 6 * 3600
     PING_JITTER = 1800                # +-, so the boxes do not all call in at the same minute
     PING_RETRY = 1800
+    BOXINFO_FIRST = 10                # box.json: first write soon after start, then every five minutes
+    BOXINFO_EVERY = 300
+    HEAL_CHECK_EVERY = 300            # looking for missing lists (missing groups are seen on every pass)
+    HEAL_STREAK = 3                   # passes in a row that must see something missing (FTL may be rebuilding gravity)
+    HEAL_EVERY = 3600                 # at most one repair an hour
 
     def __init__(self, api=None, config_path=None, monotonic=time.monotonic, job_factory=BackgroundJob, clock_ok=None,
                  check=None, start_runner=None, power=None, default_ip=None, apply_address=None, ping=None, body=None,
-                 jitter=None):
+                 jitter=None, box_info=None, forget=None, heal=None, recover=None, catalog=None):
         self.api = api
         self.config_path = config_path or CONFIG_FILE
         self.mono = monotonic
@@ -2168,17 +2772,32 @@ class Maintenance:
         self.ping = ping or send_ping
         self.body = body or telemetry_body
         self.jitter = jitter or random.uniform
+        self.box_info = box_info or write_box_info
+        self.forget = forget or send_forget
+        self.heal = heal or run_self_heal
+        self.recover = recover or recover_check
+        self.catalog = catalog or load_catalog_safely
         started = monotonic()
         self._next_check = started + self.CHECK_FIRST
         self._next_address = started + self.ADDRESS_FIRST
         self._next_ping = started + self.PING_FIRST
+        self._next_forget = started
+        self._next_boxinfo = started + self.BOXINFO_FIRST
+        self._next_heal_check = started
+        self._next_heal = started
+        self._heal_streak = 0
+        self._lists_missing = []
+        self._catalog = None
+        self._was_trusted = None          # whether the clock was believed on the pass before (None: no pass yet)
         self._check_forced = False
         self._force_check = False
         self._jobs = {}
         self._callbacks = {}
         self._state = None
+        self._groups = {}
         self._last_logged = {}
         self._actions = []
+        self.tick_ok = True               # the scheduler's loop says whether this pass's tick worked (see Scheduler)
 
     # ----- plumbing -----
     def conf(self) -> dict:
@@ -2189,16 +2808,19 @@ class Maintenance:
         self._actions = []
         epoch = now.timestamp()
         self._state = None
+        steps = (("jobs", self._collect), ("reconcile", self._reconcile), ("check", self._check),
+                 ("update", self._update), ("power", self._power), ("address", self._address),
+                 ("box.json", self._boxinfo), ("telemetry", self._telemetry), ("self-repair", self._heal))
         try:
             self._cur()
         except LookupError:
-            return []                         # `sinko setup` has not made the shared state yet
+            # The shared state is not there: `sinko setup` has not run yet, or somebody deleted it (or restored a
+            # backup that lacks it). Nothing can be asked of the page, but the repair is exactly for this.
+            steps = (("jobs", self._collect), ("self-repair", self._heal))
         except Exception as err:
             self._complain("state", err)
             return []
-        for name, step in (("jobs", self._collect), ("reconcile", self._reconcile), ("check", self._check),
-                           ("update", self._update), ("power", self._power), ("address", self._address),
-                           ("telemetry", self._telemetry)):
+        for name, step in steps:
             try:
                 step(now, epoch)
             except Exception as err:
@@ -2219,7 +2841,7 @@ class Maintenance:
             log.warning("%s: %s (shown at most every %d minutes)", name, short_text(err, 160), self.COMPLAIN_EVERY // 60)
 
     def _read(self) -> dict:
-        groups = self.api.group_map()
+        groups = self._groups = self.api.group_map()
         if G_STATE not in groups:
             raise LookupError("the shared state does not exist yet")
         return parse_state(groups[G_STATE].get("comment"))
@@ -2318,23 +2940,61 @@ class Maintenance:
             if up["status"] != "running":
                 return
             if result is not None and result["at"] >= up["at"] - 5:
+                failed = result["status"] == "failed"
                 up["status"] = result["status"]
                 up["from"] = result["from"] or up["from"]
                 up["to"] = result["to"] or up["to"]
-                up["error"] = result["error"] if result["status"] == "failed" else None
+                up["error"] = result["error"] if failed else None
+                up["rolledBack"] = result["rolledBack"] if failed else None
                 up["at"] = result["at"]
                 if result["status"] == "ok" and up["latest"] and result["to"] and not is_newer(up["latest"], result["to"]):
                     up["latest"] = up["notes"] = None
-                seen["result"] = result["status"]
-            elif abs(epoch - up["at"]) > self.STUCK_AFTER and not RunLock.is_held():
-                up["status"], up["error"], up["at"] = "failed", "The update did not finish.", epoch
-                seen["stuck"] = True
+                seen["result"] = result
+            elif self._runner_gone(up, epoch):
+                seen["gone"] = up["at"]                                 # decided below, once the box has been looked at
         self._change(mutate)
         if "result" in seen:
+            if seen["result"]["status"] == "failed":
+                note_failure(seen["result"])                            # before the file goes: it says whether to retry soon
             clear_update_result()                                       # only after the state holds it
-            self._actions.append("update %s" % ("finished" if seen["result"] == "ok" else "failed"))
-        elif seen.get("stuck"):
-            self._actions.append("update did not finish")
+            self._actions.append("update %s" % ("finished" if seen["result"]["status"] == "ok" else "failed"))
+        elif "gone" in seen:
+            started = seen["gone"]
+            self._spawn("recover", self.recover, lambda outcome, e: self._recovered(outcome, e, started))
+
+    def _runner_gone(self, up: dict, epoch: float) -> bool:
+        """The update says "running" but nothing is running it: the box lost power in the middle of it, or the runner
+        was killed or never started. The runner holds a lock for as long as it lives, so a free lock is the proof; the
+        grace is for a runner that has not taken the lock yet. Not decided on a clock that is not believed."""
+        return abs(epoch - up["at"]) > self.RUNNER_GRACE and self.clock_ok() and not RunLock.is_held()
+
+    def _recovered(self, outcome, epoch, started) -> None:
+        """What the box looks like after a run that died: the answer of recover_check(). If the new version is in place
+        and everything passes, the update did finish (the box lost power during its own check, say); if the old one
+        still works, that is said; if neither passes, that is said too, and the page asks the parent for help."""
+        status, value = outcome
+        if status == "error":
+            self._complain("update check after an interrupted update", value)
+            value = {"ok": False, "detail": "the check could not run"}
+
+        def mutate(state):
+            up = state["update"]
+            if up["status"] != "running" or up["at"] != started or RunLock.is_held():
+                return                                                  # decided by somebody else in the meantime
+            up["at"] = epoch
+            if value["ok"] and up["to"] == VERSION:
+                up["status"], up["error"], up["rolledBack"] = "ok", None, None
+                if up["latest"] and not is_newer(up["latest"], VERSION):
+                    up["latest"] = up["notes"] = None
+            elif value["ok"]:
+                up["status"], up["rolledBack"] = "failed", True
+                up["error"] = "The update did not finish. This box still works with version %s." % VERSION
+            else:
+                up["status"], up["rolledBack"] = "failed", False
+                up["error"] = short_text("The update did not finish, and the box does not pass its own check (%s)."
+                                         % (value.get("detail") or "no reason given"))
+        if self._change(mutate):
+            self._actions.append("update did not finish (the box was checked)")
 
     # ----- update check -----
     def _check_enabled(self) -> bool:
@@ -2369,6 +3029,10 @@ class Maintenance:
         status, value = outcome
         if status == "error":
             self._complain("update check", value)      # offline or rate limited: the old answer stays
+            # Not tomorrow: a cable that was out at the check's minute, or GitHub's 60 requests an hour per address
+            # (one address can be a whole street), would hold back a security update for a day. The spread keeps the
+            # boxes that failed together from asking together again.
+            self._next_check = self.mono() + self.CHECK_RETRY + self.jitter(0, self.CHECK_RETRY)
             return
         latest = value["version"] if value else None
         notes = value["notes"] if value else None
@@ -2402,13 +3066,21 @@ class Maintenance:
             return
         if (u["auto"] and u["latest"] and is_newer(u["latest"], VERSION) and u["status"] != "running" and not too_soon
                 and self.AUTO_WINDOW[0] <= now.hour < self.AUTO_WINDOW[1] and self.clock_ok()
-                and not (u["status"] == "failed" and u["to"] == u["latest"] and epoch - u["at"] < self.FAILED_BLOCKS_AUTO)):
+                and not self._failed_recently(u, epoch)):
             self._begin_update(epoch, None, "automatic update to %s" % u["latest"])
+
+    def _failed_recently(self, u: dict, epoch: float) -> bool:
+        """This release failed here lately, so the night's automatic update leaves it alone: for a week when the
+        release itself was the trouble, for half an hour when it was only the network or the disk."""
+        if not (u["status"] == "failed" and u["to"] == u["latest"]):
+            return False
+        wait = self.TRANSIENT_RETRY if failure_is_transient(u) else self.FAILED_BLOCKS_AUTO
+        return epoch - u["at"] < wait
 
     def _begin_update(self, epoch: float, marker, why: str) -> None:
         def running(state):
             up = state["update"]
-            up["status"], up["at"], up["error"] = "running", epoch, None
+            up["status"], up["at"], up["error"], up["rolledBack"] = "running", epoch, None, None
             up["from"], up["to"] = VERSION, up["latest"]
         if marker is not None:
             if self._take_marker("update", marker, running) is None:
@@ -2433,6 +3105,7 @@ class Maintenance:
             up = state["update"]
             if up["status"] == "running" and not RunLock.is_held():
                 up["status"], up["error"], up["at"] = "failed", "The update could not be started.", epoch
+                up["rolledBack"] = None            # nothing was installed and nothing was checked: not known, so not claimed
         self._change(failed)
 
     # ----- power -----
@@ -2445,7 +3118,13 @@ class Maintenance:
             self._clear_stale("power", marker)
             return
         if st["update"]["status"] == "running":
-            return                             # never cut the power in the middle of an installation
+            # Never cut the power in the middle of an installation, and never keep the request for later either: it
+            # would sit in the shared state, survive a power cycle, and fire at a moment nobody chose, with the page
+            # long since saying something else. The page does not offer the buttons while an update runs and withdraws
+            # a request nobody answered; a request that still gets here (a second phone, bad timing) is dropped.
+            if self._take_marker("power", marker) is not None:
+                self._actions.append("power request ignored: an update is running")
+            return
         seen = self._take_marker("power", marker)
         if seen is None or seen.get("action") not in POWER_ACTIONS:
             return
@@ -2476,20 +3155,136 @@ class Maintenance:
         if outcome[0] == "error":
             self._complain("address change", outcome[1])       # retried at the next address check
 
+    # ----- box.json (what the page may know about the box, and the scheduler's pulse for the parent) -----
+    def _boxinfo(self, now, epoch) -> None:
+        """Refresh /pb/box.json every five minutes, in a job of its own (it asks the web server's settings, systemd and
+        the routing table: nothing the tick should wait for). Only while the rules are being applied (the file says
+        "the scheduler works"), not while an update runs (the installer swaps the folder the file lives in), and
+        straight away once the clock is believed (the time in the file has to match it). A failure to write is logged
+        now and then and never reaches the tick."""
+        trusted = bool(self.clock_ok())
+        became_trusted, self._was_trusted = trusted and self._was_trusted is False, trusted
+        if not self.tick_ok or not trusted:
+            return
+        if self._cur()["update"]["status"] == "running" or RunLock.is_held():
+            return
+        if not became_trusted and self.mono() < self._next_boxinfo:
+            return
+        conf = self.conf()
+        if self._spawn("boxinfo", lambda: self.box_info(conf, force=became_trusted), self._boxinfo_done):
+            self._next_boxinfo = self.mono() + self.BOXINFO_EVERY
+
+    def _boxinfo_done(self, outcome, epoch) -> None:
+        if outcome[0] == "error":
+            self._complain("box.json", outcome[1])
+            self._next_boxinfo = self.mono() + 60                 # the folder may only be missing for a moment
+
     # ----- anonymous counter -----
     def _telemetry(self, now, epoch) -> None:
         """Nothing is sent unless the parent said yes (the state is the only authority) AND a counter address is
-        configured."""
+        configured. When the answer is "no" the counter is asked to forget the box's id (see _forget)."""
         st = self._cur()
-        if st["telemetry"]["on"] is not True:
-            if st["community"] is not None:
-                self._change(lambda state: state.update(community=None))      # an old number must not outlive the "no"
+        on = st["telemetry"]["on"]
+        if on is not True and st["community"] is not None:
+            self._change(lambda state: state.update(community=None))          # an old number must not outlive the "no"
+        self._forget(on)
+        if on is not True or forget_pending():                                # never a ping while a forget is pending
             return
         url = telemetry_url(self.conf())
         if not url or self.mono() < self._next_ping or not self.clock_ok():
             return
         self._next_ping = self.mono() + self.PING_EVERY + self.jitter(-self.PING_JITTER, self.PING_JITTER)
-        self._spawn("ping", lambda: self.ping(url, self.body()), self._ping_done)
+        self._spawn("ping", lambda: self._send_ping(url), self._ping_done)
+
+    def _send_ping(self, url: str):
+        body = self.body()
+        note_counter_sent()                    # before the request leaves: one that fails half way may still have arrived
+        return self.ping(url, body)
+
+    def _forget(self, on) -> None:
+        """The counter forgets the box when the answer became "no" (the page, `sinko telemetry off`, `reset-id`): ask it
+        to delete the id, then delete the id here. If that fails the id stays with a marker and it is asked again every
+        ping interval; nothing else is sent to the counter in the meantime."""
+        pending = forget_pending()
+        if not pending and not (on is False and (counter_sent() or install_id(create=False) is not None)):
+            return
+        if self.mono() < self._next_forget:
+            return
+        job = self._jobs.get("ping")
+        if job is not None and job.busy():
+            return                             # let a ping that is on its way land first: forgetting comes after it
+        url = telemetry_url(self.conf())
+        if self._spawn("forget", lambda: forget_counter_id(url, self.forget), self._forget_done):
+            self._next_forget = self.mono() + self.PING_EVERY + self.jitter(-self.PING_JITTER, self.PING_JITTER)
+
+    def _forget_done(self, outcome, epoch) -> None:
+        status, value = outcome
+        if status == "error":
+            self._complain("anonymous counter (forgetting the id)", value)
+            return
+        what, detail = value
+        if what == "pending":
+            self._complain("anonymous counter (forgetting the id)", detail)       # asked again after a ping interval
+        elif what == "forgotten":
+            self._next_forget = self.mono()                                      # nothing left to wait for
+            self._actions.append("the counter forgot this box's id")
+
+    # ----- self-repair: what Sinko needs inside Pi-hole went missing -----
+    def _heal(self, now, epoch) -> None:
+        """A group or a list of a service is missing from Pi-hole (deleted in the admin pages, or a backup from another
+        version was restored): run what `sinko setup` does, gravity included, in a background job, at most once an
+        hour, and say so in the log at most every half hour. Only pb-* objects are ever touched."""
+        if "Default" not in self._groups:
+            return                             # an answer without even Pi-hole's own group is not one to act on
+        try:
+            if self._catalog is None:
+                self._catalog = self.catalog()
+        except CatalogError:
+            return                             # nothing to compare with: the loop reports an unreadable catalog
+        names = [G_KIDS, G_GUARD, G_OFFLINE, G_PAUSED, G_STATE] + [svc_group(s["id"]) for s in self._catalog["services"]]
+        missing = [n for n in names if n not in self._groups]
+        if missing or self._lists_missing or self.mono() >= self._next_heal_check:      # while in doubt, look on every pass
+            self._next_heal_check = self.mono() + self.HEAL_CHECK_EVERY
+            comments = {l.get("comment") for l in self.api.lists()}
+            ids = [s["id"] for s in self._catalog["services"]] + ["guard"]
+            self._lists_missing = [i for i in ids if LIST_COMMENT_PREFIX + i not in comments]
+        if not missing and not self._lists_missing:
+            self._heal_streak = 0
+            return
+        self._heal_streak += 1                 # FTL may be rebuilding gravity: it has to look like this for a while
+        if (self._heal_streak < self.HEAL_STREAK or self.mono() < self._next_heal
+                or os.path.exists(state_path("removed")) or self._update_going()):
+            return
+        what = ", ".join(missing[:3] + ["the list of " + i for i in self._lists_missing[:3]])
+        if self._spawn("heal", self.heal, self._heal_done):
+            self._next_heal = self.mono() + self.HEAL_EVERY
+            self._heal_streak = 0
+            self._lists_missing = []
+            self._next_heal_check = self.mono() + 60
+            if self._gate_allows("heal-start"):
+                log.warning("Pi-hole lacks %s: setting Sinko up again (at most once an hour)", what)
+
+    def _update_going(self) -> bool:
+        """An update is being installed (the installer sets everything up itself, and may be in the middle of it)."""
+        try:
+            running = self._cur()["update"]["status"] == "running"
+        except LookupError:
+            running = False
+        return running or RunLock.is_held()
+
+    def _gate_allows(self, key: str) -> bool:
+        now = self.mono()
+        last = self._last_logged.get(key)
+        if last is None or now - last >= self.COMPLAIN_EVERY:
+            self._last_logged[key] = now
+            return True
+        return False
+
+    def _heal_done(self, outcome, epoch) -> None:
+        if outcome[0] == "error":
+            self._complain("self-repair", outcome[1])                          # tried again after the hour
+        elif self._gate_allows("heal-done"):
+            log.info("Sinko is set up in Pi-hole again")
 
     def _ping_done(self, outcome, epoch) -> None:
         status, value = outcome
@@ -2524,11 +3319,19 @@ def seed_telemetry_answer(api: Api, conf: dict) -> bool:
     return patch_state(api, seed)
 
 
+def removed_flag() -> str:
+    return state_path("removed")
+
+
 def cmd_setup(args) -> int:
     api = Api()
     api.wait_ready()
     api.login()
     try:
+        try:
+            os.unlink(removed_flag())              # setting up again: the scheduler may repair what goes missing
+        except OSError:
+            pass
         ctl = Controller(api, load_catalog())
         ctl.setup(run_gravity=False)
         ctl.readd_legacy_devices()
@@ -2551,11 +3354,9 @@ def cmd_telemetry(args) -> int:
     if args.action == "payload":
         print(telemetry_body())
         return 0
-    if args.action == "reset-id":
-        reset_install_id()
-        print("sinko: a new random id was made; the old one is forgotten. Nothing was sent.")
-        return 0
     conf = read_config()
+    if args.action == "reset-id":
+        return reset_counter_id(telemetry_url(conf))
     try:
         api = Api()
         api.login()
@@ -2580,7 +3381,7 @@ def cmd_telemetry(args) -> int:
         print("sinko: Pi-hole could not be read or written (%s)" % short_text(err, 80), file=sys.stderr)
         return 2
     finally:
-        api.logout()
+        drop_session(api)
     on = state["telemetry"]["on"]
     configured = bool(telemetry_url(conf))
     print("Anonymous counter: %s" % ("on" if on else "off" if on is False else "not decided yet"))
@@ -2592,9 +3393,237 @@ def cmd_telemetry(args) -> int:
         print("Nothing is sent.")
     else:
         print("Nothing is sent until it is switched on: sudo sinko telemetry on")
-    if state["community"]:
+    if on is False and args.action == "off":
+        # Switching off also makes the counter forget this box (the scheduler would do it a moment later; here the
+        # person at the keyboard sees how it went).
+        what, detail = forget_counter_id(telemetry_url(conf))
+        print(forget_report(what, detail))
+    if state["community"] and on is not False:
         print("Boxes online at the last answer: %d" % state["community"]["online"])
     return 0
+
+
+def forget_report(what: str, detail: str) -> str:
+    return {"none": "This box's number never left the box; it was deleted.",
+            "forgotten": "The counter was asked to forget this box's number, and did. It is deleted here too.",
+            "pending": "The counter could not be reached (%s). This box keeps trying and sends nothing else until it has "
+                       "been forgotten there." % detail,
+            "no-address": "No counter address is set up on this box, so the counter could not be asked to forget its "
+                          "number; it forgets numbers by itself after about half a year. Nothing is sent."}[what]
+
+
+def reset_counter_id(url: str) -> int:
+    """`sinko telemetry reset-id`: the counter forgets the old id (when it ever got it), then a new random one is made."""
+    what, detail = forget_counter_id(url)
+    if what == "pending":
+        print("sinko: the counter could not be reached (%s), so the old id was not replaced. It is kept, and forgotten "
+              "as soon as the counter answers; nothing else is sent until then." % detail, file=sys.stderr)
+        return 1
+    if what == "no-address":
+        drop_install_id()                          # nobody can be asked, and nothing can be sent without an address
+    reset_install_id()
+    print("sinko: a new random id was made, and the old one is forgotten%s. Nothing was sent with it."
+          % (" here (no counter address is set up, so the counter itself was not asked)" if what == "no-address" else
+             " by the counter" if what == "forgotten" else ""))
+    return 0
+
+
+def drop_session(api) -> None:
+    """Give a Pi-hole API session back before it is forgotten. FTL has a small, fixed number of seats
+    (webserver.api.max_sessions, 16) and a session that is dropped without a logout keeps one for half an hour: a
+    scheduler that fails every few seconds would lock the parent out of the page. Never raises."""
+    if api is None:
+        return
+    try:
+        api.logout()
+    except Exception:
+        pass
+
+
+class CatalogError(Exception):
+    """The service catalog (services.json and the list files) cannot be read."""
+
+
+def load_catalog_safely():
+    """load_catalog() for a long-running process: its SystemExit (a command line tool's way to stop) becomes an
+    exception that the scheduler can survive."""
+    try:
+        return load_catalog()
+    except SystemExit as err:
+        raise CatalogError(str(err.code))
+    except (OSError, ValueError, KeyError, TypeError) as err:
+        raise CatalogError("%s: %s" % (type(err).__name__, short_text(err, 100)))
+
+
+def _list_file_problem(path: str, is_catalog: bool) -> bool:
+    """True when the file is missing, empty, or (services.json) not JSON: what a write that a power cut interrupted
+    can leave behind."""
+    try:
+        if os.stat(path).st_size == 0:
+            return True
+        if is_catalog:
+            with open(path, encoding="utf-8") as fh:
+                json.load(fh)
+    except (OSError, ValueError):
+        return True
+    return False
+
+
+def repair_catalog_files() -> list:
+    """Put back the service lists (and services.json) that cannot be read, from a copy of this very version that is
+    known to be whole: the source tree the installer ran from, else the verified copy kept for rollback. Only files
+    that cannot be read are written (each atomically); everything else is left exactly as it is. Returns the names
+    written, [] when there was nothing to do or nothing to do it from."""
+    lists_dir = os.path.join(APP_DIR, "lists")
+
+    def restore_from(folder):
+        """The names written from `folder`, or None when that copy is not whole itself (then it is no help)."""
+        try:
+            names = ["services.json"] + [s["id"] + ".txt" for s in load_catalog(folder)["services"]] + ["guard.txt"]
+        except (SystemExit, OSError, ValueError, KeyError, TypeError):
+            return None
+        written = []
+        for name in dict.fromkeys(names):
+            target = os.path.join(lists_dir, name)
+            if _list_file_problem(target, name == "services.json"):
+                with open(os.path.join(folder, name), "rb") as fh:
+                    atomic_write(target, fh.read(), 0o644)
+                written.append(name)
+        return written
+    try:
+        src = os.path.join(APP_DIR, "src")
+        if read_version_file(src) == VERSION:
+            done = restore_from(os.path.join(src, "lists"))
+            if done is not None:
+                return done
+        cached = cache_file(VERSION)
+        if not os.path.isfile(cached):
+            return []
+        os.makedirs(APP_DIR, exist_ok=True)
+        scrap = tempfile.mkdtemp(dir=APP_DIR, prefix=".stage-")
+        try:
+            if unpack_release(cached, scrap) != VERSION:
+                return []
+            return restore_from(os.path.join(scrap, "sinko", "lists")) or []
+        except UpdateError:
+            return []
+        finally:
+            shutil.rmtree(scrap, ignore_errors=True)
+    except OSError as err:
+        log.debug("could not repair the lists: %s", err)
+        return []
+
+
+# Errors that mean "Pi-hole (or the network to it) did not answer properly": the session is dropped and the pass is
+# tried again with a back-off. Anything else is a bug in this program or a state it did not foresee.
+TRANSPORT_ERRORS = (ApiError, OSError, ValueError, http.client.HTTPException)
+
+
+class Scheduler:
+    """The loop of `sinko run`. One `step()` is one pass; it never raises an Exception whatever Pi-hole answered and
+    whatever is in the shared state, and it gives every Pi-hole session back.
+
+    A pass that fails is retried after 5, 10, 20 ... 120 seconds, and a failure is logged when it is new and then at
+    most every 30 minutes. While passes fail because of a bug (not because Pi-hole is down) the side jobs still run:
+    "Update now" is the way a fixed release reaches a box whose scheduler fails, and a parent can still restart it.
+    """
+    MAX_BACKOFF = 120
+
+    REPAIR_EVERY = 3600
+
+    def __init__(self, clock=None, maintenance=None, gate=None, repair=None, monotonic=time.monotonic):
+        self.clock = clock or ClockGuard()
+        self.maintenance = maintenance if maintenance is not None else Maintenance(clock_ok=self.clock.trusted)
+        self.gate = gate or LogGate()
+        self.repair = repair or repair_catalog_files
+        self.mono = monotonic
+        self.api = None
+        self.catalog = None
+        self.backoff = 5
+        self.ticks = 0
+        self._next_repair = 0.0
+
+    def _load_catalog(self):
+        """The service catalog; when it cannot be read, put back the files that cannot (from a whole copy of this
+        version), at most once an hour, and try again."""
+        try:
+            return load_catalog_safely()
+        except CatalogError:
+            if self.mono() < self._next_repair:
+                raise
+            self._next_repair = self.mono() + self.REPAIR_EVERY
+            try:
+                fixed = self.repair()
+            except Exception as err:                        # a repair that fails is no worse than none
+                log.debug("could not repair the lists: %s", err)
+                fixed = []
+            if not fixed:
+                raise
+            log.warning("scheduler: put back %s, which could not be read (an update was probably cut short)",
+                        ", ".join(fixed[:4]) + (" and more" if len(fixed) > 4 else ""))
+            return load_catalog_safely()
+
+    def step(self) -> float:
+        """One pass. Returns the number of seconds to wait before the next."""
+        ok = False
+        try:
+            if self.api is None:
+                self.api = Api()
+                self.api.login()
+            if self.catalog is None:
+                self.catalog = self._load_catalog()
+            Controller(self.api, self.catalog, clock_trusted=self.clock.trusted).tick()
+            ok = True
+        except Exception as err:
+            self._failed(err)
+        if ok:
+            self.ticks += 1
+            self._pulse()
+            self.backoff = 5
+            wait = TICK_SECONDS
+        else:
+            wait = self.backoff
+            self.backoff = min(self.backoff * 2, self.MAX_BACKOFF)
+        self._side_jobs(ok)
+        return wait
+
+    def _side_jobs(self, tick_ok: bool) -> None:
+        """Update requests, power requests, the update check, address watch, counter, box.json. Not while Pi-hole does
+        not answer (they all need it), but yes while the pass fails for another reason."""
+        if self.api is None:
+            return
+        try:
+            self.maintenance.api = self.api
+            self.maintenance.tick_ok = tick_ok
+            self.maintenance.run(dt.datetime.now())          # never raises; a failing job is logged and skipped
+        except Exception as err:
+            self._complain("side jobs", err)
+        if not tick_ok:
+            drop_session(self.api)
+            self.api = None
+
+    def _failed(self, err) -> None:
+        transport = isinstance(err, TRANSPORT_ERRORS)
+        if self.gate.allow((type(err).__name__, short_text(err, 80))):
+            log.warning("scheduler: %s: %s (retrying in %ss; the same message is shown at most every 30 minutes)",
+                        type(err).__name__, short_text(err, 160), self.backoff, exc_info=None if transport else err)
+        if transport:
+            drop_session(self.api)                       # FTL restarting, a rotated cli_pw, a hiccup: start afresh
+            self.api = None
+
+    def _pulse(self) -> None:
+        try:
+            write_heartbeat(self.ticks)
+        except OSError as err:
+            self._complain("heartbeat", err)
+
+    def _complain(self, what: str, err) -> None:
+        if self.gate.allow((what, type(err).__name__)):
+            log.warning("scheduler: %s: %s (shown at most every 30 minutes)", what, short_text(err, 160))
+
+    def close(self) -> None:
+        drop_session(self.api)
+        self.api = None
 
 
 def cmd_run(args) -> int:
@@ -2605,38 +3634,21 @@ def cmd_run(args) -> int:
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
 
-    catalog = load_catalog()
     try:
         ensure_state_dir("cache")
     except OSError as err:
         log.error("cannot create %s: %s (updates and requests from the page will not work)", state_dir(), err)
-    clock = ClockGuard()
-    maintenance = Maintenance(clock_ok=clock.trusted)
-    api = None
-    backoff = 5
+    scheduler = Scheduler()
     log.info("scheduler %s started", VERSION)
-    while not stop["flag"]:
-        try:
-            if api is None:
-                api = Api()
-                api.login()
-            Controller(api, catalog, clock_trusted=clock.trusted).tick()
-            backoff = 5
-            wait = TICK_SECONDS
-            maintenance.api = api
-            maintenance.run(dt.datetime.now())          # never raises; a failing job is logged and skipped
-        except (ApiError, OSError, ValueError, KeyError, http.client.HTTPException) as err:
-            # FTL restarting, cli_pw rotated, network hiccup… retry with backoff.
-            log.warning("scheduler: %s (retrying in %ss)", err, backoff)
-            api = None
-            wait = backoff
-            backoff = min(backoff * 2, 120)
-        for _ in range(int(wait)):
-            if stop["flag"]:
-                break
-            time.sleep(1)
-    if api:
-        api.logout()
+    try:
+        while not stop["flag"]:
+            wait = scheduler.step()
+            for _ in range(int(wait)):
+                if stop["flag"]:
+                    break
+                time.sleep(1)
+    finally:
+        scheduler.close()
     log.info("scheduler stopped")
     return 0
 
@@ -2968,6 +3980,27 @@ def mac_names_check(rep: Report) -> None:
                 "filtered. Fix: sudo pihole-FTL --config resolver.macNames true" % (value or "off"))
 
 
+def block_all_check(rep: Report, groups: dict, domains: list) -> None:
+    """The rule behind 'internet off' and 'pause': a deny rule for "^.*$" that applies to pb-offline and pb-paused."""
+    rule = next((d for d in domains if d.get("kind") == "regex" and d.get("type") == "deny"
+                 and d.get("domain") == BLOCK_ALL_REGEX), None)
+    ours = {groups[n]["id"] for n in (G_OFFLINE, G_PAUSED) if n in groups}
+    if rule is None:
+        rep.fix("the rule that blocks everything for 'internet off' and 'pause' is missing (run: sudo sinko setup)")
+    elif not rule.get("enabled"):
+        rep.fix("the %s rule is switched off, so 'internet off' and 'pause' block nothing. %s" % (
+            BLOCK_ALL_REGEX, "It is your own: switch it on in the Pi-hole admin under Domains." if not block_all_is_ours(rule)
+            else "Run: sudo sinko setup"))
+    elif not ours <= set(rule.get("groups", [])):
+        rep.fix("the %s rule does not apply to Sinko's groups, so 'internet off' and 'pause' block nothing "
+                "(run: sudo sinko setup)" % BLOCK_ALL_REGEX)
+    elif block_all_is_ours(rule):
+        rep.ok("the rule behind 'internet off' and 'pause' is in place")
+    else:
+        rep.info("your own %s rule also serves 'internet off' and 'pause': domains it allows are still reachable then"
+                 % BLOCK_ALL_REGEX)
+
+
 def doctor_api_checks(rep: Report, api: Api, catalog: dict, probe=None, now: float | None = None) -> None:
     """Everything `doctor` learns from the Pi-hole API (needs a logged-in `api`)."""
     probe = probe or SystemProbe()
@@ -2976,11 +4009,13 @@ def doctor_api_checks(rep: Report, api: Api, catalog: dict, probe=None, now: flo
     missing = [n for n in [G_KIDS, G_GUARD, G_OFFLINE, G_PAUSED, G_STATE]
                + [svc_group(s["id"]) for s in catalog["services"]] if n not in groups]
     rep.check(not missing, "all groups present" + (" (missing: %s)" % ", ".join(missing) if missing else ""))
-    lists = [l for l in api.lists() if (l.get("comment") or "").startswith(LIST_COMMENT_PREFIX)]
+    wanted = {LIST_COMMENT_PREFIX + i for i in [s["id"] for s in catalog["services"]] + ["guard"]}
+    lists = [l for l in api.lists() if l.get("comment") in wanted]       # (a blocked service of a newer release keeps its list)
     empty = [l["comment"] for l in lists if not l.get("number")]
-    rep.check(len(lists) == len(catalog["services"]) + 1, "%d service lists registered" % len(lists))
+    rep.check(len(lists) == len(wanted), "%d service lists registered" % len(lists))
     rep.check(not empty, "all lists compiled into gravity" +
               (" (empty: %s — run 'pihole -g')" % ", ".join(empty) if empty else ""))
+    block_all_check(rep, groups, api.domains())
     kid_checks(rep, catalog, groups, api.clients(), api.network_devices(), now)
     mac_names_check(rep)
     network_checks(rep, api, probe, now)
@@ -3033,18 +4068,22 @@ def cmd_doctor(args) -> int:
     try:
         rep.check(subprocess.run(["systemctl", "is-active", "--quiet", "pihole-FTL"]).returncode == 0,
                   "pihole-FTL service is running")
-        rep.check(subprocess.run(["systemctl", "is-active", "--quiet", "sinko"]).returncode == 0,
-                  "sinko scheduler is running")
     except OSError:
         pass
+    # "is-active" alone is true for the second before each crash of a scheduler that restarts over and over.
+    sched_state, sched_text = scheduler_status()
+    rep.check(sched_state in ("ok", "starting"), "sinko scheduler: " + sched_text)
     try:
         rep.check(ftl_config("webserver.serve_all") == "true", "webserver.serve_all is true")
         rep.check(ftl_config("webserver.api.cli_pw") == "true", "webserver.api.cli_pw is true")
-        webroot = ftl_config("webserver.paths.webroot")
-        rep.check(os.path.isfile(os.path.join(webroot, "pb", "app.js")), "web page installed in " + webroot)
+        webroot_path = ftl_config("webserver.paths.webroot")
+        problems = page_file_problems(webroot_path)
+        rep.check(not problems, "web page installed in %s%s" % (
+            webroot_path, " (missing: %s)" % ", ".join(problems[:3]) if problems else ""))
     except (OSError, subprocess.SubprocessError) as err:
         rep.fix("pihole-FTL CLI available (%s)" % err)
     state = None
+    api = None
     try:
         api = Api()
         api.login()
@@ -3057,9 +4096,10 @@ def cmd_doctor(args) -> int:
                     rep.check(resp.status == 200, "list server reachable (%s)" % base)
             except (OSError, urllib.error.URLError) as err:
                 rep.fix("list server reachable (%s: %s)" % (base, err))
-        api.logout()
     except (ApiError, OSError, ValueError) as err:
         rep.fix("Pi-hole API reachable (%s)" % err)
+    finally:
+        drop_session(api)
     health_checks(rep, state)
     return rep.finish()
 
@@ -3194,6 +4234,7 @@ def gather_diagnose(api: Api, catalog: dict, targets: list, now: float, sql=sql_
     lists = {l.get("comment"): l for l in api.lists() if (l.get("comment") or "").startswith(LIST_COMMENT_PREFIX)}
     facts["groups"] = groups
     facts["clients"] = clients
+    facts["service_ids"] = {s["id"] for s in catalog["services"]}
     try:
         facts["blocking"] = api.request("GET", "/api/dns/blocking").get("blocking")
     except ApiError:
@@ -3309,7 +4350,7 @@ def diagnose_findings(facts: dict) -> list:
                        and t["group"]["id"] not in e["groups"]]       # (a missing or disabled group is reported above)
             if not missing:
                 continue
-            names = ", ".join(group_names(e["groups"], groups)) if len(e["groups"]) < 8 else group_summary(e["groups"], groups)
+            names = ", ".join(group_names(e["groups"], groups)) if len(e["groups"]) < 8 else group_summary(e["groups"], groups, facts.get("service_ids"))
             where = "" if e["ip"] is None else " at %s" % e["ip"]
             apps = " and ".join(t["name"] for t in missing)
             if e["via"] != k["client"]:
@@ -3347,11 +4388,15 @@ def diagnose_findings(facts: dict) -> list:
     return found
 
 
-def group_summary(ids, groups: dict) -> str:
-    """'Default, pb-kids, pb-guard, pb-offline, 19/19 services' instead of every service group by name."""
+def group_summary(ids, groups: dict, service_ids=None) -> str:
+    """'Default, pb-kids, pb-guard, pb-offline, 19/19 services' instead of every service group by name. With
+    `service_ids` (the catalog's) only those services count: the group of a blocked service that only a newer release
+    knows is kept, and must not make it read 19/20."""
+    def known(name):
+        return service_ids is None or name[len(SVC_PREFIX):] in service_ids
     names = group_names(ids, groups)
-    svc_total = len([n for n in groups if n.startswith(SVC_PREFIX)])
-    svc = [n for n in names if n.startswith(SVC_PREFIX)]
+    svc_total = len([n for n in groups if n.startswith(SVC_PREFIX) and known(n)])
+    svc = [n for n in names if n.startswith(SVC_PREFIX) and known(n)]
     other = [n for n in names if not n.startswith(SVC_PREFIX)]
     return ", ".join(other + (["%d/%d service groups" % (len(svc), svc_total)] if svc or svc_total else []))
 
@@ -3383,7 +4428,7 @@ def render_diagnose(facts: dict, findings: list) -> list:
     add("\n".join("  %s: %s" % x for x in hits) if hits else "  none (%d enabled allow rule(s) in total)" % len(facts["allow_rules"]))
     add("\nClient rows")
     for c in facts["clients"]:
-        add("  %-22s %-14s %s" % (c["client"], (c.get("comment") or "")[:14], group_summary(c.get("groups", []), groups)))
+        add("  %-22s %-14s %s" % (c["client"], (c.get("comment") or "")[:14], group_summary(c.get("groups", []), groups, facts.get("service_ids"))))
     add("\nWhat Pi-hole applies to each child")
     if not facts["kids"]:
         add("  no child device is added")
@@ -3610,7 +4655,25 @@ def cmd_watch(args) -> int:
 
 def cmd_configure(args) -> int:
     apply_pihole_settings(read_config(), args.hostname, args.ip, args.remove_hostname, args.disable_web)
+    if not args.disable_web and not args.remove_hostname:
+        refresh_box_info(ip=args.ip or "default", force=True)       # the page learns the new address and name at once
     print("sinko: Pi-hole settings applied")
+    return 0
+
+
+def cmd_box_info(args) -> int:
+    """`sinko box-info [--write]`: print what /pb/box.json holds, or write it (nothing is written when the box has no
+    page folder: that is not an error)."""
+    if not args.write:
+        print(json.dumps(box_info(), indent=2))
+        return 0
+    try:
+        what = write_box_info(force=True)
+    except OSError as err:
+        print("sinko: could not write %s (%s)" % (BOX_INFO_FILE, short_text(err, 100)), file=sys.stderr)
+        return 1
+    print("sinko: %s" % ("there is no page folder to write %s into" % BOX_INFO_FILE if what == "nowhere"
+                         else "%s written" % BOX_INFO_FILE))
     return 0
 
 
@@ -3634,7 +4697,8 @@ def note_rollback(undone: str, restored: str) -> None:
     that failed in the last 7 days, so the box does not install the same release again the next night."""
     def mark(state):
         update = state["update"]
-        update.update(status="failed", to=undone, at=time.time(), error="Went back to %s by hand." % restored)
+        update.update(status="failed", to=undone, at=time.time(), error="Went back to %s by hand." % restored,
+                      rolledBack=True)                  # the older version was installed and passed its self-check
         update["from"] = restored
     try:
         api = Api()
@@ -3668,6 +4732,12 @@ def cmd_update(args) -> int:
         if release:
             print("Update available: Sinko %s (this box has %s). Install it with: sudo sinko update"
                   % (release["version"], VERSION))
+        elif kind == "tag" and not args.ref:
+            # A pinned box asks for its own release only: "the newest version" would be false when a newer one exists.
+            print("This box is pinned to %s (it has %s), so newer releases are not looked for. To follow the newest "
+                  "release again: sudo sinko update --ref latest" % (ref, VERSION))
+        elif kind == "tag":
+            print("Sinko %s is installed and %s is not newer." % (VERSION, ref))
         else:
             print("Sinko %s is the newest version." % VERSION)
         return 0
@@ -3684,16 +4754,41 @@ def cmd_update(args) -> int:
         return answer.strip().lower() in ("y", "yes")
     try:
         result = updater.update(ref=args.ref, force=args.force, confirm=confirm if asked else None)
-    except UpdateLocked as err:
+    except UpdateError as err:                 # UpdateLocked, or the folder the update works in cannot be used
         print("sinko: %s" % err, file=sys.stderr)
         return 1
     if result is None:
         print("Nothing was changed.")
         return 1
     if result["status"] == "ok":
+        if args.ref:
+            settle_pin(args.ref)
         return 0
     print("sinko: the update failed. %s" % result["error"], file=sys.stderr)
+    print("To see what is wrong with this box: sudo sinko doctor", file=sys.stderr)    # for the person at the keyboard
     return 1
+
+
+def settle_pin(ref: str, config_path=None) -> None:
+    """`sinko update --ref X` pins the box to X (the installer saved it when it ran; when it had nothing to install the
+    setting is saved here), so that "Update now" on the page and the nightly update follow X and not the newest
+    release. Say so, and how to follow releases again: without it a box can stay behind for good without anyone knowing."""
+    path = config_path or CONFIG_FILE
+    if (read_config(path).get("SINKO_REF") or "latest") != ref:
+        try:
+            write_config_value("SINKO_REF", ref, path)
+        except (OSError, ValueError) as err:
+            print("sinko: could not save the choice of %s in %s (%s)" % (ref, path, short_text(err, 80)), file=sys.stderr)
+            return
+    kind, _ = classify_ref(ref)
+    if kind == "latest":
+        print("This box follows the newest release again.")
+    elif kind == "tag":
+        print("This box is now pinned to %s: updates from the page and at night follow it, not the newest release. "
+              "To follow the newest release again: sudo sinko update --ref latest" % ref)
+    else:
+        print("This box now follows the development branch '%s' and is never offered releases. To follow the newest "
+              "release again: sudo sinko update --ref latest --force" % ref)
 
 
 def cmd_rollback(args) -> int:
@@ -3740,9 +4835,14 @@ def cmd_remove(args) -> int:
     api = Api()
     api.login()
     try:
+        try:
+            ensure_state_dir()
+            atomic_write(removed_flag(), "1\n")        # so that a scheduler that is still running does not set it all up again
+        except OSError as err:
+            log.warning("could not leave the note that Sinko was removed: %s", err)
         Controller(api, load_catalog()).remove()
     finally:
-        api.logout()
+        drop_session(api)
     print("sinko: removed its groups, lists, rules and kid devices from Pi-hole")
     return 0
 
@@ -3764,12 +4864,14 @@ def main(argv=None) -> int:
     p = sub.add_parser("update", help="update to the latest version")
     p.add_argument("--check", action="store_true", help="only say whether a newer version exists")
     p.add_argument("--yes", action="store_true", help="do not ask for confirmation")
-    p.add_argument("--ref", default=None, help="latest, a release such as v3.1.0, or a branch (default from the settings)")
+    p.add_argument("--ref", default=None, help="latest, a release such as v3.1.0, or a branch (default from the settings). "
+                   "Giving one pins the box to it: updates from the page and at night follow it. "
+                   "--ref latest follows the newest release again")
     p.add_argument("--force", action="store_true", help="install even if that version is not newer")
     p.add_argument("--from-panel", action="store_true", help=argparse.SUPPRESS)      # started by the scheduler
     p.set_defaults(fn=cmd_update)
     sub.add_parser("rollback", help="go back to the previous version stored on this box").set_defaults(fn=cmd_rollback)
-    p = sub.add_parser("selfcheck", help="quick check that the installation works (used after an update)")
+    p = sub.add_parser("selfcheck", help="check that the installation works (used after every update; the scheduler must have run for 20 seconds)")
     p.add_argument("--wait", type=float, default=0, help="keep trying for this many seconds while services start")
     p.set_defaults(fn=cmd_selfcheck)
     sub.add_parser("password-state", help=argparse.SUPPRESS).set_defaults(fn=cmd_password_state)
@@ -3787,9 +4889,13 @@ def main(argv=None) -> int:
     p.set_defaults(fn=cmd_use_mac)
     sub.add_parser("run", help="run the scheduler (systemd)").set_defaults(fn=cmd_run)
     sub.add_parser("status", help="print current state").set_defaults(fn=cmd_status)
-    p = sub.add_parser("telemetry", help="the optional anonymous counter (boxes online): on, off, status, payload, reset-id")
+    p = sub.add_parser("telemetry", help="the optional anonymous counter (boxes online): on, off (also makes the counter "
+                       "forget this box), status, payload, reset-id (forget the old id, make a new one)")
     p.add_argument("action", choices=["on", "off", "status", "payload", "reset-id"])
     p.set_defaults(fn=cmd_telemetry)
+    p = sub.add_parser("box-info", help="print what the page may know about this box (/pb/box.json), or write it")
+    p.add_argument("--write", action="store_true", help="write it into the page folder instead of printing it")
+    p.set_defaults(fn=cmd_box_info)
     sub.add_parser("doctor", help="check the installation").set_defaults(fn=cmd_doctor)
     sub.add_parser("remove", help="delete this add-on's Pi-hole objects").set_defaults(fn=cmd_remove)
     args = parser.parse_args(argv)
