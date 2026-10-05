@@ -17,10 +17,13 @@
 #                      generated; an update never chooses one). Better not to use it on a shared computer: a command
 #                      line with the password in it (also `sudo SINKO_PASSWORD=… bash`: sudo's own arguments) stays in
 #                      the shell history and shows in the process list while it runs. The installer removes it from
-#                      its environment at once and hands it to Pi-hole through Pi-hole's API, not through a command
-#                      line. Only when that does not work is Pi-hole's own `pihole setpassword` used: Pi-hole's program
-#                      takes a password as an argument and in no other way, so for a moment it is in that program's
-#                      arguments.
+#                      its own environment at once. How Pi-hole gets it depends on the Pi-hole:
+#                        * One that has no password yet (a new installation, a ready-made box nobody has claimed) gets it
+#                          through its API, in the body of a request on this machine: never on a command line.
+#                        * One that already has a password does not take a new one that way (it refuses configuration
+#                          changes from the installer's command-line session), so Pi-hole's own `pihole setpassword` is
+#                          used. Pi-hole's program takes a password as an argument and in no other way: for a moment the
+#                          password is in that program's arguments, which every local user can read in the process list.
 #   SINKO_HOSTNAME        local name for the page, default family.lan ("none" to skip)
 #   SINKO_UPSTREAMS       upstream DNS for a NEW Pi-hole, default 1.1.1.3,1.0.0.3
 #                      (Cloudflare for Families: also blocks malware and adult sites)
@@ -44,6 +47,9 @@
 #   SINKO_OS_UPDATES      0 = do not set up automatic Debian security updates (never a restart; left alone when
 #                      unattended-upgrades is already installed)
 #   SINKO_NONINTERACTIVE  1 = never prompt
+#
+# Exit status: 0 = done, 1 = failed (the log says why), 75 = not enough free disk space (nothing was changed: "sinko update"
+# can report that as a disk problem and not as a failed update).
 set -Eeuo pipefail
 shopt -s inherit_errexit   # also stop on failures inside $(…), e.g. a failed download
 
@@ -74,6 +80,7 @@ main() {
   LEGACY_LOG="$R/var/log/pihole-bahrain-install.log"
   LEGACY_UNITS=(pihole-bahrain.service pihole-bahrain-lists.service pihole-bahrain-lists.timer)
   MIGRATING=0 LEGACY_STOPPED=0 NEW_SCHEDULER_UP=0 EXISTING_INSTALL=0 PASSWORD_SHOWN=0
+  MIN_FREE_FIRST_MB=1024 MIN_FREE_UPDATE_MB=200     # free disk space needed (see preflight)
 
   mkdir -p "$(dirname "$LOG_FILE")"
   if [[ "${SINKO_REEXEC:-}" != 1 ]]; then
@@ -120,7 +127,9 @@ main() {
     SINKO_REEXEC=1 SINKO_SRC="$src" exec bash "$src/install.sh"
   fi
   SRC="$src"
-  VERSION="$(cat "$SRC/VERSION" 2>/dev/null || echo unknown)"
+  VERSION="$(tr -d '[:space:]' <"$SRC/VERSION" 2>/dev/null || echo unknown)"
+  # Only what a version looks like: it is written into the start page's addresses (see stamp_page), so nothing else may get in.
+  [[ "$VERSION" =~ ^[0-9A-Za-z._-]{1,40}$ ]] || die "The VERSION file of this release does not hold a version number ('${VERSION:0:40}'). Nothing was changed."
   ok "Installing version $VERSION from $SRC"
 
   ask_telemetry             # first, so that whoever is at the keyboard can leave after the questions
@@ -140,6 +149,7 @@ main() {
   install_services
   install_local_name
   install_os_updates
+  install_time_sync
   write_box_info "the settings and the local name are final now"
   step "Final check"
   "$BIN_LINK" doctor || warn "Some checks failed — see above. Run 'sudo sinko doctor' again later."
@@ -154,6 +164,7 @@ step() { printf '\n%s==>%s %s\n' "$B" "$N" "$*"; }
 ok()   { printf '  %s✓%s %s\n' "$G" "$N" "$*"; }
 warn() { printf '  %s!%s %s\n' "$Y" "$N" "$*"; }
 die()  { printf '\n%sError:%s %s\n' "$RD" "$N" "$*" >&2; exit 1; }
+die_with_status() { local code="$1"; shift; printf '\n%sError:%s %s\n' "$RD" "$N" "$*" >&2; exit "$code"; }
 on_error() {
   printf '\n%sInstallation failed%s (line %s). Full log: %s\n' "$RD" "$N" "$1" "$LOG_FILE" >&2
   printf 'It is safe to run the installer again after fixing the problem.\n' >&2
@@ -222,14 +233,29 @@ preflight() {
     *) warn "Architecture $(uname -m) is untested." ;;
   esac
   command -v systemctl >/dev/null || die "systemd is required."
-  local free_kb
-  free_kb="$(df -Pk "${SINKO_ROOT:-/}" | awk 'NR==2 {print $4}')"
-  (( free_kb > 1024 * 1024 )) || die "At least 1 GB of free disk space is needed."
-  ok "Disk space: $(( free_kb / 1024 )) MB free"
+  # sinko-lists.service runs gravity through flock, so that two gravity runs never write the same database at once.
+  [[ -x /usr/bin/flock ]] || die "flock (the util-linux package) is missing: install it with  apt-get install util-linux  and run the installer again."
+  # How much room a run needs depends on what it is. A first installation may install Pi-hole and its packages (1 GB, a
+  # round number with room to spare). An update, a rollback or a move from pihole-bahrain replaces a few MB of Sinko and
+  # needs far less: asking an update for 1 GB would fail it on a card that is merely well used, and the rollback that
+  # follows a failed update would fail on the same check. The update engine in bin/sinko uses the same 200 MB.
+  local free_kb need_mb free_mb
+  free_kb="$(LC_ALL=C df -Pk "${SINKO_ROOT:-/}" | awk 'NR==2 {print $4}')"
+  [[ "$free_kb" =~ ^[0-9]+$ ]] || die "Could not read how much disk space is free."
+  free_mb=$(( free_kb / 1024 ))
+  need_mb="$MIN_FREE_FIRST_MB"
+  if existing_installation; then need_mb="$MIN_FREE_UPDATE_MB"; fi
+  if (( free_kb <= need_mb * 1024 )); then
+    if (( need_mb == MIN_FREE_FIRST_MB )); then
+      die_with_status 75 "At least 1 GB of free disk space is needed to install Pi-hole and Sinko, and this device has $free_mb MB. Nothing was changed. Free some space, or use a bigger memory card."
+    fi
+    die_with_status 75 "At least $need_mb MB of free disk space is needed to update Sinko, and this device has $free_mb MB. Nothing was changed. Free some space (for example: sudo apt-get clean) and try again."
+  fi
+  ok "Disk space: $free_mb MB free"
 
   local missing=()
   for pkg in git curl ca-certificates python3 iproute2; do
-    dpkg -s "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
+    pkg_installed "$pkg" || missing+=("$pkg")
   done
   if (( ${#missing[@]} )); then
     step "Installing ${missing[*]}"
@@ -246,6 +272,17 @@ preflight() {
   ok "Python $pyver"
   # The internet is checked where it is needed (fetching the release, installing Pi-hole): an offline
   # "sinko rollback" or an install from SINKO_SRC must keep working.
+}
+
+# Is there an installation already (so that this run is an update, a rollback or the move from pihole-bahrain)? Looked at
+# before anything is changed: the scheduler's unit, or what pihole-bahrain left.
+existing_installation() {
+  local unit
+  if [[ -e "$UNIT_DIR/sinko.service" || -e "$LEGACY_APP" || -e "$LEGACY_CONF_DIR" ]]; then return 0; fi
+  for unit in "${LEGACY_UNITS[@]}"; do
+    if [[ -e "$UNIT_DIR/$unit" ]]; then return 0; fi
+  done
+  return 1
 }
 
 need_internet() {
@@ -434,11 +471,26 @@ load_settings() {
     || die "SINKO_TELEMETRY_URL '$SINKO_TELEMETRY_URL' must be an https:// address (plain http is only accepted for this machine itself)"
 }
 
-# Interactive installs ask once whether this box may be counted. Nobody asked (no terminal, SINKO_NONINTERACTIVE=1)
-# or no answer given (Ctrl-D): nothing is saved, and the parent page asks later.
+# Is a counter address set up for this box? Asked of the program itself, which is the one that decides what an address is
+# worth: the environment first, then the settings file, then the address built into the release (TELEMETRY_URL near the
+# top of bin/sinko: releasing.md puts it there before the tag), and an address that is not https (or http to this machine)
+# counts as none. `box-info` prints box.json's content, whose "counter" says exactly this. Nothing is sent and nothing is
+# written by it. Any trouble reads as "no": then the question is not asked (nothing is lost, the page asks later if the
+# box can count at all).
+counter_configured() {
+  local info
+  info="$(SINKO_CONFIG_FILE="$CONF_FILE" SINKO_TELEMETRY_URL="$SINKO_TELEMETRY_URL" python3 "$SRC/bin/sinko" box-info 2>/dev/null)" || return 1
+  python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("counter") is True else 1)' <<<"$info" 2>/dev/null
+}
+
+# Interactive installs ask once whether this box may be counted, but only when there is a counter to be counted in: a
+# build or a fork without a counter address can never send anything, and saying "this box will be counted" would be untrue.
+# Without an address nothing is said and nothing is saved. Nobody asked (no terminal, SINKO_NONINTERACTIVE=1) or no answer
+# given (Ctrl-D): nothing is saved, and the parent page asks later.
 ask_telemetry() {
   [[ -z "$SINKO_TELEMETRY" ]] || return 0
   can_prompt || return 0
+  counter_configured || return 0
   local answer
   step "Anonymous counter (optional)"
   printf '  Sinko can add this box to a public count of how many Sinko boxes are online. It sends only a random number,\n'
@@ -471,6 +523,30 @@ locate_source() {
     dir="$(cd "$(dirname "$self")" && pwd)"
   fi
   if [[ -n "$dir" ]] && tree_complete "$dir"; then
+    # The one way a pihole-bahrain 2.x box reaches Sinko is its own `pihole-bahrain update`: it clones the master branch into
+    # /opt/pihole-bahrain/src and runs the install.sh it finds there. That checkout is whatever master is at that moment
+    # (unreleased commits included), nobody has checked it against a checksum, and installing from it leaves no release copy
+    # behind (no /opt/sinko/src, no rollback tarball in the cache). A box that follows the releases (SINKO_REF is latest or
+    # a version: the 2.x default master was turned into latest by load_settings) therefore fetches the verified release
+    # instead, and the release's own installer (started by main, like in a one-liner) does the work; that also means the
+    # running installer no longer lives in the folder that is deleted at the end of the migration. When the release cannot
+    # be had (no release published yet, no connection) the checkout is used as before, with a note: the box then follows
+    # the releases from its next update on. Only a checkout inside the old program folder is treated like this: a git
+    # checkout anywhere else is a developer's or a DIY owner's own copy and is installed as it is.
+    if legacy_checkout "$dir" && [[ "$SINKO_REF" == latest || "$SINKO_REF" =~ ^v[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$ ]]; then
+      # In a subshell, so that a failed download only ends the attempt (its die() says what went wrong, as a note). Not
+      # inside an `if`: bash switches `set -e` off for everything that runs there, and a half-done unpack must stop it.
+      local got=0
+      set +e
+      ( set -e; trap - ERR; die() { warn "$*"; exit 1; }; fetch_release "$SINKO_REF" ) >&2
+      got=$?
+      set -e
+      if (( got == 0 )); then
+        echo "$APP_DIR/src"
+        return
+      fi
+      warn "The verified release could not be had now, so the copy that the old updater downloaded is installed (its version is $(tr -d '[:space:]' <"$dir/VERSION" 2>/dev/null || echo unknown)). 'sudo sinko update' moves to the newest release later." >&2
+    fi
     echo "$dir"
     return
   fi
@@ -481,6 +557,11 @@ locate_source() {
     fetch_branch >&2
   fi
   echo "$APP_DIR/src"
+}
+
+# Is this folder a git checkout inside the old program folder (what `pihole-bahrain update` leaves and runs)?
+legacy_checkout() {  # DIR
+  [[ ( "$1" == "$LEGACY_APP" || "$1" == "$LEGACY_APP"/* ) && -e "$1/.git" ]]    # -e: a worktree's .git is a file
 }
 
 tree_complete() {  # DIR
@@ -812,6 +893,19 @@ put() {  # mode source destination
   mv -f "$3.sinko-new" "$3"
 }
 
+# The start page, with the release's version put in where the template says @VERSION@ (the web folder's own files are not
+# touched: only this one has the marker). index.html names its scripts and its stylesheet with that version
+# (/pb/app.js?v=@VERSION@, ...): Pi-hole's web server lets a browser keep a static file for an hour, and a phone that was
+# showing the page while the box updated would otherwise get the new page (which a reload always revalidates) with the
+# OLD scripts and styles it still holds, and say "updated". A new release changes every one of those addresses, so every
+# file is fetched again; the web server ignores the part after the ?. Written under a temporary name and renamed over the
+# old page, like every other file the installer puts in place.
+stamp_page() {  # template destination (VERSION was checked at the start of the run: it goes into sed's replacement text)
+  sed "s/@VERSION@/$VERSION/g" "$1" >"$2.sinko-new"
+  chmod 644 "$2.sinko-new"
+  mv -f "$2.sinko-new" "$2"
+}
+
 # What an interrupted run can leave behind: temporary files, and a page folder swap that stopped half way.
 clean_interrupted_leftovers() {
   find "$APP_DIR" -name '*.sinko-new' -delete 2>/dev/null || true
@@ -891,7 +985,7 @@ install_files() {
   if [[ -d "$WEBROOT/pb" ]]; then mv "$WEBROOT/pb" "$WEBROOT/pb.old"; fi
   mv "$WEBROOT/pb.new" "$WEBROOT/pb"
   rm -rf "$WEBROOT/pb.old"
-  put 644 "$SRC/web/index.html" "$WEBROOT/index.html"
+  stamp_page "$SRC/web/index.html" "$WEBROOT/index.html"
   # The page reads /pb/box.json (address, version, heartbeat) at once: write it now, not at the scheduler's next round.
   write_box_info "the page is in place"
   sync
@@ -964,9 +1058,14 @@ print("-".join("".join(secrets.choice(a) for _ in range(4)) for _ in range(3)))'
 }
 
 # Gives Pi-hole the password through its API (PATCH /api/config on this machine): the password is read from standard
-# input and travels in the request body. Pi-hole's command line has no other way that hides it: `pihole-FTL --config
-# webserver.api.password <pw>` takes it only as an argument (and `pihole setpassword`, with or without an argument,
-# ends in that same command), and every local user can read a running program's arguments in /proc/<pid>/cmdline.
+# input and travels in the request body, never in a program's arguments. This works only for a Pi-hole that has NO password
+# yet: then nobody has to sign in (the parent page's welcome screen sets a password the same way). Once a password exists,
+# Pi-hole's FTL refuses every configuration change from a command-line session, which is the only kind of session this
+# installer could have (it knows /etc/pihole/cli_pw, not the parent's password): "The current CLI session is not allowed to
+# modify Pi-hole config settings" (HTTP 403, src/api/config.c in FTL's source). So there is no sign-in here at all. The
+# other way, `pihole-FTL --config webserver.api.password <pw>` and `pihole setpassword <pw>` (which ends in that same
+# command), takes the password as an argument, and every local user can read a running program's arguments in
+# /proc/<pid>/cmdline: that is the fallback, and the only way for a Pi-hole that already has a password.
 # Prints nothing and exits 1 when it did not work (apply_password then falls back to `pihole setpassword`).
 IFS= read -r -d '' SET_PASSWORD_PY <<'PYEOF' || true
 import json, os, ssl, sys, urllib.error, urllib.request
@@ -994,13 +1093,11 @@ ctx.check_hostname = False
 ctx.verify_mode = ssl.CERT_NONE
 
 
-def call(method, path, body=None, sid=None):
+def call(method, path, body=None):
     req = urllib.request.Request(base + path, method=method, data=None if body is None else json.dumps(body).encode())
     req.add_header("Accept", "application/json")
     if body is not None:
         req.add_header("Content-Type", "application/json")
-    if sid:
-        req.add_header("sid", sid)
     try:
         with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
             raw = resp.read()
@@ -1012,16 +1109,9 @@ def call(method, path, body=None, sid=None):
 try:
     status, answer = call("GET", "/api/auth")
     session = answer.get("session", {}) if isinstance(answer, dict) else {}
-    sid = None
-    if not (status == 200 and session.get("valid")):      # a password is set: sign in the way the sinko program does
-        with open(os.environ.get("SINKO_CLI_PW_FILE", "/etc/pihole/cli_pw"), encoding="utf-8") as fh:
-            cli_pw = fh.read().strip()
-        status, answer = call("POST", "/api/auth", {"password": cli_pw})
-        session = answer.get("session", {}) if isinstance(answer, dict) else {}
-        if status != 200 or not session.get("valid"):
-            sys.exit(1)
-        sid = session.get("sid")
-    status, _ = call("PATCH", "/api/config", {"config": {"webserver": {"api": {"password": password}}}}, sid)
+    if not (status == 200 and session.get("valid")):      # a password is set: this route is closed to us (see above)
+        sys.exit(1)
+    status, _ = call("PATCH", "/api/config", {"config": {"webserver": {"api": {"password": password}}}})
     sys.exit(0 if status == 200 else 1)
 except (OSError, ValueError):
     sys.exit(1)
@@ -1037,8 +1127,9 @@ apply_password() {  # password
   if set_password_via_api "${ports:-80}" <<<"$pw" && "$BIN_LINK" password-state >/dev/null 2>&1; then
     return 0
   fi
-  # Pi-hole's own command: it works wherever the API route did not (the password is briefly in its arguments).
-  echo "  (Pi-hole's API did not take the password: using 'pihole setpassword')"
+  # Pi-hole's own command: it works wherever the API route did not, which is every Pi-hole that already has a password. The
+  # password is then briefly in that program's arguments (the header of this file says so).
+  echo "  (Pi-hole's API did not take the password (it only does while Pi-hole has none): using 'pihole setpassword')"
   pihole setpassword "$pw" >/dev/null
 }
 
@@ -1130,11 +1221,23 @@ prove_scheduler() {
 # Packages. `apt-get update` fails when any one of the package sources cannot be reached (Armbian adds its own next to
 # Debian's), even though the lists of the others were refreshed and the package is there: so a failed update is a
 # warning, and the installation goes on when apt has a version to install.
+#
+# Everything of apt and dpkg whose output is read here is asked for in the C locale (LC_ALL=C): apt prints its labels in the
+# language of the user ("Candidate:" is "Installationskandidat:" in German, "Candidat :" in French, "Candidato:" in Spanish and
+# another word in Arabic), and a box whose owner chose another locale would otherwise look as if apt had nothing to install.
+# Only the one command is switched, not the installer: Pi-hole's installer and apt's messages keep the user's language.
 APT_UPDATED=0
 apt_has_candidate() {  # package: is there a version apt can install?
   local version
-  version="$(apt-cache policy "$1" 2>/dev/null | awk '/^ *Candidate:/ {print $2; exit}')"
+  version="$(LC_ALL=C apt-cache policy "$1" 2>/dev/null | awk '/^ *Candidate:/ {print $2; exit}')"
   [[ -n "$version" && "$version" != "(none)" ]]
+}
+# Is the package really installed? `dpkg -s` answers "yes" (exit status 0) for a package that was removed but not purged
+# ("deinstall ok config-files", which is what `apt remove avahi-daemon unattended-upgrades` leaves), and an installer that
+# believes it would leave the box without the local name and without security updates for good.
+# shellcheck disable=SC2016  # ${Status} is dpkg's own field name, not a variable of ours
+pkg_installed() {  # package
+  [[ "$(LC_ALL=C dpkg-query -W -f='${Status}' "$1" 2>/dev/null)" == "install ok installed" ]]
 }
 apt_install() {  # package... : 0 when installed
   if (( ! APT_UPDATED )); then
@@ -1157,7 +1260,7 @@ install_local_name() {
     ok "Skipped (SINKO_MDNS=0): the page is reachable by its address only"
     return 0
   fi
-  if dpkg -s avahi-daemon >/dev/null 2>&1; then
+  if pkg_installed avahi-daemon; then
     ok "avahi-daemon is already installed (left as it is)"
     return 0
   fi
@@ -1178,7 +1281,7 @@ install_os_updates() {
     ok "Skipped (SINKO_OS_UPDATES=0)"
     return 0
   fi
-  if dpkg -s unattended-upgrades >/dev/null 2>&1; then
+  if pkg_installed unattended-upgrades; then
     ok "Automatic updates are already set up (left as they are)"
     return 0
   fi
@@ -1212,6 +1315,39 @@ install_os_updates() {
   mv "$file.tmp" "$file"
   systemctl enable --now apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
   ok "Automatic security updates are on (no automatic restart)"
+}
+
+# The box has no battery-backed clock: after every power cut its time starts at the last moment it saved, and bedtime, the
+# timers, the check for updates and every https connection depend on the time being right. A time service sets it from the
+# network. One that is there (and switched on) is left alone, whatever it is. A box with none gets Debian's
+# systemd-timesyncd, unless another time service is installed but switched off: that is the owner's to switch on (installing
+# systemd-timesyncd next to it would remove it).
+TIME_UNITS="systemd-timesyncd.service chrony.service chronyd.service ntpsec.service ntp.service openntpd.service"
+TIME_PACKAGES="chrony ntpsec ntp openntpd"
+install_time_sync() {
+  step "Clock"
+  local unit pkg
+  for unit in $TIME_UNITS; do
+    if systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+      ok "The clock is kept right by ${unit%.service} (left as it is)"
+      return 0
+    fi
+  done
+  for pkg in $TIME_PACKAGES; do
+    if pkg_installed "$pkg"; then
+      warn "$pkg is installed but not switched on, so this box's clock can be wrong after a power cut. Switch it on: sudo systemctl enable --now $pkg"
+      return 0
+    fi
+  done
+  if ! pkg_installed systemd-timesyncd && ! apt_install systemd-timesyncd; then
+    warn "Could not install systemd-timesyncd (no internet?). Without a time service the clock can be wrong after a power cut; run the installer again later."
+    return 0
+  fi
+  if systemctl enable --now systemd-timesyncd.service >/dev/null 2>&1; then
+    ok "Installed systemd-timesyncd: the clock is set from the network"
+  else
+    warn "systemd-timesyncd is installed but could not be started (it does not run in some virtual machines and containers)."
+  fi
 }
 
 # The name avahi publishes: the host name of the system, without a domain.
