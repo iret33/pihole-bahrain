@@ -437,4 +437,35 @@ grep -q "WARNING: Sinko's groups" "$WORK/un4.out" || fail "--force did not warn 
 [[ ! -e "$ROOT/opt/sinko" && ! -e "$ROOT/var/lib/sinko" && ! -e "$ROOT/var/www/html/pb" && ! -e "$ROOT/etc/systemd/system/sinko.service" ]] || fail "--force did not remove the files"
 if bash "$REPO/uninstall.sh" --bogus >"$WORK/un5.out" 2>&1; then fail "an unknown option was accepted"; fi
 grep -q "unknown option" "$WORK/un5.out" || fail "no message for an unknown option"
+echo "--- the new scheduler has to prove that it works before the installation counts as finished"
+fresh_start
+echo kidsbox >"$ROOT/etc/hostname"
+printf 'PRETTY_NAME="Armbian 25.8 trixie"\nID=debian\n' >"$WORK/os-release"
+echo "    a scheduler that crashes again and again fails the installation, and is not switched on for the next start"
+touch "$WORK/sched-crashloop"
+if SINKO_SCHEDULER_WAIT=3 bash "$REPO/install.sh" >"$WORK/sched1.out" 2>&1; then cat "$WORK/sched1.out"; fail "an installation whose scheduler crashes again and again was reported as finished"; fi
+grep -q "FAIL  the scheduler service keeps stopping and being restarted" "$WORK/sched1.out" || { cat "$WORK/sched1.out"; fail "the failed check is not shown"; }
+grep -q "The new scheduler does not work" "$WORK/sched1.out" || fail "no explanation of what failed"
+grep -q "journalctl -u sinko" "$WORK/sched1.out" || fail "no hint where to look"
+grep -q "Sinko is ready" "$WORK/sched1.out" && fail "'Sinko is ready' was printed although the scheduler does not work"
+[[ ! -e "$WORK/units/sinko.service.enabled" && ! -e "$WORK/units/sinko-lists.timer.enabled" ]] || fail "the scheduler was switched on for the next start before it had proved that it works"
+rm -f "$WORK/sched-crashloop"
+echo "    run again with a working scheduler, the installation finishes and switches it on"
+bash "$REPO/install.sh" >"$WORK/sched2.out" 2>&1 || { cat "$WORK/sched2.out"; fail "the run after the problem was fixed failed"; }
+grep -q "ok    the scheduler service has run for" "$WORK/sched2.out" || fail "the scheduler check is not in the output"
+[[ -e "$WORK/units/sinko.service.enabled" && -e "$WORK/units/sinko-lists.timer.enabled" ]] || fail "the working scheduler was not switched on"
+echo "    right after its start the scheduler reads as 'starting': the installer waits for it"
+echo 1 >"$WORK/sched-starting"
+bash "$REPO/install.sh" >"$WORK/sched3.out" 2>&1 || { cat "$WORK/sched3.out"; fail "a scheduler that was still starting failed the installation"; }
+grep -q "ok    the scheduler service has run for" "$WORK/sched3.out" || fail "the installer did not wait until the scheduler had proved itself"
+rm -f "$WORK/sched-starting"
+echo "    ... but not for ever: one that is still 'starting' when the time is up fails it"
+echo 99 >"$WORK/sched-starting"
+if SINKO_SCHEDULER_WAIT=4 bash "$REPO/install.sh" >"$WORK/sched4.out" 2>&1; then cat "$WORK/sched4.out"; fail "a scheduler that never got past 'starting' was accepted"; fi
+grep -q "FAIL  the scheduler service started" "$WORK/sched4.out" || { cat "$WORK/sched4.out"; fail "the reason is not shown"; }
+rm -f "$WORK/sched-starting"
+echo "    an update (the scheduler is switched on already) that makes it crash fails too, so that the updater puts the old version back"
+touch "$WORK/sched-crashloop"
+if SINKO_SCHEDULER_WAIT=3 bash "$REPO/install.sh" >"$WORK/sched5.out" 2>&1; then fail "an update whose scheduler crashes again and again was reported as finished"; fi
+rm -f "$WORK/sched-crashloop"
 echo "installer tests passed"

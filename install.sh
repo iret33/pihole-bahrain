@@ -157,10 +157,19 @@ on_error() {
 # bedtime and timers would silently stop. The old units are only stopped (never disabled) until the new scheduler runs,
 # so a power cut or a kill that skips this function still brings the old scheduler back at the next start.
 # This must not look at the exit status: when the shell is ended by a signal (Ctrl-C, a dropped SSH session, kill) the
-# status seen here is 0. NEW_SCHEDULER_UP is set on every path that ends well.
+# status seen here is 0. NEW_SCHEDULER_UP is set once the new scheduler has proved that it works (install_services), and
+# that is the only moment the old units are given up.
+# The new scheduler is switched off first when it was already started: two schedulers must never work on the same
+# Pi-hole groups (the old one would also wipe the settings of the new one that it does not know).
+# SIGPIPE is ignored first. When the whole process group is ended (Ctrl-C, a closed terminal, kill), the copy of the
+# output that goes to the log (tee) is ended with the installer, and the first thing bash then writes to its own
+# output, a note such as "Terminated" about the program that was running, fails with a broken pipe and would end the
+# shell by SIGPIPE in the middle of this function: only the first command of it would run (found by the migration test).
 on_exit() {
+  trap '' PIPE
   if [[ "$LEGACY_STOPPED" == 1 && "$NEW_SCHEDULER_UP" != 1 ]]; then
     local unit
+    systemctl disable --now sinko.service sinko-lists.timer >/dev/null 2>&1 || true
     for unit in pihole-bahrain.service pihole-bahrain-lists.timer; do
       if [[ -f "$UNIT_DIR/$unit" ]]; then systemctl enable --now "$unit" >/dev/null 2>&1 || true; fi
     done
@@ -1055,12 +1064,35 @@ install_services() {
   fi
   sync                          # the unit files are on disk before systemd reads them (an empty unit file is a masked unit)
   systemctl daemon-reload
-  systemctl enable --quiet sinko.service sinko-lists.timer
+  # Started now, switched on for the next start only once it has proved that it works (below): until then a power cut
+  # brings back the scheduler the box had before (the old one on a box that is being migrated), never one that may
+  # crash again and again.
   systemctl restart sinko.service
+  prove_scheduler
+  systemctl enable --quiet sinko.service sinko-lists.timer
   systemctl restart sinko-lists.timer
   NEW_SCHEDULER_UP=1
   remove_legacy_units
   ok "Scheduler running; lists refresh every night"
+}
+
+# The scheduler has just been started. Bedtime, timers and updates depend on it, so the installation is not finished
+# until the program's own self-check says that it works: the scheduler has stayed up (systemd has not had to restart it
+# again and again) and has finished its passes over Pi-hole, and Pi-hole, the groups, the lists and the page are in order.
+# Right after a start the scheduler reads as "starting" for about 20 seconds and needs a second pass after that, so the
+# self-check is repeated (it does that itself, with --wait) for up to SINKO_SCHEDULER_WAIT seconds; a scheduler that
+# crashes over and over never gets there. That is the same self-check, with the same patience, that "sinko update" applies
+# before it keeps an update. SINKO_SCHEDULER_WAIT is a test hook.
+prove_scheduler() {
+  local wait="${SINKO_SCHEDULER_WAIT:-90}"
+  [[ "$wait" =~ ^[0-9]{1,4}$ ]] || wait=90
+  step "Checking that the scheduler works (up to $wait seconds)"
+  "$BIN_LINK" selfcheck --wait "$wait" && return 0
+  # A box that is being migrated keeps its old version running: on_exit switches the new scheduler off again and starts
+  # the old one (nothing of the old version has been removed yet).
+  local kept=""
+  if (( MIGRATING )); then kept="The previous version keeps running. "; fi
+  die "The new scheduler does not work (see the lines above: FAIL marks what is wrong). ${kept}Nothing was removed, and the installer can be run again once the problem is fixed. Details: sudo journalctl -u sinko -n 50 --no-pager"
 }
 
 # Packages. `apt-get update` fails when any one of the package sources cannot be reached (Armbian adds its own next to

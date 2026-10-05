@@ -255,6 +255,32 @@ rm -f "$WORK/pihole-g-fail"
 run_migration rerun || { cat "$WORK/rerun.out"; fail "rerunning the migration failed"; }
 [[ ! -e "$ROOT/opt/pihole-bahrain" && -e "$WORK/units/sinko.service.enabled" && ! -e "$WORK/units/pihole-bahrain.service.enabled" ]] || fail "the rerun did not complete the migration"
 
+echo "--- the new scheduler crashes again and again: the old version keeps running, and nothing of it is removed"
+fresh_start
+build_legacy <<EOF
+PB_HOSTNAME=family.lan
+PB_REF=master
+EOF
+echo "$OLD_PAGE" >"$ROOT/var/www/html/index.html"
+touch "$WORK/sched-crashloop"
+if run_migration crashing-scheduler SINKO_SCHEDULER_WAIT=3; then cat "$WORK/crashing-scheduler.out"; fail "a migration whose new scheduler crashes again and again was reported as finished"; fi
+grep -q "The new scheduler does not work" "$WORK/crashing-scheduler.out" || { cat "$WORK/crashing-scheduler.out"; fail "no explanation of what failed"; }
+grep -q "The previous version keeps running" "$WORK/crashing-scheduler.out" || fail "no note that the previous version keeps running"
+[[ -e "$WORK/units/pihole-bahrain.service.enabled" && -e "$WORK/units/pihole-bahrain.service.active" \
+   && -e "$WORK/units/pihole-bahrain-lists.timer.enabled" && -e "$WORK/units/pihole-bahrain-lists.timer.active" ]] \
+  || fail "the old scheduler does not run after the new one failed to prove itself"
+[[ ! -e "$WORK/units/sinko.service.enabled" && ! -e "$WORK/units/sinko.service.active" \
+   && ! -e "$WORK/units/sinko-lists.timer.enabled" && ! -e "$WORK/units/sinko-lists.timer.active" ]] \
+  || fail "the new scheduler was left on next to the old one (two schedulers on the same Pi-hole groups)"
+[[ -d "$ROOT/opt/pihole-bahrain" && -d "$ROOT/etc/pihole-bahrain" && -f "$ROOT/etc/systemd/system/pihole-bahrain.service" \
+   && -L "$ROOT/usr/local/bin/pihole-bahrain" ]] || fail "something of the old version was removed although the new one does not work"
+grep -q "Removed the old version's files" "$WORK/crashing-scheduler.out" && fail "the old files were removed after a failed check"
+echo "    after the problem is fixed, the same command completes the migration"
+rm -f "$WORK/sched-crashloop"
+run_migration crashing-rerun || { cat "$WORK/crashing-rerun.out"; fail "the migration did not complete after the problem was fixed"; }
+[[ ! -e "$ROOT/opt/pihole-bahrain" && -e "$WORK/units/sinko.service.enabled" && -e "$WORK/units/sinko.service.active" \
+   && ! -e "$WORK/units/pihole-bahrain.service.enabled" && ! -e "$WORK/units/pihole-bahrain.service.active" ]] || fail "the rerun did not complete the migration"
+
 echo "--- the installer is ended in the middle of gravity (the long step): the old scheduler is never left disabled"
 # kill_installer_during_gravity SIGNAL: starts the migration with "pihole -g" hanging, waits until it hangs, sends the signal.
 kill_installer_during_gravity() {
@@ -283,8 +309,12 @@ kill_installer_during_gravity KILL
 [[ ! -e "$WORK/units/sinko.service.enabled" ]] || fail "the new scheduler was enabled by a killed run"
 for signal in TERM HUP; do
   kill_installer_during_gravity "$signal"
-  [[ -e "$WORK/units/pihole-bahrain.service.enabled" && -e "$WORK/units/pihole-bahrain.service.active" && -e "$WORK/units/pihole-bahrain-lists.timer.enabled" ]] \
-    || { cat "$WORK/kill-$signal.out"; fail "after $signal the old scheduler was not started again"; }
+  # Both old units, not only the first one: the output copy to the log (tee) is ended with the installer, and bash would
+  # then die of SIGPIPE at the first note it writes ("Terminated"), in the middle of the function that starts them again.
+  [[ -e "$WORK/units/pihole-bahrain.service.enabled" && -e "$WORK/units/pihole-bahrain.service.active" \
+     && -e "$WORK/units/pihole-bahrain-lists.timer.enabled" && -e "$WORK/units/pihole-bahrain-lists.timer.active" ]] \
+    || { cat "$WORK/kill-$signal.out"; ls "$WORK/units"; fail "after $signal the old scheduler and its list timer were not both started again"; }
+  [[ ! -e "$WORK/units/sinko.service.enabled" && ! -e "$WORK/units/sinko.service.active" ]] || fail "the new scheduler runs next to the old one after $signal"
   [[ -d "$ROOT/opt/pihole-bahrain" ]] || fail "the old folder was removed after $signal"       # (no note on the screen: tee got the signal too)
 done
 

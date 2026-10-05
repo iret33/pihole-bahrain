@@ -30,6 +30,7 @@ fake_system_init() {
   export PATH="$STUBS:$PATH" SINKO_ROOT="$ROOT" SINKO_NONINTERACTIVE=1
   export SINKO_API_URL="http://127.0.0.1:$PORT" SINKO_CLI_PW_FILE="$WORK/cli_pw"
   export SINKO_APP_DIR="$ROOT/opt/sinko" SINKO_CONFIG_FILE="$ROOT/etc/sinko/config" SINKO_STATE_DIR="$ROOT/var/lib/sinko"
+  export SINKO_RUN_DIR="$WORK/run"          # where the scheduler's heartbeat would be (the stub of systemctl writes it)
   touch "$ROOT/etc/pihole/pihole.toml"
   command -v pihole-FTL >/dev/null || fail "stub missing"
 }
@@ -114,10 +115,12 @@ echo "systemctl $*" >>"$WORK/calls.log"
 # Every program the installer starts must find the parent password out of its environment (see test_install.sh).
 [[ -z "${SINKO_PASSWORD+x}${PB_PASSWORD+x}" ]] || echo "systemctl $*" >>"$WORK/password-in-env"
 mkdir -p "$WORK/units"
-cmd=""; units=(); now=0
+cmd=""; units=(); now=0; props=(); skip=0
 for a in "$@"; do
+  if (( skip )); then props+=("$a"); skip=0; continue; fi
   case "$a" in
     --now) now=1 ;;
+    -p) skip=1 ;;
     -*) ;;
     *) if [[ -z "$cmd" ]]; then cmd="$a"; else units+=("$a"); fi ;;
   esac
@@ -126,6 +129,48 @@ norm() { case "$1" in *.*) echo "$1" ;; *) echo "$1.service" ;; esac; }
 case "$cmd" in
   is-active)  u="$(norm "${units[0]}")"; if [[ -e "$WORK/units/$u.active" ]]; then echo active; exit 0; else echo inactive; exit 3; fi ;;
   is-enabled) u="$(norm "${units[0]}")"; if [[ -e "$WORK/units/$u.enabled" ]]; then echo enabled; exit 0; else echo disabled; exit 1; fi ;;
+  # show -p ActiveState -p ActiveEnterTimestampMonotonic -p MainPID -p NRestarts UNIT: what the program's scheduler check
+  # reads. A scheduler that was started is healthy: up for a long time, no restarts, and it has finished passes (the stub
+  # writes the heartbeat the real scheduler would have written, with the version of the installed release).
+  # Switches for a test: $WORK/sched-crashloop (restarted again and again: up 3 s, 3 restarts, no heartbeat),
+  # $WORK/sched-starting (a number: that many answers say "started 5 s ago, no pass yet", then it is healthy),
+  # $WORK/sched-age (seconds the unit has been up).
+  show) u="$(norm "${units[0]}")"
+        python3 - "$WORK" "$u" "${SINKO_RUN_DIR:-$WORK/run}" "$ROOT/opt/sinko/VERSION" "${props[@]}" <<'PYEOF2'
+import json, os, sys, time
+work, unit, run_dir, version_file = sys.argv[1:5]
+def flag(name):
+    return os.path.exists(os.path.join(work, name))
+active = os.path.exists(os.path.join(work, "units", unit + ".active"))
+age, restarts, beat = 100, 0, True
+if unit == "sinko.service" and active:
+    if flag("sched-age"):
+        age = float(open(os.path.join(work, "sched-age")).read().strip())
+    if flag("sched-crashloop"):
+        age, restarts, beat = 3, 3, False
+    elif flag("sched-starting"):
+        path = os.path.join(work, "sched-starting")
+        left = int(open(path).read().strip() or "1")
+        if left > 0:
+            age, beat = 5, False
+            open(path, "w").write(str(left - 1))
+now = time.monotonic()
+props = {"ActiveState": "active" if active else "inactive",
+         "ActiveEnterTimestampMonotonic": int((now - age) * 1e6) if active else 0,
+         "MainPID": 4242 if active else 0, "NRestarts": restarts}
+if unit == "sinko.service" and active and beat:
+    try:
+        version = open(version_file).read().strip()
+    except OSError:
+        version = ""
+    os.makedirs(run_dir, exist_ok=True)
+    with open(os.path.join(run_dir, "heartbeat.json"), "w") as fh:
+        json.dump({"v": 1, "pid": 4242, "version": version, "ticks": 5, "mono": now}, fh)
+for key in sys.argv[5:] or props:
+    if key in props:
+        print("%s=%s" % (key, props[key]))
+PYEOF2
+        exit 0 ;;
   start|restart) for u in "${units[@]}"; do touch "$WORK/units/$(norm "$u").active"; done
                  # $WORK/ftl-makes-cert: Pi-hole's FTL writes its HTTPS key and certificate when it starts without them.
                  if [[ -e "$WORK/ftl-makes-cert" && " ${units[*]} " == *" pihole-FTL.service "* ]]; then
@@ -373,6 +418,8 @@ make_release() {
     cp -a "$from/$p" "$stage/sinko/$p"
   done
   printf '%s\n' "$version" >"$stage/sinko/VERSION"
+  # The program of a release says which release it is (the installer's self-check compares it with the page's version).
+  sed -i "s/^VERSION = \"[^\"]*\"/VERSION = \"$version\"/" "$stage/sinko/bin/sinko"
   tar -C "$stage" --sort=name --owner=0 --group=0 --numeric-owner -cf - sinko | gzip -n -9 >"$out/sinko.tar.gz"
   ( cd "$out" && sha256sum sinko.tar.gz >sinko.tar.gz.sha256 )
   rm -rf "$stage"
@@ -385,7 +432,8 @@ fresh_start() {
     "$WORK/ftl-fail" "$WORK/password-stuck" "$WORK/password-needs-pwhash" "$WORK/keygen-fail" "$WORK/sshd-open" \
     "$WORK/pihole-g-block" "$WORK/pihole-g-fail" "$WORK/pihole-g-started" "$WORK/pihole-g-pid" "$WORK/apt-update-fail" "$WORK/apt-nocandidate" \
     "$WORK/py-old" "$WORK/password-in-env" "$WORK/curl.log" "$WORK/ftl-makes-cert" "$WORK/ftl-cert-fail" \
-    "$WORK/ip-static" "$WORK/ftl-stop-fails" "$WORK/credential-stuck"
+    "$WORK/ip-static" "$WORK/ftl-stop-fails" "$WORK/credential-stuck" "$WORK/sched-crashloop" "$WORK/sched-starting" "$WORK/sched-age" \
+    "$WORK/run" "$WORK/setpassword-needs-stdin"
   mkdir -p "$ROOT/etc/pihole" "$ROOT/etc/ssh" "$ROOT/var/www/html" "$ROOT/var/log" "$WORK/units"
   touch "$ROOT/etc/pihole/pihole.toml" "$WORK/units/pihole-FTL.service.active" "$WORK/units/pihole-FTL.service.enabled"
   : >"$WORK/calls.log"
