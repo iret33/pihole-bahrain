@@ -504,7 +504,7 @@ echo "    a scheduler that crashes again and again fails the installation, and i
 touch "$WORK/sched-crashloop"
 if SINKO_SCHEDULER_WAIT=3 bash "$REPO/install.sh" >"$WORK/sched1.out" 2>&1; then cat "$WORK/sched1.out"; fail "an installation whose scheduler crashes again and again was reported as finished"; fi
 grep -q "FAIL  the scheduler service keeps stopping and being restarted" "$WORK/sched1.out" || { cat "$WORK/sched1.out"; fail "the failed check is not shown"; }
-grep -q "The new scheduler does not work" "$WORK/sched1.out" || fail "no explanation of what failed"
+grep -q "The new scheduler could not be proven to work" "$WORK/sched1.out" || fail "no explanation of what failed"
 grep -q "journalctl -u sinko" "$WORK/sched1.out" || fail "no hint where to look"
 grep -q "Sinko is ready" "$WORK/sched1.out" && fail "'Sinko is ready' was printed although the scheduler does not work"
 [[ ! -e "$WORK/units/sinko.service.enabled" && ! -e "$WORK/units/sinko-lists.timer.enabled" ]] || fail "the scheduler was switched on for the next start before it had proved that it works"

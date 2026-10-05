@@ -269,7 +269,7 @@ build_plan() {
   gdir="$(dirname "$gravity")"
   local -a pfiles=()
   mapfile -t pfiles < <(existing "$db" "$db-wal" "$db-shm" "$db-journal" "$tmpdb" "$tmpdb-wal" "$tmpdb-shm" "$tmpdb-journal" \
-                                 "$gdir/gravity_old.db" "$gdir/gravity_backups" "$R/etc/pihole/config_backups")
+                                 "$gdir/gravity_old.db" "$gdir/gravity_backups" "$R/etc/pihole/config_backups" "$R/etc/pihole/migration_backup_v6")
   list="$(join_list "${pfiles[@]}")"
   add_action "Stop Pi-hole's FTL and delete the query history, Pi-hole's saved older settings (they hold the old password hash) and its older gravity databases (they list the test devices)${list:+: $list} (FTL stays stopped: the box is powered off next)" act_wipe_pihole "$db" "$tmpdb" "$gdir"
 
@@ -467,7 +467,7 @@ act_wipe_pihole() {  # query database, FTL's temporary database, the folder of t
   # Their folders stay (FTL and gravity make them again); what is in them goes: every earlier version of pihole.toml
   # (a seal's own settings changes push the one with the seller's password hash into it) and every earlier gravity database.
   local dir
-  for dir in "$R/etc/pihole/config_backups" "$gdir/gravity_backups"; do
+  for dir in "$R/etc/pihole/config_backups" "$gdir/gravity_backups" "$R/etc/pihole/migration_backup_v6"; do
     if [[ -d "$dir" ]]; then find "$dir" -mindepth 1 -type f -delete; fi
   done
   echo "  deleted"
@@ -543,9 +543,12 @@ verify_core() {
   compgen -G "$R/etc/ssh/ssh_host_*" >/dev/null && problem "SSH host keys are still there"
   [[ ! -s "$R/etc/machine-id" ]] || problem "the machine id is not empty"
   [[ -z "$(existing "$TLS_CERT" "${TLS_CERT%.pem}.crt" "${TLS_CERT%.pem}_ca.crt")" ]] || problem "Pi-hole's HTTPS private key or certificate is still there"
-  if [[ -d "$R/etc/pihole/config_backups" ]] && [[ -n "$(find "$R/etc/pihole/config_backups" -mindepth 1 -type f -print -quit)" ]]; then
-    problem "Pi-hole's saved older settings (config_backups, with the old password hash) are still there"
-  fi
+  local backups
+  for backups in config_backups migration_backup_v6; do       # the second is what Pi-hole keeps of a version 5 setup (setupVars.conf: its password hash)
+    if [[ -d "$R/etc/pihole/$backups" ]] && [[ -n "$(find "$R/etc/pihole/$backups" -mindepth 1 -type f -print -quit)" ]]; then
+      problem "Pi-hole's saved older settings ($backups, with the old password hash) are still there"
+    fi
+  done
   [[ -z "$(autologin_files)" ]] || problem "the console still logs root in without a password"
   [[ -z "$(wifi_files)" ]] || problem "a saved Wi-Fi network is still there"
   [[ -z "$(leftover_secrets)" ]] || problem "a network secret is still in a file: $(leftover_secrets | head -n1)"

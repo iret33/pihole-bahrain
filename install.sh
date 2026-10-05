@@ -13,10 +13,14 @@
 # Optional settings (environment variables, e.g. `curl … | sudo SINKO_HOSTNAME=kids.home bash`).
 # What you set once is saved in /etc/sinko/config and kept by later runs and updates (except the password, which only
 # Pi-hole keeps).
-#   SINKO_PASSWORD        parent password. Otherwise you are asked (or one is generated). Better not to use it on a
-#                      shared computer: a command line with the password in it stays in the shell history and shows
-#                      in the process list while it runs. The installer removes it from its environment at once and
-#                      hands it to Pi-hole through Pi-hole's API, not through a command line.
+#   SINKO_PASSWORD        parent password. Otherwise you are asked (or, on a new installation nobody is watching, one is
+#                      generated; an update never chooses one). Better not to use it on a shared computer: a command
+#                      line with the password in it (also `sudo SINKO_PASSWORD=… bash`: sudo's own arguments) stays in
+#                      the shell history and shows in the process list while it runs. The installer removes it from
+#                      its environment at once and hands it to Pi-hole through Pi-hole's API, not through a command
+#                      line. Only when that does not work is Pi-hole's own `pihole setpassword` used: Pi-hole's program
+#                      takes a password as an argument and in no other way, so for a moment it is in that program's
+#                      arguments.
 #   SINKO_HOSTNAME        local name for the page, default family.lan ("none" to skip)
 #   SINKO_UPSTREAMS       upstream DNS for a NEW Pi-hole, default 1.1.1.3,1.0.0.3
 #                      (Cloudflare for Families: also blocks malware and adult sites)
@@ -237,7 +241,7 @@ preflight() {
   local pyver
   pyver="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"
   if [[ ! "$pyver" =~ ^([0-9]+)\.([0-9]+)$ ]] || (( BASH_REMATCH[1] < 3 || (BASH_REMATCH[1] == 3 && BASH_REMATCH[2] < 9) )); then
-    die "Sinko needs Python 3.9 or newer, and this system has ${pyver:-no working Python 3}. Use a newer system image (Debian 11 or newer, Ubuntu 20.04 or newer)."
+    die "Sinko needs Python 3.9 or newer, and this system has ${pyver:-no working Python 3}. Use a newer system image (Debian 11 or newer, Ubuntu 22.04 or newer)."
   fi
   ok "Python $pyver"
   # The internet is checked where it is needed (fetching the release, installing Pi-hole): an offline
@@ -1120,7 +1124,7 @@ prove_scheduler() {
   # the old one (nothing of the old version has been removed yet).
   local kept=""
   if (( MIGRATING )); then kept="The previous version keeps running. "; fi
-  die "The new scheduler does not work (see the lines above: FAIL marks what is wrong). ${kept}Nothing was removed, and the installer can be run again once the problem is fixed. Details: sudo journalctl -u sinko -n 50 --no-pager"
+  die "The new scheduler could not be proven to work: a check failed (the line marked FAIL above says which). ${kept}Nothing was removed, and the installer can be run again once the problem is fixed. Details: sudo journalctl -u sinko -n 50 --no-pager"
 }
 
 # Packages. `apt-get update` fails when any one of the package sources cannot be reached (Armbian adds its own next to

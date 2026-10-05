@@ -67,6 +67,8 @@ make_golden() {
   mkdir -p "$ROOT/etc/pihole/config_backups" "$ROOT/etc/pihole/gravity_backups"
   echo 'pwhash = "$BALLOON-SHA256$seller-hash"' >"$ROOT/etc/pihole/config_backups/pihole.toml.1"
   echo "database old" >"$ROOT/etc/pihole/gravity_old.db"; echo "database older" >"$ROOT/etc/pihole/gravity_backups/gravity.db.2"
+  # What Pi-hole keeps of a version 5 setup when it is upgraded (setupVars.conf holds its password hash).
+  mkdir -p "$ROOT/etc/pihole/migration_backup_v6"; echo 'WEBPASSWORD=seller-hash' >"$ROOT/etc/pihole/migration_backup_v6/setupVars.conf"
   echo "database tmp" >"$ROOT/etc/pihole/pihole-tmp.db"; echo "pihole install log" >"$ROOT/etc/pihole/install.log"
   # A two-factor secret and an application password somebody set in Pi-hole's admin page.
   pihole-FTL --config webserver.api.totp_secret JBSWY3DPEHPK3PXP; pihole-FTL --config webserver.api.app_pwhash '$BALLOON-SHA256$app-hash'
@@ -128,7 +130,7 @@ bash "$SEAL" --dry-run >"$WORK/dry.out" 2>&1 || { cat "$WORK/dry.out"; fail "dry
 for shown in "Sara, Omar" "pihole-FTL.db" "ssh_host_ed25519_key" "$ROOT/root/.bash_history" "$ROOT/home/pi/.bash_history" \
              "$ROOT/root/.ssh/authorized_keys" "$ROOT/root/.not_logged_in_yet" "/etc/machine-id" "install-id" "initial-password" \
              "Set the host name to sinko" "hardware watchdog" "anonymous-counter" "welcome screen" "random-seed" \
-             "tls.pem" "tls_ca.crt" "config_backups" "gravity_old.db" "gravity_backups" "pihole-tmp.db" "two-factor secret" "application password" \
+             "tls.pem" "tls_ca.crt" "config_backups" "migration_backup_v6" "gravity_old.db" "gravity_backups" "pihole-tmp.db" "two-factor secret" "application password" \
              "getty@.service.d/override.conf" "serial-getty@.service.d/override.conf" "30-wifis-dhcp.yaml" "HomeNet.nmconnection" \
              "wpa_supplicant.conf" "secret_key" "$ROOT/var/log.hdd" "Write zeros over the free space" "Lock the root password" \
              "armbian_first_run.txt.off"; do
@@ -181,7 +183,7 @@ grep -q 'pihole-FTL --config webserver.api.password <empty>' "$WORK/calls.log" |
 echo "    Pi-hole's HTTPS key and certificates are gone (every box makes its own), FTL was stopped before and not started again"
 for tls in tls.pem tls.crt tls_ca.crt; do [[ ! -e "$ROOT/etc/pihole/$tls" ]] || fail "$tls is still there: every box would serve HTTPS with the golden unit's private key"; done
 echo "    the seller's old settings, older gravity databases and the temporary database are gone; the folders stay"
-for residue in config_backups/pihole.toml.1 gravity_old.db gravity_backups/gravity.db.2 pihole-tmp.db install.log; do
+for residue in config_backups/pihole.toml.1 migration_backup_v6/setupVars.conf gravity_old.db gravity_backups/gravity.db.2 pihole-tmp.db install.log; do
   [[ ! -e "$ROOT/etc/pihole/$residue" ]] || fail "$residue is still there (it holds the seller's password hash or the test devices)"
 done
 [[ -d "$ROOT/etc/pihole/config_backups" && -d "$ROOT/etc/pihole/gravity_backups" ]] || fail "a Pi-hole folder was removed (only what is in it may go)"

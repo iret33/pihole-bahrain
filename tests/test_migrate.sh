@@ -264,7 +264,7 @@ EOF
 echo "$OLD_PAGE" >"$ROOT/var/www/html/index.html"
 touch "$WORK/sched-crashloop"
 if run_migration crashing-scheduler SINKO_SCHEDULER_WAIT=3; then cat "$WORK/crashing-scheduler.out"; fail "a migration whose new scheduler crashes again and again was reported as finished"; fi
-grep -q "The new scheduler does not work" "$WORK/crashing-scheduler.out" || { cat "$WORK/crashing-scheduler.out"; fail "no explanation of what failed"; }
+grep -q "The new scheduler could not be proven to work" "$WORK/crashing-scheduler.out" || { cat "$WORK/crashing-scheduler.out"; fail "no explanation of what failed"; }
 grep -q "The previous version keeps running" "$WORK/crashing-scheduler.out" || fail "no note that the previous version keeps running"
 [[ -e "$WORK/units/pihole-bahrain.service.enabled" && -e "$WORK/units/pihole-bahrain.service.active" \
    && -e "$WORK/units/pihole-bahrain-lists.timer.enabled" && -e "$WORK/units/pihole-bahrain-lists.timer.active" ]] \
