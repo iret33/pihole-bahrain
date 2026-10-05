@@ -43,7 +43,7 @@ flow, release assets), is in [`docs/maintainers/architecture.md`](docs/maintaine
    `akamaihd.net`, ...): block the app's own domains, not the platform underneath it.
 3. Say in the pull request how you checked it (which domains the app really uses, and that the app stops working).
 
-List files are public domain (CC0); contributions to them are too.
+Everything in `lists/` (the block lists and `services.json`) is public domain (CC0); contributions to it are too.
 
 ## Pull requests
 
@@ -58,5 +58,6 @@ List files are public domain (CC0); contributions to them are too.
 
 ## Licence
 
-Contributions are accepted under the project's licences: GPL-3.0-or-later for code, CC0 for `lists/`
-(see [COPYING.md](COPYING.md)).
+Contributions are accepted under the project's licences: GPL-3.0-or-later for code, CC0 for everything in `lists/`
+(see [COPYING.md](COPYING.md)). The Sinko name and logo are not covered by those licences
+([TRADEMARK.md](TRADEMARK.md)).
