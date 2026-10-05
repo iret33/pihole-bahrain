@@ -17,12 +17,11 @@ says "Your Sinko box" only for units that may be sold as Sinko, and carries your
 A flashed card contains Debian (through Armbian), Pi-hole, Sinko and many other free-software packages. Handing it over
 is distributing them, so for each unit:
 
-* **Keep the licence texts on the card.** Sinko's own (`LICENSE`, `NOTICE`, and `lists/LICENSE` for the block lists) are
-  in the release folder `/opt/sinko/src/`, and the font's is at `/var/www/html/pb/fonts/OFL.txt`; Debian's are in
-  `/usr/share/common-licenses` and, package by package, under `/usr/share/doc/*/copyright`. **Do not delete
-  `/opt/sinko/src` when you shrink the image**, and look at the card before you ship (`ls /opt/sinko/src`): a card made
-  from a local copy of the source instead of the one-line install may not have that folder, and then the texts must be
-  put on the card by hand.
+* **Keep the licence texts on the card.** Sinko's own (`/opt/sinko/LICENSE`, `/opt/sinko/NOTICE`, and
+  `/opt/sinko/lists/LICENSE` for the block lists) are put there by the installer, and the font's is at
+  `/var/www/html/pb/fonts/OFL.txt`; Debian's are in `/usr/share/common-licenses` and, package by package, under
+  `/usr/share/doc/*/copyright`. **Do not delete any of them when you shrink or clean the image**, and look at the card
+  before you ship (`ls /opt/sinko`).
 * **Offer the source.** For Sinko it is <https://github.com/iret33/sinko> at the tag that is on the card (the box's
   *My box* page and `/opt/sinko/VERSION` say which). For Pi-hole, Debian and Armbian, it is enough to give written,
   durable pointers to their source repositories **and** to offer to supply it on request for at least three years.

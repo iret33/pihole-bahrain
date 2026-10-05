@@ -49,8 +49,15 @@ rules).
 | `install-id` | random 128-bit hex used by the optional counter; created lazily, removed by `seal` |
 | `handled.json` | `{"update": <nonce>, "check": <nonce>, "power": <nonce>}`: last request markers acted on |
 | `update-result.json` | written by the update runner when it ends: `{"status":"ok|failed","from","to","error","at"}` |
-| `cache/sinko-<version>.tar.gz` | the last two installed releases (offline rollback) |
+| `cache/sinko-<version>.tar.gz` | the installed release and the newest older one (the rollback target); offline rollback |
+| `lock` | the update runner's lock (the installer's own is `install.lock`: they must differ, the runner holds `lock` while it runs the installer) |
+| `update-failure.json` | when and how the last update failed (retry rule: a transient failure may retry the same night after 30 minutes, others wait a week) |
+| `counter-sent` | marks that the current `install-id` was sent to the counter (a never-sent id is just deleted when the counter is switched off) |
+| `forget-pending` | the counter's id waiting for its "forget me" request to succeed (retried every ping interval; no pings meanwhile) |
+| `removed` | set by `sinko remove` so a running scheduler does not repair what was removed on purpose; cleared by `setup` |
 | `firstboot` | flag file: the ready-made image still has to personalise itself |
+
+`/run/sinko/heartbeat.json` (memory, no card wear) is written by the scheduler after each good pass; the self-check reads it.
 
 ## Release assets
 
@@ -146,25 +153,37 @@ before writing (existing pattern in `Controller.tick`) so it never overwrites wh
    not failed in the last 7 days): minimum 5 minutes between runs. Set `status=running, from, to, at`, clear the
    request, then start `sinko update --yes --from-panel` as a detached transient unit (`systemd-run --unit sinko-update
    --collect`; fall back to a detached subprocess). The runner survives the scheduler restart the installer causes.
-3. **`sinko update`**: download `sinko.tar.gz` + `.sha256` from the configured repo; verify the checksum; refuse tarballs
-   with absolute or `..` member paths or without `sinko/VERSION`, `sinko/install.sh`, `sinko/bin/sinko`; refuse a version
-   that is not newer unless `--force`; copy the tarball to `/var/lib/sinko/cache/` (keep the two newest); run the
-   extracted `install.sh` with `SINKO_SRC` and `SINKO_NONINTERACTIVE=1`; then `sinko selfcheck`. If the installer or the
-   self-check fails, **roll back** automatically by re-installing the previously cached version, and report
-   `failed` with a short reason. Finally write `update-result.json`.
-4. **Reconcile** (scheduler, every tick): if `status == running` and `update-result.json` exists, copy it into the state
-   (`ok`/`failed`, `to`, `error`, `at`), delete the file, and clear `latest` when it is now installed. If `running` is
-   stuck for > 20 minutes with no runner active, mark `failed` ("did not finish").
+3. **`sinko update`**: download `sinko.tar.gz` + `.sha256` from the configured repo; verify the checksum; refuse any
+   archive with a link, device, absolute or `..` member path, too many members or too much unpacked size, or without
+   `sinko/VERSION`, `sinko/install.sh`, `sinko/bin/sinko`; refuse a version that is not newer unless `--force`; copy the
+   tarball to `/var/lib/sinko/cache/` (the installed release plus the newest older one are kept); flush everything to disk;
+   run the extracted `install.sh` with `SINKO_SRC` and `SINKO_NONINTERACTIVE=1`; then `sinko selfcheck --wait 90` in a **new
+   process of the newly installed program**. If the installer or the self-check fails, **roll back** automatically by
+   re-installing the previously cached version and checking that, and report `failed` with `rolledBack` = `true` only when
+   the old version is back and passes its check (`false` when it is not, or there was no copy to go back to). A failure
+   before the installer ran (download, checksum, space) is `rolledBack` = `true` only after a self-check of the untouched
+   box passes. The stored `error` is short English for whoever helps, never a command. Finally write
+   `update-result.json` (`status`, `from`, `to`, `error`, `at`, `rolledBack`, `transient`).
+4. **Reconcile** (scheduler, every tick): if `status == running` and `update-result.json` exists (and is not older than the
+   run), copy it into the state (`ok`/`failed`, `to`, `error`, `at`, `rolledBack`), delete the file, and clear `latest` when
+   it is now installed. If `running` and the runner is gone (the update lock is free) for more than 3 minutes, a
+   background self-check of the box decides: the new version in place and passing = `ok`; the old version still working =
+   `failed` with `rolledBack` true; otherwise `failed` with `rolledBack` false ("did not finish").
 5. `sinko rollback` re-installs the previous cached version by hand. `sinko update --ref vX.Y.Z` pins a release.
 
-`sinko selfcheck` (fast, no DNS probing, exit ≠ 0 on failure, one line per check): API reachable and logged in with
-the CLI password, the `pb-*` groups exist, every catalog list is registered, the scheduler unit is active, the page
-files exist and `pb/version.txt` equals `VERSION`.
+`sinko selfcheck [--wait N]` (no DNS probing, exit ≠ 0 on failure, one line per check, waits up to N seconds for
+"starting" to become "ok"): API reachable and logged in with the CLI password, the `pb-*` groups exist, every catalog list is
+registered, **the scheduler has run: the same process up for at least 20 s, at least 2 finished passes of this version, a
+heartbeat under 60 s old, and not crash-looping** (a unit that is merely "active" for a second between crashes does not
+pass), every file `index.html` loads exists and is not empty (and every file of the release's web folder when the source is
+that version), and `pb/version.txt` equals `VERSION`.
 
 ## Power requests
 
 `power.action` `reboot` → `systemctl reboot`; `poweroff` → `systemctl poweroff`, executed after the marker is stored
-and the state cleared. The page warns that the children's internet stops while the box is off.
+and the state cleared. The page warns that the children's internet stops while the box is off. **A request that arrives
+while an update runs is dropped** (marker stored as handled, cleared, logged), never held and never fired later; the page
+disables the two buttons while an update runs or is requested, and withdraws an unanswered request.
 
 ## Address watch
 
@@ -175,8 +194,9 @@ the router hands out a new address (and after a ready-made unit is switched on i
 ## Optional anonymous counter ("boxes online")
 
 * Off until the parent says yes (`telemetry.on == true` in the state; a page card or the installer prompt asks;
-  `sinko telemetry on|off|status|payload` mirrors it). Endpoint from `SINKO_TELEMETRY_URL`; empty = not configured, the
-  page hides the card and nothing is ever sent.
+  `sinko telemetry on|off|status|payload|reset-id` mirrors it). Endpoint from `SINKO_TELEMETRY_URL` (https, or http to
+  loopback in tests); empty = not configured: nothing is ever sent, and `box.json` says `"counter": false`, so the page
+  hides the card and the checklist question. Switching off sends the forget request below.
 * Every 6 h ± 30 min (first one 5 minutes after start) in a background thread with a 10 s timeout:
   `POST {url}/v1/ping`, `Content-Type: application/json`, body ≤ 512 bytes:
   `{"id": "<32 lowercase hex>", "v": "3.0.0", "hw": "orangepi-zero3|raspberrypi|x86|other"}`.

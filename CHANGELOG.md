@@ -43,6 +43,14 @@ everything needed to ship it on a ready-made Orange Pi Zero 3.
 - Debian security updates are switched on by default (`SINKO_OS_UPDATES=0` to skip), and bedtime and timers wait for the
   clock to be set on boards without a real-time clock (for at most about ten minutes after the box starts, so a box that
   never reaches the network still follows its schedule).
+- A scheduler that **cannot be crashed by an odd value** in the shared state (the page and the box normalise it identically, with
+  one shared list of test cases), that gives its Pi-hole session back on every error, repairs a missing block list by itself
+  (at most once an hour), and tells the page it is alive (`/pb/box.json`, which also carries the box's address and time zone so
+  the router help can show a number, never a name). The page warns when that heartbeat stops.
+- The installer **proves the new scheduler runs** before it retires the old one, installs every file by rename so a power cut
+  cannot leave an empty one, and keeps your own Pi-hole rules (even an existing `^.*$` deny rule) untouched.
+- Sealing a ready-made image also wipes the free space by default (`--no-zerofill` for test units), removes Wi-Fi profiles, the
+  on-disk copy of the logs, Pi-hole's HTTPS key, application password and TOTP secret, and locks the root login last.
 - GPL-3.0-or-later licence (lists: CC0), security policy, contribution guide, code of conduct, issue templates.
 
 ### Migrating from pihole-bahrain 2.x
