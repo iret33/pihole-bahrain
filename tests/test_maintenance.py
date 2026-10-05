@@ -2103,12 +2103,20 @@ class PageRepairTests(Fixture):
         self.assertEqual(len(self.repairs), 1)
         self.assertIn("no version", logs.records[0].getMessage())
 
-    def test_not_while_an_update_or_an_installation_runs_and_the_ten_minutes_start_when_it_is_over(self):
+    def test_a_mismatch_seen_while_an_update_runs_does_not_count_toward_the_ten_minutes(self):
+        # (an update's runner holds this lock for as long as it lives, and the two versions are expected meanwhile)
         holder = pb.RunLock()
         self.assertTrue(holder.acquire())
-        self.watch(15)                                           # (an update's runner holds this lock for as long as it lives)
+        self.watch(15)
         holder.release()
         self.assertEqual(self.repairs, [])
+        self.watch(9)
+        self.assertEqual(self.repairs, [], "the ten minutes begin when the box is quiet, not when the update began")
+        with self.assertLogs("sinko", level="WARNING"):
+            self.watch(3)
+        self.assertEqual(len(self.repairs), 1)
+
+    def test_a_mismatch_seen_while_the_installer_runs_does_not_count_either(self):
         install = pb.open_lock_file("install.lock")              # the installer, started by hand
         fcntl.flock(install, fcntl.LOCK_EX)
         self.watch(15)
@@ -2120,11 +2128,17 @@ class PageRepairTests(Fixture):
             self.watch(3)
         self.assertEqual(len(self.repairs), 1)
 
-    def test_not_while_the_state_says_an_update_is_running(self):
+    def test_not_while_the_state_says_an_update_is_running_and_not_counting_it(self):
         for _ in range(15):
             self.set_state(lambda s: s["update"].update(status="running", at=self.now.timestamp(), to="3.1.0"))
             self.watch(1)
         self.assertEqual(self.repairs, [])
+        self.set_state(lambda s: s["update"].update(status="ok", at=self.now.timestamp()))
+        self.watch(9)
+        self.assertEqual(self.repairs, [], "and the ten minutes start only now")
+        with self.assertLogs("sinko", level="WARNING"):
+            self.watch(3)
+        self.assertEqual(len(self.repairs), 1)
 
     def test_not_after_sinko_was_removed_on_purpose(self):
         pb.ensure_state_dir()

@@ -1054,7 +1054,9 @@ MIN_FREE_BYTES = 200 * 1024 * 1024
 CHECK_TIMEOUT = 10
 DOWNLOAD_TIMEOUT = 30                  # for each wait on the network ...
 DOWNLOAD_DEADLINE = 600                # ... and for a whole download
-INSTALL_TIMEOUT = 1800
+# The installer's `sinko setup` may wait for a run of gravity that is going (up to GRAVITY_LOCK_WAIT), then does its own
+# (up to GRAVITY_RUN_LIMIT); the rest of the installer takes minutes. A slow night must not become a rolled-back update.
+INSTALL_TIMEOUT = GRAVITY_LOCK_WAIT + GRAVITY_RUN_LIMIT + 900
 SELFCHECK_WAIT = 90                    # the installer has just restarted FTL and the scheduler: give them time
 REQUIRED_MEMBERS = ("sinko/VERSION", "sinko/install.sh", "sinko/bin/sinko")
 REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,100}\Z")      # never starts with "-": it reaches git's command line
@@ -3558,9 +3560,10 @@ class Maintenance:
         self._next_page_look = self.mono() + self.PAGE_LOOK_EVERY
         self._spawn("page", self.page_version, self._page_seen)
 
-    @staticmethod
-    def _repair_blocked() -> bool:
-        return os.path.exists(state_path("removed")) or install_lock_held()
+    def _repair_blocked(self) -> bool:
+        """Sinko was removed on purpose, or something is installing (the installer, an update, a rollback, a repair): the
+        two versions are then expected, and the ten minutes begin only when the box is quiet again."""
+        return os.path.exists(state_path("removed")) or install_lock_held() or self._update_going()
 
     def _page_seen(self, outcome, epoch) -> None:
         status, shown = outcome
@@ -3575,8 +3578,7 @@ class Maintenance:
             self._mismatch_since = now
             return
         if (now - self._mismatch_since < self.REPAIR_AFTER or not self.clock_ok() or self._repair_blocked()
-                or self._update_going() or read_version_file(os.path.join(APP_DIR, "src")) != VERSION
-                or not repair_due(epoch)):
+                or read_version_file(os.path.join(APP_DIR, "src")) != VERSION or not repair_due(epoch)):
             return
         log.warning("the page (%s) and the program (%s) have been of different versions for %d minutes (an update was "
                     "probably cut short): installing this version again from the copy on the box (at most once an hour)",
@@ -5161,12 +5163,17 @@ def cmd_rollback(args) -> int:
 
 
 def note_repaired() -> None:
-    """The update that was cut short has been finished by the repair, and the shared state still says it failed (the
-    scheduler wrote that when it found the box in two versions): say that it worked. Never raises."""
+    """The update that was cut short has been finished by the repair (or, when it was the way back that was cut short,
+    the previous version is back), and the shared state still says it failed (the scheduler wrote that when it found
+    the box in two versions): say what is true now. Never raises."""
     def mark(state):
         up = state["update"]
         if up["status"] == "failed" and up["to"] == VERSION:
             up.update(status="ok", error=None, rolledBack=None, at=time.time())
+        elif up["status"] == "failed" and up["from"] == VERSION and up["rolledBack"] is not True:
+            # The way back was cut off (the program had been put back, the page not yet): this version is what runs now.
+            up.update(rolledBack=True, at=time.time(),
+                      error="The update did not finish; the previous version (%s) was put back by the repair." % VERSION)
         if up["latest"] and not is_newer(up["latest"], VERSION):
             up["latest"] = up["notes"] = None
     try:

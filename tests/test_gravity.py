@@ -183,6 +183,11 @@ class GravityLockTests(unittest.TestCase):
         self.assertIn("without it", logs.records[0].getMessage())
         self.assertFalse(os.path.exists(os.path.join(self.state, "elsewhere")), "the link was not followed")
 
+    def test_the_installer_may_wait_for_the_lock_and_still_finish_before_it_is_given_up(self):
+        # An update's installer runs `sinko setup`, whose gravity run waits for one that is going (up to 30 minutes) and then
+        # does its own (up to 30 minutes): a slow night must not turn into a rolled-back update.
+        self.assertGreaterEqual(pb.INSTALL_TIMEOUT, pb.GRAVITY_LOCK_WAIT + pb.GRAVITY_RUN_LIMIT + 600)
+
     # ----- every place that starts gravity goes through it -----
     def test_pihole_g_is_started_in_one_place_only(self):
         with open(os.path.join(ROOT, "bin", "sinko"), encoding="utf-8") as fh:

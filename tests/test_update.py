@@ -1898,6 +1898,21 @@ class RepairNoteTests(unittest.TestCase):
         self.assertEqual((u["status"], u["error"], u["rolledBack"], u["latest"], u["notes"]), ("ok", None, None, None, None))
         self.assertGreater(u["at"], time.time() - 60)
 
+    def test_a_way_back_that_was_cut_off_is_marked_as_having_worked(self):
+        # The update to 3.1.0 failed, the previous version (this one) was being put back when the power went: the program
+        # was back and the page was not. The repair reinstalls this version, so the previous version IS back.
+        self.put(status="failed", **{"from": pb.VERSION}, to="3.1.0", rolledBack=False,
+                 error="The update did not finish, and the box does not pass its own check (page and program are not the same)")
+        pb.note_repaired()
+        u = self.state()["update"]
+        self.assertEqual((u["status"], u["rolledBack"], u["to"]), ("failed", True, "3.1.0"))
+        self.assertIn("previous version (%s) was put back by the repair" % pb.VERSION, u["error"])
+        self.assertLessEqual(len(u["error"]), 200)
+        self.assertGreater(u["at"], time.time() - 60)
+        before = self.state()
+        pb.note_repaired()
+        self.assertEqual(self.state()["update"]["error"], before["update"]["error"], "once: a second call changes nothing")
+
     def test_anything_else_in_the_state_is_left_alone(self):
         self.put(status="failed", to="3.9.9", error="x", rolledBack=True, auto=True)
         before = self.state()
