@@ -104,6 +104,9 @@ ls "$ROOT"/opt/sinko/.download.* >/dev/null 2>&1 && fail "the temporary download
 
 echo "--- a password given to the one-liner survives the start of the downloaded installer, and is in no program's environment"
 rm -f "$WORK/password-in-env"
+# Pi-hole has no password yet, like a new installation or an unclaimed box: that is when its API takes one (with a password
+# set, FTL refuses a command-line session, and the installer uses Pi-hole's own command: see test_install.sh).
+mock_set_password ""
 run_install pw-oneliner SINKO_RELEASE_BASE="$BASE" SINKO_PASSWORD="Oneliner-Pass-2024" || { cat "$WORK/pw-oneliner.out"; fail "the one-liner with a password failed"; }
 grep -q "Starting the installer from the downloaded version" "$WORK/pw-oneliner.out" || fail "test setup: the downloaded installer was not started"
 mock_password_works "Oneliner-Pass-2024" || fail "the password given to the one-liner did not reach Pi-hole (lost when the downloaded installer was started?)"
