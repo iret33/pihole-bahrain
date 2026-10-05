@@ -545,7 +545,7 @@ locate_source() {
         echo "$APP_DIR/src"
         return
       fi
-      warn "The verified release could not be had now, so the copy that the old updater downloaded is installed (its version is $(tr -d '[:space:]' <"$dir/VERSION" 2>/dev/null || echo unknown)). 'sudo sinko update' moves to the newest release later." >&2
+      warn "The verified release could not be had now, so the copy that the old updater downloaded is installed (its version is $(tr -d '[:space:]' <"$dir/VERSION" 2>/dev/null || echo unknown)). From now on this box follows the releases: the next one is installed by the update button on the parent page or by 'sudo sinko update'." >&2
     fi
     echo "$dir"
     return
@@ -1344,7 +1344,7 @@ install_time_sync() {
     return 0
   fi
   if systemctl enable --now systemd-timesyncd.service >/dev/null 2>&1; then
-    ok "Installed systemd-timesyncd: the clock is set from the network"
+    ok "systemd-timesyncd is on: the clock is set from the network"
   else
     warn "systemd-timesyncd is installed but could not be started (it does not run in some virtual machines and containers)."
   fi

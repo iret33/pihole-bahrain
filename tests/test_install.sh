@@ -158,7 +158,7 @@ grep -q '^SINKO_OS_UPDATES=1$' "$ROOT/etc/sinko/config" || fail "SINKO_OS_UPDATE
 echo "    a box without any time service gets one (it has no battery-backed clock)"
 grep -q 'apt-get install .*systemd-timesyncd' "$WORK/calls.log" || fail "no time service was installed on a box that had none"
 [[ -e "$WORK/units/systemd-timesyncd.service.enabled" && -e "$WORK/units/systemd-timesyncd.service.active" ]] || fail "systemd-timesyncd was not enabled and started"
-grep -q "Installed systemd-timesyncd" "$WORK/install.out" || fail "no message about the time service"
+grep -q "systemd-timesyncd is on" "$WORK/install.out" || fail "no message about the time service"
 
 echo "--- re-run (update) keeps settings, hostname change replaces host entry"
 SINKO_HOSTNAME=kids.home bash "$REPO/install.sh" >"$WORK/install2.out" 2>&1 || { cat "$WORK/install2.out"; fail "second run failed"; }
