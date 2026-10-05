@@ -35,6 +35,15 @@ who is asked for a password the first time they open the page knows that someone
 A ready-made box also has **no login of any kind** (root is locked, SSH passwords are off, there is no key and no
 support account), so there is no remote support and no back door; the seller and the project cannot connect to it.
 
+When the installer has to give Pi-hole a password and Pi-hole already has one (an existing Pi-hole, or a second run with
+`SINKO_PASSWORD`), it uses Pi-hole's own `pihole setpassword`, which takes the password as an argument: for a moment it is
+in that program's arguments, and any user who can log in to the box can read it there. A Pi-hole that has no password yet
+is given it through its API instead, in the body of a request on the box, never in a program's arguments. Pi-hole refuses a
+password change from the installer's command-line session, so the first route cannot be used for the second case. On a box
+that only its owner logs in to, and on a ready-made box (nobody logs in), this is accepted; on a shared computer, choose the
+password on the parent page (*My box*, *Change password*). [`docs/install.md`](docs/install.md) says the same to whoever
+installs.
+
 ## Supported versions
 
 Only the latest release gets fixes. Boxes update themselves from the page (*My box* → *Update now*) or with

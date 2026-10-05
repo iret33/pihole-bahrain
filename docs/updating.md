@@ -6,7 +6,9 @@ all: everything about Sinko's own updates is on the page, and for Pi-hole see "P
 ## From the page
 
 Open **My box**. If a newer version exists it says so, with a link to what changed. Press **Update now**. The page shows
-progress and reloads itself when it is done. The children's internet keeps working while it updates, but it may pause for
+progress and reloads itself when it is done (it then runs the new version completely: its scripts and styles are asked for
+by the release's number, because a phone keeps files from the box for an hour; a second phone that still shows the old page
+reloads itself once, as soon as it notices that the box is on a newer version). The children's internet keeps working while it updates, but it may pause for
 about a minute when the services restart. Leave the box plugged in until the page says it is finished. If you press
 *Restart* or *Shut down* while an update is running, the box ignores the request: wait for the update to end and ask again.
 

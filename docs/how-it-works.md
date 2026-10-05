@@ -90,7 +90,10 @@ The picture never changes a rule.
 Pi-hole downloads the lists straight from this repository, so a change pushed
 to `master` reaches every box on its next nightly refresh (or immediately with
 `sudo pihole -g`). Adding a **new** service also needs the new code on the box:
-`sudo sinko update`.
+`sudo sinko update`. Pi-hole's gravity (`pihole -g`) has no lock of its own and two runs at once leave lists missing or
+doubled, so every run that Sinko starts (its setup, the installer's, the nightly timer) takes one lock and waits its turn;
+a run you start by hand with `sudo pihole -g`, Pi-hole's own weekly run and the page's restore do not take it, so avoid
+starting one while an update is running.
 
 To add a service: create `lists/<id>.txt`, add an entry to `services.json`
 (id, English and Arabic names, category, colour, whether Homework mode blocks
@@ -107,7 +110,7 @@ box runs: list fixes reach boxes without a new release, and a box can be pointed
 |---|---|
 | Program, lists, tools, the last downloaded release | `/opt/sinko` (`bin/sinko`, `lists/`, `tools/`, `src/`, `LICENSE`, `NOTICE`) |
 | Settings | `/etc/sinko/config` (`KEY=value`, read by the installer and the program) |
-| Runtime data (root only) | `/var/lib/sinko/` (counter id, handled requests, cached releases for rollback, update results) |
+| Runtime data (root only) | `/var/lib/sinko/` (counter id, handled requests, cached releases for rollback, update results and notes, the lock that keeps two block-list refreshes apart, the note of the last self-repair) |
 | The parent page | `/var/www/html/index.html` and `/var/www/html/pb/` (includes `pb/box.json`, written by the program) |
 | Services | `sinko.service` (scheduler), `sinko-lists.timer` (nightly list refresh), `sinko-firstboot.service` (ready-made boxes only) |
 | Install log | `/var/log/sinko-install.log` (never contains a password) |

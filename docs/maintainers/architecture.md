@@ -52,6 +52,8 @@ rules).
 | `cache/sinko-<version>.tar.gz` | the installed release and the newest older one (the rollback target); offline rollback |
 | `lock` | the update runner's lock (the installer's own is `install.lock`: they must differ, the runner holds `lock` while it runs the installer) |
 | `update-failure.json` | when and how the last update failed (retry rule: a transient failure may retry the same night after 30 minutes, others wait a week) |
+| `gravity.lock` | the flock that every `pihole -g` which Sinko starts takes first (the program's own runs, and `sinko-lists.service` through `flock(1)`), so two runs never rebuild Pi-hole's one temporary database together; a run waits for the one before it for up to 30 minutes. Pi-hole's own weekly run and the page's restore cannot take it |
+| `repair.json` | when the last `sinko repair` was started: the scheduler starts one at most once an hour, and its restart forgets everything else |
 | `counter-sent` | marks that the current `install-id` was sent to the counter (a never-sent id is just deleted when the counter is switched off) |
 | `forget-pending` | the counter's id waiting for its "forget me" request to succeed (retried every ping interval; no pings meanwhile) |
 | `removed` | set by `sinko remove` so a running scheduler does not repair what was removed on purpose; cleared by `setup` |
@@ -89,10 +91,25 @@ Latest-release metadata: `https://api.github.com/repos/<slug>/releases/latest` (
   skips fetching (used by `sinko update`, tests and the image build). Always non-interactive when `SINKO_NONINTERACTIVE=1`.
 * Idempotent. Exit status ≠ 0 on failure, progress to stdout, full log in `/var/log/sinko-install.log` (the generated
   parent password never reaches the log).
-* `SINKO_TELEMETRY=1|0` records the install-time answer (interactive installs ask: default *no*; non-interactive
-  installs without the variable record nothing, so the page asks later).
-* Installs `avahi-daemon` so the box answers to `<hostname>.local` (`SINKO_MDNS=0` skips) and
-  `unattended-upgrades` for Debian security updates (`SINKO_OS_UPDATES=0` skips; left alone when already installed).
+* `SINKO_TELEMETRY=1|0` records the install-time answer (interactive installs ask: default *no*, **and only when the program
+  says a counter address is configured** (`sinko box-info` → `"counter": true`); without one nothing is asked or saved;
+  non-interactive installs without the variable record nothing, so the page asks later).
+* Free space: more than **1 GB** for a first installation, more than **200 MB** for an update, a rollback or a move from
+  pihole-bahrain (the scheduler's unit or what pihole-bahrain left says which); the refusal exits with status 75 and changes
+  nothing. `bin/sinko` asks for the same 200 MB (`MIN_FREE_BYTES`) before it starts the installer.
+* The parent password reaches Pi-hole by its API (`PATCH /api/config`, from standard input, never in a program's arguments)
+  only while Pi-hole **has no password** yet: FTL refuses config changes from a command-line session (403), so there is no
+  `cli_pw` sign-in. Otherwise `pihole setpassword`, whose argument list holds the password for a moment. An update never
+  chooses a password. `docs/install.md` says both.
+* Apt and dpkg answers that are read are asked for in the C locale (`LC_ALL=C`), and "installed" means
+  `dpkg-query` says `install ok installed`.
+* Installs `avahi-daemon` so the box answers to `<hostname>.local` (`SINKO_MDNS=0` skips), `unattended-upgrades` for Debian
+  security updates (`SINKO_OS_UPDATES=0` skips; left alone when already installed, switched on or off) and, when the box has
+  no time service at all, `systemd-timesyncd` (no battery-backed clock; another service that is installed but off is left to
+  the owner, with a warning).
+* `index.html` is installed with `@VERSION@` replaced by the release's version in the addresses of the page's scripts and
+  style sheet (`/pb/app.js?v=3.0.0`) and in `<meta name="sinko-version">`: Pi-hole's web server lets a browser keep a static
+  file for an hour, so every release changes every address. The web server ignores the query string.
 
 ### Migration from pihole-bahrain
 
@@ -155,15 +172,24 @@ before writing (existing pattern in `Controller.tick`) so it never overwrites wh
 
 ## Update flow
 
-1. **Check** (scheduler, 2 minutes after start and then every 24 h, or on `checkRequest`): GET the release API
+1. **Check** (scheduler, 2 minutes after every start of the scheduler (the start after a power cut and the restart the
+   installer causes included; nothing is persisted) and then every 24 h, or on `checkRequest`): GET the release API
    with a 10 s timeout in a background thread (never block the tick). Ignore drafts and prereleases. Semver compare
-   against `VERSION`. Offline or rate-limited = silently keep the old answer. Write `latest/notes/checked` if they
-   changed or `checked` is older than a day.
+   against `VERSION`. Offline or rate-limited = silently keep the old answer, and ask again after `CHECK_RETRY` (30 minutes)
+   plus up to as much, not tomorrow. Write `latest/notes/checked` if they changed or `checked` is older than a day. A box
+   pinned to `vX.Y.Z` makes no API call (the release is the pin) and a box on a branch is never checked. Every number a
+   parent-facing document quotes for this (`docs/privacy.md`, `docs/updating.md`, `docs/faq.md`) is pinned to the constants
+   by `tests/test_docs.py`.
 2. **Run** (on `update.request`, or `auto` inside the 03:00–05:00 window when `latest` is set and this version has
-   not failed in the last 7 days): minimum 5 minutes between runs. Set `status=running, from, to, at`, clear the
+   not failed lately: a failure of the network or the disk (`transient`) is tried again after 30 minutes, any other
+   failure waits 7 days): minimum 5 minutes between runs. Set `status=running, from, to, at`, clear the
    request, then start `sinko update --yes --from-panel` as a detached transient unit (`systemd-run --unit sinko-update
    --collect`; fall back to a detached subprocess). The runner survives the scheduler restart the installer causes.
-3. **`sinko update`**: download `sinko.tar.gz` + `.sha256` from the configured repo; verify the checksum; refuse any
+3. **`sinko update`**: first require **more than 200 MB free** (`MIN_FREE_BYTES`, the installer's own number for an update, a
+   rollback or a move from pihole-bahrain; a first installation needs more than 1 GB), before anything is downloaded and
+   again after the downloads and the unpacked tree have used some of it: that failure is `transient`, says how much is free
+   and that nothing was changed, and is `rolledBack` = `true` only after a self-check of the untouched box. Then download
+   `sinko.tar.gz` + `.sha256` from the configured repo; verify the checksum; refuse any
    archive with a link, device, absolute or `..` member path, too many members or too much unpacked size, or without
    `sinko/VERSION`, `sinko/install.sh`, `sinko/bin/sinko`; refuse a version that is not newer unless `--force`; copy the
    tarball to `/var/lib/sinko/cache/` (the installed release plus the newest older one are kept); flush everything to disk;
@@ -179,7 +205,19 @@ before writing (existing pattern in `Controller.tick`) so it never overwrites wh
    it is now installed. If `running` and the runner is gone (the update lock is free) for more than 3 minutes, a
    background self-check of the box decides: the new version in place and passing = `ok`; the old version still working =
    `failed` with `rolledBack` true; otherwise `failed` with `rolledBack` false ("did not finish").
-5. `sinko rollback` re-installs the previous cached version by hand. `sinko update --ref vX.Y.Z` pins a release.
+5. `sinko rollback` re-installs the previous cached version by hand. `sinko update --ref vX.Y.Z` pins a release; the choice is
+   saved only by an update that worked, and a failed `--ref` update (also after its rollback installer ran) leaves
+   `SINKO_REF` as it was.
+6. **Repair** (scheduler, a background look once a minute at `pb/version.txt`): an update cut off between the program's
+   replacement and the page's swap leaves a program of one version and a page of another. When they have differed for
+   `REPAIR_AFTER` (10 minutes) with nothing installing (no update lock, no installer lock, state not `running`), the box
+   not removed on purpose, a believed clock and `/opt/sinko/src` holding this very version, the scheduler starts
+   `sinko repair` as a unit of its own (the installer restarts the scheduler, so it cannot run inside it), at most once an hour
+   (`repair.json`). `sinko repair` takes the update lock, requires the free space, runs the installer from `/opt/sinko/src`
+   with the ref the box follows (nothing of Sinko is downloaded; the installer's `sinko setup` still runs `pihole -g`), checks
+   the installed program and marks the cut-off update finished in the state (`ok`, or `rolledBack` true when it was the way
+   back that was cut). A cut after the page swap, with page and program already agreeing, is not covered: the 3-minute check
+   of step 4 reports it, and the scheduler's self-heal puts back missing groups and lists (once an hour).
 
 `sinko selfcheck [--wait N]` (no DNS probing, exit ≠ 0 on failure, one line per check, waits up to N seconds for
 "starting" to become "ok"): API reachable and logged in with the CLI password, the `pb-*` groups exist, every catalog list is
@@ -236,13 +274,21 @@ the router hands out a new address (and after a ready-made unit is switched on i
   upstream: `pi-hole/FTL/src/api/docs/content/specs/*.yaml`):
   `GET /api/auth` (no `sid` + `session.valid` true ⇒ no password set ⇒ claim screen),
   `PATCH /api/config` with `{"config":{"webserver":{"api":{"password":"…"}}}}` (write-only property; the session is
-  invalidated afterwards, so sign in again), `GET /api/info/system`, `/api/info/sensors`, `/api/info/version`,
-  `/api/info/host`, `GET /api/teleporter` (zip), `POST /api/teleporter` (multipart `file` + `import` JSON), `GET
-  /api/dns/blocking`.
+  invalidated afterwards, so sign in again), `GET /api/info/system`, `/api/info/sensors`, `/api/info/host`,
+  `GET /api/teleporter` (zip), `POST /api/teleporter` (multipart `file` + `import` JSON), `GET /api/dns/blocking`, and
+  `GET /api/info/version` for **About** (the core's local version, read each time the sheet opens, shown as "Pi-hole v6.x"
+  only when it is a plain release number; a failure or a development build leaves the row out).
 * Backup = the whole Teleporter archive (it contains the password hash: the page says to keep it private).
   Restore imports **only** the gravity tables (`group, adlist, adlist_by_group, domainlist, domainlist_by_group,
   client, client_by_group`) and not `config`, so a restore never changes the address, upstreams or password.
 * Update links: only `update.notes` values that `parseState` accepted are rendered as links.
+* The page knows its own release from `<meta name="sinko-version">` (the installer stamps it; the placeholder stays in
+  development and the page then goes by the box's `pb/version.txt`). A stamped page that finds the box on another version
+  reloads itself once per version per tab (at start and when the phone returns to it, never while a dialog is open, a
+  bedtime is typed or an update runs). The addresses of its scripts and style sheet carry `?v=<version>`.
+* The counter line ("This box is one of N Sinko boxes online.") is shown from two boxes up, exactly two has its own wording,
+  and the Arabic puts the number last. One tagline per language, from `tools/make-brand.py` (`TAGLINE_EN`, `TAGLINE_AR`);
+  `tests/test_docs.py` and `tests/test_copy.py` compare the README, the site and the page with it.
 
 ## Ready-made image (Orange Pi Zero 3)
 
@@ -253,11 +299,24 @@ locks the default root password / password SSH logins, removes Armbian's first-l
 `sinko-firstboot.service`. First boot regenerates host keys, repairs the local name/address for the actual network
 (`sinko configure`), refreshes `SINKO_IP`, then deletes the flag. `docs/product-image.md` is the seller's procedure.
 
+The seal refuses a unit that is not ready (it names every problem; the account check is made again before the last step so
+`--skip-checks` cannot bypass it): a service or timer not enabled, no avahi, automatic security updates not installed or not
+switched on (unless `SINKO_OS_UPDATES=0`), no time service, a unit pinned to a version or following a branch (its boxes would
+never be offered an update), a fixed address, another account than root that can log in on the console. Its watchdog drop-in
+sets `RuntimeWatchdogSec=15` and `RebootWatchdogSec=15` (the Allwinner driver takes 16 s at most). In systemd 257 PID 1
+disarms the watchdog before a power-off (`watchdog_timer` stays 0 for `poweroff` and `halt`, and `watchdog_setup(0)`
+disarms) and keeps it armed for a reboot, where systemd-shutdown feeds it once per unmount pass and not during its first
+sync; whether the board's driver lets it be disarmed (`CONFIG_WATCHDOG_NOWAYOUT`) only the board shows. The zero-fill counts
+as done only on "No space left on device"; a leftover zero file is deleted by the next seal and by `firstboot.sh`.
+
 ## Things only real hardware can prove
 
 Listed in `docs/hardware-test-checklist.md`; nothing in CI exercises: a real Pi-hole v6 (password config, teleporter,
 sensors), systemd behaviour (`systemd-run`, reboot from the service), Armbian first boot, mDNS on phones, the
-Orange Pi Zero 3's thermal sensor path, and a real GitHub release round trip.
+Orange Pi Zero 3's thermal sensor path, and a real GitHub release round trip. Also the things that depend on how slow a
+real card and board are (the 20-second self-check, the restore window, the 15-second watchdog during a restart), on the
+board's driver (Shut down and `CONFIG_WATCHDOG_NOWAYOUT`), on the real web server (the one-hour cache and the `?v=` addresses),
+and on a cut of the power at the one moment between the program's replacement and the page's swap.
 
 ## Amendments agreed after the first review (these override the text above where they differ)
 
