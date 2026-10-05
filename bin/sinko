@@ -1018,7 +1018,12 @@ RELEASE_ASSET = "sinko.tar.gz"
 MAX_DOWNLOAD = 20 * 1024 * 1024        # a release is a few MB; anything bigger is not ours
 MAX_UNPACKED = 100 * 1024 * 1024       # gzip can inflate a small download a thousandfold
 MAX_MEMBERS = 5000
-MIN_FREE_BYTES = 100 * 1024 * 1024
+# Free space an update or a rollback needs. ONE number, the installer's: install.sh refuses to start an update or a
+# rollback (a box that already has Sinko) with 200 MB or less free, and a first install with 1 GB or less (that one may
+# have to install Pi-hole). An engine that asked for less would download, install, fail in the installer's first check,
+# fail again in the rollback's, and report a box that was never touched as one that could not be put back. The doctor
+# warns earlier (DISK_WARN_BYTES), so there is time to make room.
+MIN_FREE_BYTES = 200 * 1024 * 1024
 CHECK_TIMEOUT = 10
 DOWNLOAD_TIMEOUT = 30                  # for each wait on the network ...
 DOWNLOAD_DEADLINE = 600                # ... and for a whole download
@@ -1537,7 +1542,7 @@ class Updater:
         except UpdateError as err:
             return {"status": "failed", "from": VERSION, "to": None, "error": str(err)}
         try:
-            ensure_state_dir("cache")
+            self._require_free_space()
             older = [v for v in cached_versions() if is_newer(VERSION, v)]
             if not older:
                 return {"status": "failed", "from": VERSION, "to": None,
@@ -1557,9 +1562,7 @@ class Updater:
         ref = ref or settings["ref"]
         kind, value = classify_ref(ref)
         self._clean_leftovers()
-        free = shutil.disk_usage(ensure_state_dir("cache")).free
-        if free < MIN_FREE_BYTES:
-            raise TransientError("There is not enough free space on the box (%d MB are needed)." % (MIN_FREE_BYTES >> 20))
+        self._require_free_space()                       # before anything is downloaded, unpacked or installed
         os.makedirs(APP_DIR, exist_ok=True)
         if kind == "branch":
             if confirm and not confirm(current, None):
@@ -1588,6 +1591,12 @@ class Updater:
                 self.out("Sinko %s is already the newest version." % current)
                 return "ok", current, None, None, False
         self._ensure_rollback_copy(settings, current)
+        try:
+            self._require_free_space()                   # what was just written (downloads, the unpacked tree) came out of it
+        except TransientError:
+            if version != current:
+                drop_cached(version)
+            raise
         self.out("Installing Sinko %s ..." % version)
         target["touched"] = True
         ok, why = self._install_and_check(src, ref)
@@ -1610,6 +1619,17 @@ class Updater:
         else:
             error = "%s Going back to %s did not work either (%s)." % (why, current, back_why)
         return "failed", version, error, bool(back_ok), False
+
+    @staticmethod
+    def _require_free_space() -> None:
+        """Stop, with a reason a person can act on, when the card has no room for the installer: the installer asks for
+        the same amount (see MIN_FREE_BYTES) and would stop at its very first line. Nothing has been changed yet, and
+        that is said, because `rolledBack` of such a failure comes from a check of the box as it was. More than the
+        limit is needed, not the limit itself, as in the installer."""
+        free = shutil.disk_usage(ensure_state_dir("cache")).free
+        if free <= MIN_FREE_BYTES:
+            raise TransientError("There is not enough free space on the box: %d MB are free and more than %d MB are needed. "
+                                 "Nothing on the box was changed." % (free >> 20, MIN_FREE_BYTES >> 20))
 
     def _resolve(self, kind, value, settings):
         """{"version", "tag"} of the release to install; version None means "whatever /latest/ is" (see below)."""
@@ -3004,7 +3024,9 @@ class Maintenance:
                 up["at"] = result["at"]
                 if result["status"] == "ok" and up["latest"] and result["to"] and not is_newer(up["latest"], result["to"]):
                     up["latest"] = up["notes"] = None
-                seen["result"] = result
+                # The retry rule (failure_is_transient) knows a failure by the release the STATE names. A run that stopped
+                # before it knew which release (no room on the card, say) says none, and the state keeps the one it had set.
+                seen["result"] = dict(result, to=up["to"])
             elif self._runner_gone(up, epoch):
                 seen["gone"] = up["at"]                                 # decided below, once the box has been looked at
         self._change(mutate)

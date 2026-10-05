@@ -1156,6 +1156,118 @@ class OutcomeTests(Box):
         self.assertFalse(pb.failure_is_transient({"at": 1234.5, "to": "3.1.0"}))
 
 
+MB = 1024 * 1024
+
+
+class DiskSpaceTests(Box):
+    """The installer asks for more than 200 MB for an update or a rollback and more than 1 GB for a first install; the
+    engine asks for the first of those BEFORE it touches anything, and says so plainly. Between the two (it used to ask
+    for 100 MB) a box downloaded, failed in the installer's first line, failed again in the rollback's, and reported a box
+    it had never touched as one that could not be put back."""
+
+    def free(self, *amounts):
+        """shutil.disk_usage that answers with these free sizes (MB), the last one for every later question."""
+        answers = list(amounts)
+        return mock.patch.object(pb.shutil, "disk_usage",
+                                 side_effect=lambda path: mock.Mock(free=(answers.pop(0) if len(answers) > 1 else answers[0]) * MB))
+
+    def test_the_numbers_agree(self):
+        self.assertEqual(pb.MIN_FREE_BYTES, 200 * MB, "what install.sh asks of an update or a rollback")
+        self.assertEqual(pb.DISK_WARN_BYTES, 300 * MB, "the doctor warns before the engine refuses")
+        self.assertGreater(pb.DISK_WARN_BYTES, pb.MIN_FREE_BYTES)
+
+    def test_between_100_and_200_mb_it_stops_before_anything_is_downloaded_and_the_box_is_said_to_be_untouched(self):
+        self.publish("3.1.0")
+        self.site.add_release("3.0.0")
+        checks = []
+        with self.free(150):
+            result = self.updater(selfcheck=lambda: checks.append(1) or (True, "")).update()
+        self.assertEqual((result["status"], result["from"], result["rolledBack"], result["transient"]),
+                         ("failed", "3.0.0", True, True))
+        self.assertIn("not enough free space", result["error"])
+        self.assertIn("150 MB are free and more than 200 MB are needed", result["error"])
+        self.assertIn("Nothing on the box was changed", result["error"])
+        self.assertLessEqual(len(result["error"]), 200)
+        self.assertNotIn("sudo", result["error"])
+        self.assertEqual(checks, [1], "the box as it is was checked, which is what makes rolledBack true")
+        self.assertEqual(self.site.count("sinko.tar.gz"), 0, "nothing was downloaded")
+        self.assertEqual(self.installs(), [], "and no installer was started, so there was nothing to roll back")
+        self.assertEqual(self.installed(), "3.0.0")
+        self.assertEqual(pb.read_update_result(), result)
+
+    def test_rolled_back_comes_from_the_check_not_from_the_reason(self):
+        self.publish("3.1.0")
+        with self.free(150):
+            result = self.updater(selfcheck=lambda: (False, "page is broken")).update()
+        self.assertEqual((result["status"], result["rolledBack"], result["transient"]), ("failed", False, True))
+
+    def test_200_mb_exactly_is_not_enough_and_a_little_more_is(self):
+        self.publish("3.1.0")
+        self.site.add_release("3.0.0")
+        with self.free(200):
+            self.assertEqual(self.updater().update()["status"], "failed")
+        self.assertEqual(self.installs(), [])
+        with mock.patch.object(pb.shutil, "disk_usage", return_value=mock.Mock(free=200 * MB + 1)):
+            result = self.updater().update()
+        self.assertEqual((result["status"], result["to"]), ("ok", "3.1.0"))
+
+    def test_with_room_for_the_installer_the_update_goes_on(self):
+        self.publish("3.1.0")
+        self.site.add_release("3.0.0")
+        with self.free(500):
+            result = self.updater().update()
+        self.assertEqual((result["status"], result["to"], result["error"]), ("ok", "3.1.0", None))
+        self.assertEqual(len(self.installs()), 1)
+
+    def test_room_that_the_downloads_themselves_used_up_is_noticed_before_the_installer_starts(self):
+        # 500 MB at the start, 150 MB when the release has been downloaded, unpacked and stored (and the rollback copy too).
+        self.publish("3.1.0")
+        self.site.add_release("3.0.0")
+        with self.free(500, 150):
+            result = self.updater().update()
+        self.assertEqual((result["status"], result["rolledBack"], result["transient"]), ("failed", True, True))
+        self.assertIn("150 MB are free", result["error"])
+        self.assertEqual(self.installs(), [], "the installer was never started: it would have refused, and so would the rollback")
+        self.assertEqual(self.installed(), "3.0.0")
+        self.assertNotIn("3.1.0", pb.cached_versions(), "a release that was not installed is no rollback target")
+        self.assertEqual(self.leftovers(), [])
+
+    def test_the_branch_path_checks_again_too(self):
+        # (the same check, after the clone: git writes a whole checkout before the installer starts)
+        installer_calls = []
+        with mock.patch.object(pb.Updater, "_fetch_branch", return_value=(os.path.join(self.app, "src"), "3.1.0")), \
+                self.free(500, 150):
+            result = self.updater(installer=lambda s, r: installer_calls.append(1) or 0,
+                                  selfcheck=lambda: (True, "")).update(ref="master")
+        self.assertEqual((result["status"], result["rolledBack"]), ("failed", True))
+        self.assertEqual(installer_calls, [])
+
+    def test_a_rollback_by_hand_asks_for_the_same_room_and_changes_nothing_without_it(self):
+        self.publish("3.1.0")
+        self.site.add_release("3.0.0")
+        self.updater().update()
+        self.assertEqual(self.installed(), "3.1.0")
+        installs = list(self.installs())
+        with mock.patch.object(pb, "VERSION", "3.1.0"), self.free(150):
+            result = self.updater().rollback()
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("not enough free space", result["error"])
+        self.assertEqual(self.installs(), installs)
+        self.assertEqual(self.installed(), "3.1.0")
+        with mock.patch.object(pb, "VERSION", "3.1.0"), self.free(500):
+            self.assertEqual(self.updater().rollback()["status"], "ok")
+        self.assertEqual(self.installed(), "3.0.0")
+
+    def test_the_page_and_the_scheduler_see_a_failure_that_is_neither_alarming_nor_final(self):
+        # transient: tried again within the hour, not after a week; rolledBack true: the page does not tell anybody to unplug the box.
+        self.publish("3.1.0")
+        with self.free(150):
+            result = self.updater().update()
+        self.assertIs(result["transient"], True)
+        self.assertIs(result["rolledBack"], True)
+        self.assertIsNone(result["to"], "it stopped before it knew which release (the scheduler keeps the one it asked for)")
+
+
 class UpdateSourceTests(unittest.TestCase):
     """Where releases may come from: https, or this machine. The program and the page are replaced with what comes."""
 

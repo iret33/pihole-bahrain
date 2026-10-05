@@ -643,6 +643,18 @@ class RolledBackTests(Fixture):
         self.pass_()
         self.assertEqual((self.state()["update"]["status"], self.state()["update"]["rolledBack"]), ("running", None))
 
+    def test_a_failure_that_names_no_release_is_remembered_for_the_retry_rule_under_the_one_the_state_names(self):
+        # No room on the card: the runner stops before it has asked which release, so its result has none. The state keeps
+        # the one the scheduler started it for, and the retry rule only knows a failure by that.
+        self.running()
+        pb.write_update_result("failed", "3.0.0", None, "There is not enough free space on the box: 150 MB are free and "
+                               "more than 200 MB are needed. Nothing on the box was changed.",
+                               self.now.timestamp() - 5, rolled_back=True, transient=True)
+        self.pass_()
+        u = self.state()["update"]
+        self.assertEqual((u["status"], u["to"], u["rolledBack"]), ("failed", "3.1.0", True))
+        self.assertTrue(pb.failure_is_transient(u), "tried again within the hour, not after a week")
+
     def test_a_result_that_says_the_failure_was_the_network_is_remembered_for_the_retry_rule(self):
         self.running()
         pb.write_update_result("failed", "3.0.0", "3.1.0", "The server answered HTTP 502 for sinko.tar.gz.",
