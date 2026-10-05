@@ -16,6 +16,7 @@ export class FakeD1 {
     this.installs = new Map();     // id -> row
     this.meta = new Map();         // key -> {value, updated}
     this.broken = null;            // an Error: every call rejects with it
+    this.failWrites = null;        // an Error: every statement that changes data rejects with it, reads still work
     this.calls = [];               // [sql, params] of everything that ran
     this.handlers = new Map([
       [SQL.upsertPing, (p) => this.#upsert(p)],
@@ -24,6 +25,8 @@ export class FakeD1 {
       [SQL.hardware, (p) => this.#hardware(p)],
       [SQL.countries, (p) => this.#countries(p)],
       [SQL.purge, (p) => this.#purge(p)],
+      [SQL.forget, (p) => this.#forget(p)],
+      [SQL.dropSnapshot, (p) => this.#metaDelete(p)],
       [SQL.metaGet, (p) => this.#metaGet(p)],
       [SQL.metaSet, (p) => this.#metaSet(p)],
     ]);
@@ -110,6 +113,14 @@ export class FakeD1 {
     return { changes };
   }
 
+  #forget([id]) {
+    return { changes: this.installs.delete(id) ? 1 : 0 };
+  }
+
+  #metaDelete([key]) {
+    return { changes: this.meta.delete(key) ? 1 : 0 };
+  }
+
   #metaGet([key]) {
     const row = this.meta.get(key);
     return { rows: row ? [{ value: row.value, updated: row.updated }] : [] };
@@ -139,6 +150,7 @@ class FakeStatement {
 
   async #run() {
     if (this.db.broken) throw this.db.broken;
+    if (this.db.failWrites && /^\s*(INSERT|UPDATE|DELETE)\b/i.test(this.sql)) throw this.db.failWrites;
     this.db.calls.push([this.sql, this.params]);
     const out = this.handler(this.params);
     return { success: true, results: out.rows || [], meta: { changes: out.changes || 0 } };

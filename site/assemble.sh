@@ -11,7 +11,8 @@
 #             Without it the placeholder becomes empty, which is fine for a local preview.
 #
 # Copied from other places in the repository, at deploy time, so there is one copy of each:
-#   docs/img/*      -> img/     screenshots and social-preview.png (a missing one is only a warning: the page copes)
+#   docs/img/*.png|svg|... -> img/  screenshots and social-preview.png (a missing one is only a warning: the page copes;
+#                                   the README that lives there is not copied)
 #   web/fonts/*     -> fonts/   IBM Plex Sans Arabic and its licence (SIL OFL)
 #   web/icon.svg    -> icon.svg
 set -Eeuo pipefail
@@ -39,9 +40,16 @@ while IFS= read -r -d '' file; do
 done < <(cd "$root/site" && find . -type f ! -path './test/*' ! -name assemble.sh ! -name README.md -print0)
 
 shopt -s nullglob
-images=("$root"/docs/img/*)
+# Pictures only: docs/img also holds a README for the people who make the brand files, and that is not for visitors.
+images=("$root"/docs/img/*.png "$root"/docs/img/*.jpg "$root"/docs/img/*.jpeg "$root"/docs/img/*.webp "$root"/docs/img/*.svg)
 if ((${#images[@]} == 0)); then
   printf '::warning::docs/img has no pictures, so the site is built without screenshots and a social preview image\n'
+else
+  # The screenshots the page asks for arrive later than the site (tools/make-screenshots.py makes them). A missing one
+  # is only a warning, and the page closes up around the gap, but whoever deploys should see which ones are missing.
+  for name in panel-en.png panel-ar.png live-en.png box-en.png social-preview.png; do
+    [[ -f "$root/docs/img/$name" ]] || printf '::warning::docs/img/%s is missing: the site is built without it (the page copes)\n' "$name"
+  done
 fi
 for file in "${images[@]}"; do
   [[ -f "$file" ]] && install -m 0644 "$file" "$out/img/"

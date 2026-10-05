@@ -1,6 +1,11 @@
 name: Release
 # Push a tag like v3.0.0 (the same number as in the VERSION file) to publish a release.
 # Boxes download these assets; every download is counted by GitHub (the project's download count).
+#
+# Two jobs, so that the one that can write to the repository runs the least code: "build" has read-only access, runs
+# the project's own scripts and uploads what they made; "publish" has write access, runs nothing from the repository
+# and no third-party action, and only hands the files to the GitHub CLI that every runner already has.
+# A box's update runs the installer from these files as root, so keep it that way: see SECURITY.md, "Who you are trusting".
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
@@ -12,18 +17,17 @@ jobs:
   checks:
     uses: ./.github/workflows/ci.yml
 
-  publish:
+  build:
     needs: checks
     runs-on: ubuntu-latest
-    permissions:
-      contents: write          # create the release and upload its assets
     steps:
       - uses: actions/checkout@v4
-      - name: The tag must match VERSION and have changelog notes
+      - name: The tag must match VERSION, and CHANGELOG must have dated notes for it
         run: |
           tag="${GITHUB_REF_NAME#v}"
           [ "$tag" = "$(tr -d '[:space:]' < VERSION)" ] || { echo "::error::tag $GITHUB_REF_NAME does not match VERSION $(cat VERSION)"; exit 1; }
-          python3 tools/changelog-section.py "$tag" > release-notes.md
+          # --require-date: a heading that still says "Unreleased" (or has no real date) stops the release here
+          python3 tools/changelog-section.py --require-date "$tag" > release-notes.md
       - name: Build the assets
         run: bash tools/build-release.sh dist
       - name: Check the archive the way a box does
@@ -33,14 +37,32 @@ jobs:
           tar -tzf sinko.tar.gz | head -n 5
           mkdir -p ../verify && tar -xzf sinko.tar.gz -C ../verify
           test "$(cat ../verify/sinko/VERSION)" = "${GITHUB_REF_NAME#v}"
-      - name: Publish
-        uses: softprops/action-gh-release@v2
+      - name: Keep the notes next to the assets
+        run: mv release-notes.md dist/release-notes.md
+      - uses: actions/upload-artifact@v4
         with:
-          name: Sinko ${{ github.ref_name }}
-          body_path: release-notes.md
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          files: |
-            dist/sinko.tar.gz
-            dist/sinko.tar.gz.sha256
-            dist/install.sh
-          fail_on_unmatched_files: true
+          name: release
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # create the release and upload its assets
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: dist
+      - name: Publish
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/sinko.tar.gz dist/sinko.tar.gz.sha256 dist/install.sh \
+            --verify-tag \
+            --title "Sinko $GITHUB_REF_NAME" \
+            --notes-file dist/release-notes.md

@@ -4,9 +4,6 @@ The code of Sinko is free software under the GPL (see [`COPYING.md`](COPYING.md)
 spelling سينكو used as a product name, and the Sinko logo and wordmarks are the project's marks.** The GPL gives you
 the code, not the marks. This policy is meant to keep it clear to buyers and users who made what they hold.
 
-*This is a plain-language draft written for the project maintainer. Have a lawyer review it, and register the name
-where you sell, before you rely on it.*
-
 ## You may, without asking
 
 * Say that you use Sinko, review it, teach it, write about it, or that your product is **"compatible with" or "built
@@ -21,6 +18,13 @@ where you sell, before you rely on it.*
   project maintainer and the resellers the maintainer names on the project website. If you want to resell them, or sell
   your own flashed units under the Sinko name, ask for written permission.
 * Using the logo on packaging, shop listings or a website that could look like the official one.
+
+## Printed cards and packaging
+
+The quick-start card in [`docs/quick-start-card.md`](docs/quick-start-card.md) is headed "Your Sinko box" **only** for units
+that may be sold as Sinko (the maintainer's own and those of the resellers named on the project website). If you sell your
+own flashed units, put your own product name on the card and say "based on Sinko", as the rule above asks. The licence
+sentence on the card stays either way.
 
 ## Please do not
 

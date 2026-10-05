@@ -8,8 +8,9 @@ By taking part you agree to our [Code of Conduct](CODE_OF_CONDUCT.md). Security 
 
 ## Ways to help
 
-* **Report a problem** with the bug template. Run `sudo sinko doctor` first and paste its output (it contains no
-  passwords).
+* **Report a problem** with the bug template. On an own install, run `sudo sinko doctor` first and paste its output
+  (it has no passwords, but it can contain your children's names and their devices' addresses: the issue is public,
+  so replace them first). A ready-made box has no login: describe what *My box* shows instead.
 * **Ask for an app to be blocked** with the *New app* template, or add it yourself (see below).
 * **Improve the Arabic.** Native speakers: strings live in `web/app.js` and `web/pb-box.js`; read them in the page
   (`python3 tests/mock_pihole.py --web web --setup --live`, then open <http://127.0.0.1:8080>, password `test`).
@@ -42,7 +43,7 @@ flow, release assets), is in [`docs/maintainers/architecture.md`](docs/maintaine
    `akamaihd.net`, ...): block the app's own domains, not the platform underneath it.
 3. Say in the pull request how you checked it (which domains the app really uses, and that the app stops working).
 
-List files are public domain (CC0); contributions to them are too.
+Everything in `lists/` (the block lists and `services.json`) is public domain (CC0); contributions to it are too.
 
 ## Pull requests
 
@@ -51,11 +52,13 @@ List files are public domain (CC0); contributions to them are too.
   standard library, bash and curl, and the page is dependency-free JavaScript with no build step.
 * Every user-facing string exists in English and Arabic with the same `{placeholders}`; the copy test enforces it and
   bans technical words (DNS, query, cache, ...) outside the "how it works" sheet.
-* Update the README and `CHANGELOG.md` when users would notice.
+* Update the README and `CHANGELOG.md` when users would notice. If a change alters what the box sends or stores, change
+  `docs/privacy.md` (both languages), `site/strings.js` and the counter's root page in the same pull request.
 * Sign your commits off (`git commit -s`): it says you wrote the change or have the right to submit it under this
   project's licence (the [Developer Certificate of Origin](https://developercertificate.org)).
 
 ## Licence
 
-Contributions are accepted under the project's licences: GPL-3.0-or-later for code, CC0 for `lists/`
-(see [COPYING.md](COPYING.md)).
+Contributions are accepted under the project's licences: GPL-3.0-or-later for code, CC0 for everything in `lists/`
+(see [COPYING.md](COPYING.md)). The Sinko name and logo are not covered by those licences
+([TRADEMARK.md](TRADEMARK.md)).

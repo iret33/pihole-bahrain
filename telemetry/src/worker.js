@@ -4,13 +4,14 @@
 // docs/privacy.md. This file never sees or stores an address, and never logs a request.
 //
 //   POST /v1/ping               {"id","v","hw"}  ->  {"online","total"}      (from the boxes)
+//   POST /v1/forget             {"id"}           ->  {"forgotten":true}      (from a box whose parent switched the counter off)
 //   GET  /v1/stats                                ->  the public numbers      (the project website)
 //   GET  /badge/{online,total,downloads}.json     ->  shields.io endpoint JSON (README badges)
 //   cron, daily                                   ->  forget boxes unseen for 180 days
 
 import { CORS_HEADERS, HttpError, errorResponse, jsonResponse, readLimitedText } from './http.js';
-import { MAX_BODY_BYTES, isJsonContentType, parseCountry, parsePing } from './validate.js';
-import { loadSnapshot, purgeStale, recordPing } from './db.js';
+import { MAX_BODY_BYTES, isJsonContentType, parseCountry, parseForget, parsePing } from './validate.js';
+import { forgetBox, loadSnapshot, purgeStale, recordPing } from './db.js';
 import { createDownloads } from './downloads.js';
 import { compactNumber } from './format.js';
 
@@ -81,6 +82,17 @@ export function createWorker(deps = {}) {
     return jsonResponse({ online, total }, { cache: 'no-store' });
   }
 
+  // The parent switched the counter off: delete everything held for this box. The answer is the same whether or not the
+  // id was known, so that a retry (the box asks again when an answer is lost) is harmless and the answer does not
+  // tell anyone whether an id exists. Nothing is logged about the request, as with a ping.
+  async function forget(request, env) {
+    if (!isJsonContentType(request.headers.get('content-type'))) throw new HttpError(415, 'unsupported_media_type');
+    const { id } = parseForget(await readLimitedText(request, MAX_BODY_BYTES));
+    const db = database(env);
+    await withDatabase(() => forgetBox(db, id));
+    return jsonResponse({ forgotten: true }, { cache: 'no-store' });
+  }
+
   // The counts and the download total for the two public endpoints. The total is optional: null when unknown.
   async function readNumbers(env, wantDownloads) {
     const db = database(env);
@@ -124,7 +136,11 @@ export function createWorker(deps = {}) {
   function rootResponse(env) {
     const repo = typeof env.GITHUB_REPO === 'string' ? env.GITHUB_REPO : '';
     const where = repo ? `\nWhat it stores and why: https://github.com/${repo}/blob/master/docs/privacy.md\n` : '\n';
-    return new Response(`Sinko anonymous counter.\nBoxes only send a random code, the version and the kind of device, and only when the parent said yes.${where}`, {
+    const text = 'Sinko anonymous counter.\n'
+      + 'A box sends a random code, its Sinko version and the kind of device, and only when its parent said yes. '
+      + 'The counter adds the country and the times it first and last heard from the box. Nothing else is stored.\n'
+      + 'Switching the counter off on the box deletes its record here.';
+    return new Response(`${text}${where}`, {
       headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'public, max-age=3600', 'X-Content-Type-Options': 'nosniff' },
     });
   }
@@ -133,6 +149,7 @@ export function createWorker(deps = {}) {
   const ROUTES = new Map([
     ['/', { methods: ['GET'], cors: true, handle: (request, env) => rootResponse(env) }],
     ['/v1/ping', { methods: ['POST'], cors: false, handle: ping }],
+    ['/v1/forget', { methods: ['POST'], cors: false, handle: forget }],
     ['/v1/stats', { methods: ['GET'], cors: true, handle: (request, env) => statsResponse(env) }],
     ...Object.keys(BADGES).map((kind) => [`/badge/${kind}.json`, { methods: ['GET'], cors: true, handle: (request, env) => badgeResponse(kind, env) }]),
   ]);

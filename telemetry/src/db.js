@@ -5,7 +5,8 @@
 //   dedupe   a ping is ignored while the last accepted one is younger than 10 minutes
 //   online   seen in the last 12 hours (boxes ping every 6 hours, so one missed ping does not drop a box)
 //   active   seen in the last 7 days
-//   total    seen in the last 180 days = what is kept (the daily cron deletes the rest)
+//   total    seen in the last 180 days = what is kept (the daily cron deletes the rest, and a box that asks to be
+//            forgotten is deleted at once)
 // Every window is inclusive at its edge except the purge, which deletes strictly older than 180 days.
 
 export const DEDUPE_SECONDS = 10 * 60;
@@ -55,6 +56,13 @@ FROM installs
 WHERE last_seen >= ?1 AND country IS NOT NULL`,
 
   purge: 'DELETE FROM installs WHERE last_seen < ?1',
+
+  // A box asked to be forgotten (the parent switched the counter off). Idempotent: an unknown id deletes nothing.
+  forget: 'DELETE FROM installs WHERE id = ?1',
+
+  // The remembered counts (see loadSnapshot) go too, but only when a box was really deleted, so that forget requests
+  // for ids nobody knows cannot make every visitor of the website cost a full recount.
+  dropSnapshot: 'DELETE FROM meta WHERE key = ?1',
 
   metaGet: 'SELECT value, updated FROM meta WHERE key = ?1',
 
@@ -112,7 +120,12 @@ export async function loadSnapshot(db, now, ttl) {
     if (kept && kept.at <= now && now - kept.at < ttl) return kept;
   }
   const fresh = await computeSnapshot(db, now);
-  await db.prepare(SQL.metaSet).bind('snapshot', JSON.stringify(fresh), now).run();
+  try {
+    await db.prepare(SQL.metaSet).bind('snapshot', JSON.stringify(fresh), now).run();
+  } catch {
+    // The stored copy is only an optimisation. The counts were read, so a write that fails (the daily write limit, a
+    // full database, a hiccup) must not hide them from the website, the badges or the box that is waiting for its answer.
+  }
   return fresh;
 }
 
@@ -120,6 +133,16 @@ export async function loadSnapshot(db, now, ttl) {
 export async function purgeStale(db, now) {
   const result = await db.prepare(SQL.purge).bind(now - RETENTION_SECONDS).run();
   return toCount(result.meta && result.meta.changes);
+}
+
+// Deletes the box's whole record. Returns true when there was one. The remembered counts are dropped too, so that the
+// public numbers stop including the box at once and not up to 5 minutes later. Safe to repeat: a second call finds
+// nothing and changes nothing.
+export async function forgetBox(db, id) {
+  const result = await db.prepare(SQL.forget).bind(id).run();
+  const deleted = toCount(result.meta && result.meta.changes) > 0;
+  if (deleted) await db.prepare(SQL.dropSnapshot).bind('snapshot').run();
+  return deleted;
 }
 
 export async function readMeta(db, key) {

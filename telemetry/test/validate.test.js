@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { HttpError } from '../src/http.js';
-import { HARDWARE, isJsonContentType, isVersion, parseCountry, parsePing } from '../src/validate.js';
+import { HARDWARE, isJsonContentType, isVersion, parseCountry, parseForget, parsePing } from '../src/validate.js';
 
 const ID = '0123456789abcdef0123456789abcdef';
 const refused = (text, code) => assert.throws(() => parsePing(text), (err) => err instanceof HttpError && err.status === 400 && err.code === code, `${text} -> ${code}`);
@@ -68,4 +68,24 @@ test('the country comes from CF-IPCountry: two letters, never XX or T1', () => {
   assert.equal(parseCountry('bh'), 'BH');
   assert.equal(parseCountry(' sa '), 'SA');
   for (const v of ['XX', 'xx', 'T1', '', 'B', 'BHR', 'B1', '1B', 'ب ح', null, undefined]) assert.equal(parseCountry(v), null, String(v));
+});
+
+const refusedForget = (text, code) => assert.throws(() => parseForget(text), (err) => err instanceof HttpError && err.status === 400 && err.code === code, `${text} -> ${code}`);
+
+test('a forget request is exactly {"id"} and the id is as strict as in a ping', () => {
+  assert.deepEqual(parseForget(JSON.stringify({ id: ID })), { id: ID });
+  assert.deepEqual(parseForget(` { "id" : "${ID}" } \n`), { id: ID });
+  for (const id of [ID.toUpperCase(), ID.slice(1), `${ID}0`, `${ID.slice(1)}g`, '', null, 5, [ID], `${ID}\n`]) {
+    refusedForget(JSON.stringify({ id }), 'invalid_id');
+  }
+  refusedForget('{}', 'invalid_id');
+});
+
+test('a forget request that carries anything else is refused, and so is anything that is not an object', () => {
+  refusedForget(JSON.stringify({ id: ID, v: '3.0.0' }), 'unexpected_field');
+  refusedForget(JSON.stringify({ id: ID, v: '3.0.0', hw: 'x86' }), 'unexpected_field');
+  refusedForget('{"id":"' + ID + '","__proto__":{"a":1}}', 'unexpected_field');
+  refusedForget('', 'bad_json');
+  refusedForget('{', 'bad_json');
+  for (const text of ['null', '[]', '"x"', '12', 'true']) refusedForget(text, 'bad_body');
 });

@@ -11,5 +11,6 @@
 - [ ] Tests added or updated, and `python3 -m unittest discover -s tests -p "test_*.py"` passes
 - [ ] New or changed text is in English **and** Arabic
 - [ ] README / `CHANGELOG.md` updated if users would notice
+- [ ] If this changes what the box sends or stores, `docs/privacy.md`, the site text and the counter's root page say the same
 - [ ] No new runtime dependency; shell scripts pass `shellcheck`
 - [ ] Commits are signed off (`git commit -s`)

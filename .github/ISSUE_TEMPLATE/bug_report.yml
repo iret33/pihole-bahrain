@@ -7,7 +7,11 @@ body:
       value: |
         Thanks for taking the time. For a blocked app that still works, please read the
         [troubleshooting guide](https://github.com/iret33/sinko/blob/master/docs/troubleshooting.md) first.
-        **Never paste your parent password.** `sudo sinko doctor` output is safe to share.
+        **This issue is public. Never paste your parent password.** `sudo sinko doctor` output has no passwords, but it can
+        contain your children's names (as you typed them), their devices' MAC or IP addresses and your router's address:
+        read it first and replace those (`Child 1`, `aa:bb:cc:...`) before you post.
+        A ready-made box has no login, so it cannot run `doctor`: describe what you see, or attach a screenshot of
+        *My box* with any names hidden, and put "ready-made" in the hardware field.
   - type: textarea
     id: what
     attributes:
@@ -17,7 +21,8 @@ body:
   - type: textarea
     id: doctor
     attributes:
-      label: Output of `sudo sinko doctor`
+      label: Output of `sudo sinko doctor` (own install only)
+      description: "Public page: replace your children's names, device addresses (MAC or IP) and your router's address before you post. Ready-made box (no login)? Write \"ready-made\" here instead and describe what *My box* shows."
       render: text
     validations:
       required: true
@@ -43,5 +48,5 @@ body:
     id: logs
     attributes:
       label: Logs, if relevant
-      description: "`journalctl -u sinko --since '1 hour ago'` or `/var/log/sinko-install.log`"
+      description: "Own install only: `journalctl -u sinko --since '1 hour ago'` or `/var/log/sinko-install.log`. Public page: leave out names and addresses."
       render: text

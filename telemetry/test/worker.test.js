@@ -6,7 +6,7 @@ import { createWorker } from '../src/worker.js';
 import { SQL } from '../src/db.js';
 import {
   DAY, HOUR, ID_A, ID_B, ID_C, MINUTE, T0,
-  getRequest, loadBackends, makeLog, makeWorld, pingBody, pingRequest,
+  forgetRequest, getRequest, loadBackends, makeLog, makeWorld, pingBody, pingRequest,
 } from './support/harness.js';
 
 const backends = await loadBackends();
@@ -180,6 +180,205 @@ for (const backend of backends) {
       });
     });
 
+    describe('POST /v1/forget', () => {
+      const said = async (res) => ({ status: res.status, body: await res.json() });
+
+      test("deletes the box's whole record and says so", async () => {
+        const w = makeWorld(backend);
+        await w.ping(pingBody({ id: ID_A }), { headers: { 'CF-IPCountry': 'BH' } });
+        await w.ping(pingBody({ id: ID_B }));
+        const res = await w.forget({ id: ID_A });
+        assert.equal(res.status, 200);
+        assert.match(res.headers.get('content-type'), /^application\/json/);
+        assert.equal(res.headers.get('cache-control'), 'no-store');
+        assert.equal(res.headers.get('access-control-allow-origin'), null);
+        assert.deepEqual(await res.json(), { forgotten: true });
+        assert.deepEqual((await w.db.dump()).map((r) => r.id), [ID_B]);
+      });
+
+      test('an id nobody knows gets the same answer and changes nothing', async () => {
+        const w = makeWorld(backend);
+        await w.ping(pingBody({ id: ID_B }));
+        const before = await w.db.dump();
+        assert.deepEqual(await said(await w.forget({ id: ID_A })), { status: 200, body: { forgotten: true } });
+        assert.deepEqual(await w.db.dump(), before);
+        assert.deepEqual(await said(await w.forget({ id: ID_A })), { status: 200, body: { forgotten: true } });
+      });
+
+      test('on an empty database, and twice in a row', async () => {
+        const w = makeWorld(backend);
+        assert.equal((await w.forget({ id: ID_A })).status, 200);
+        await w.ping(pingBody({ id: ID_A }));
+        assert.equal((await w.forget({ id: ID_A })).status, 200);
+        assert.equal((await w.forget({ id: ID_A })).status, 200);
+        assert.deepEqual(await w.db.dump(), []);
+      });
+
+      test('the public numbers stop counting the box at once, not when the remembered counts expire', async () => {
+        const w = makeWorld(backend, { snapshotTtl: 300 });
+        await w.ping(pingBody({ id: ID_A }));
+        await w.ping(pingBody({ id: ID_B }));
+        w.clock.advance(301);                                         // the first ping's remembered counts (1 box) are stale now
+        const before = await w.stats();                               // counts both boxes and remembers that for 5 minutes
+        assert.deepEqual([before.online, before.active7d, before.total], [2, 2, 2]);
+        w.clock.advance(1);
+        await w.forget({ id: ID_A });
+        const after = await w.stats();                                // well inside the 5 minutes
+        assert.deepEqual([after.online, after.active7d, after.total], [1, 1, 1]);
+        assert.deepEqual(after.hw, { 'orangepi-zero3': 1 });
+        assert.deepEqual(after.versions, { '3.0.0': 1 });
+      });
+
+      test('forgetting an unknown id does not throw the remembered counts away', async () => {
+        const w = makeWorld(backend, { snapshotTtl: 300 });
+        await w.ping(pingBody({ id: ID_B }));
+        await w.stats();
+        const kept = await w.db.dumpMeta();
+        assert.equal(kept.some((m) => m.key === 'snapshot'), true);
+        for (let i = 0; i < 5; i += 1) await w.forget({ id: hex(100 + i) });
+        assert.deepEqual(await w.db.dumpMeta(), kept);                // a flood of forgets cannot force recounts
+      });
+
+      test('a box that forgets inside the dedupe window is gone, and its next ping is a new box, not a repeat', async () => {
+        const w = makeWorld(backend);
+        await w.ping(pingBody({ id: ID_A, v: '3.0.0' }), { headers: { 'CF-IPCountry': 'BH' } });
+        w.clock.advance(60);                                          // well inside the 10 minutes
+        await w.forget({ id: ID_A });
+        assert.deepEqual(await w.db.dump(), []);
+        w.clock.advance(60);
+        const again = await w.ping(pingBody({ id: ID_A, v: '3.1.0' }));
+        assert.deepEqual(await again.json(), { online: 1, total: 1 });
+        assert.deepEqual(await w.db.dump(), [{ id: ID_A, first_seen: T0 + 120, last_seen: T0 + 120, version: '3.1.0', hw: 'orangepi-zero3', country: null }]);
+      });
+
+      test('a ping that arrives after the forget brings nothing back of the old record', async () => {
+        const w = makeWorld(backend);
+        await w.ping(pingBody({ id: ID_A }), { headers: { 'CF-IPCountry': 'SA' } });
+        await w.forget({ id: ID_A });
+        w.clock.advance(5 * HOUR);
+        await w.ping(pingBody({ id: ID_A }));
+        const [kept] = await w.db.dump();
+        assert.equal(kept.first_seen, T0 + 5 * HOUR);                  // not the old first_seen
+        assert.equal(kept.country, null);                              // not the old country
+      });
+
+      test("the daily purge and a forget do not get in each other's way", async () => {
+        const w = makeWorld(backend);
+        await w.db.insertRaw(row(hex(1), T0 - 200 * DAY));
+        await w.db.insertRaw(row(hex(2), T0 - 1 * DAY));
+        await w.forget({ id: hex(1) });                                // already due for the purge
+        await w.purge();
+        assert.deepEqual((await w.db.dump()).map((r) => r.id), [hex(2)]);
+        assert.deepEqual(w.log.lines, ['log: sinko-counter: forgot 0 box(es) unseen for 180 days']);
+      });
+
+      test('stores and logs nothing about who sent it, and not the id either', async () => {
+        const w = makeWorld(backend);
+        await w.ping(pingBody({ id: ID_A }));
+        const secrets = ['203.0.113.77', '2001:db8::77', 'sinko/3.0.0-secret-agent'];
+        await w.forget({ id: ID_A }, {
+          headers: { 'CF-Connecting-IP': secrets[0], 'X-Forwarded-For': secrets[1], 'User-Agent': secrets[2], 'CF-IPCountry': 'SA' },
+        });
+        const everything = JSON.stringify([await w.db.dump(), await w.db.dumpMeta(), w.log.lines]);
+        for (const secret of secrets) assert.equal(everything.includes(secret), false, secret);
+        assert.deepEqual(w.log.lines, []);
+        const deleting = w.db.calls.filter(([sql]) => sql === SQL.forget || sql === SQL.dropSnapshot);
+        assert.equal(deleting.length, 2);                              // the row, and the remembered counts
+        assert.equal(JSON.stringify(deleting).includes('SA'), false);
+      });
+
+      describe('is refused with a clear status, and nothing is deleted', () => {
+        const ok = { id: ID_A };
+        const big = (n) => JSON.stringify(ok) + ' '.repeat(n - JSON.stringify(ok).length);
+        const cases = [
+          ['wrong content type', () => forgetRequest(ok, { type: 'text/plain' }), 415, 'unsupported_media_type'],
+          ['no content type', () => forgetRequest(ok, { type: null }), 415, 'unsupported_media_type'],
+          ['malformed JSON', () => forgetRequest(null, { raw: '{"id":' }), 400, 'bad_json'],
+          ['an empty body', () => forgetRequest(null, { raw: '' }), 400, 'bad_json'],
+          ['an array', () => forgetRequest(null, { raw: '[]' }), 400, 'bad_body'],
+          ['no id', () => forgetRequest({}), 400, 'invalid_id'],
+          ['upper case id', () => forgetRequest({ id: ID_A.toUpperCase() }), 400, 'invalid_id'],
+          ['short id', () => forgetRequest({ id: 'abc' }), 400, 'invalid_id'],
+          ['a number as id', () => forgetRequest({ id: 5 }), 400, 'invalid_id'],
+          ['a ping body (the other fields are not part of a forget)', () => forgetRequest(pingBody()), 400, 'unexpected_field'],
+          ['an extra field', () => forgetRequest({ id: ID_A, why: 'because' }), 400, 'unexpected_field'],
+          ['513 bytes', () => forgetRequest(null, { raw: big(513) }), 413, 'too_large'],
+          ['a Content-Length that is not a number', () => forgetRequest(ok, { headers: { 'Content-Length': 'many' } }), 400, 'bad_length'],
+          ['bytes that are not UTF-8', () => forgetRequest(null, { raw: new Uint8Array([0x7b, 0xff, 0xfe, 0x7d]) }), 400, 'bad_encoding'],
+        ];
+        for (const [name, make, status, code] of cases) {
+          test(name, async () => {
+            const w = makeWorld(backend);
+            await w.db.insertRaw(row(ID_A, T0));
+            const before = await w.db.dump();
+            const res = await w.call(make());
+            assert.equal(res.status, status);
+            assert.deepEqual(await res.json(), { error: code });
+            assert.equal(res.headers.get('cache-control'), 'no-store');
+            assert.equal(res.headers.get('access-control-allow-origin'), null);
+            assert.deepEqual(await w.db.dump(), before);
+            assert.deepEqual(w.db.calls, []);
+          });
+        }
+
+        test('exactly 512 bytes is fine', async () => {
+          const w = makeWorld(backend);
+          const raw = big(512);
+          assert.equal(new TextEncoder().encode(raw).length, 512);
+          assert.equal((await w.forget(null, { raw })).status, 200);
+        });
+      });
+
+      test('other methods and paths', async () => {
+        const w = makeWorld(backend);
+        await w.db.insertRaw(row(ID_A, T0));
+        for (const method of ['GET', 'HEAD', 'PUT', 'PATCH', 'DELETE']) {
+          const res = await w.call(forgetRequest({ id: ID_A }, { method }));
+          assert.equal(res.status, 405, method);
+          assert.equal(res.headers.get('allow'), 'POST, OPTIONS');
+        }
+        for (const path of ['/v1/forget/', '/V1/FORGET', '/v1/forgets', '/forget']) {
+          const res = await w.call(pingRequest({ id: ID_A }, { path }));
+          assert.equal(res.status, 404, path);
+        }
+        assert.equal((await w.db.dump()).length, 1);
+      });
+
+      test("gets no CORS: a web page cannot make anyone's box forgotten", async () => {
+        const w = makeWorld(backend);
+        const preflight = await w.get('/v1/forget', { method: 'OPTIONS', headers: { Origin: 'https://evil.example', 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'content-type' } });
+        assert.equal(preflight.status, 204);
+        assert.equal(preflight.headers.get('access-control-allow-origin'), null);
+        assert.equal(preflight.headers.get('access-control-allow-methods'), null);
+        assert.equal(preflight.headers.get('allow'), 'POST, OPTIONS');
+        const res = await w.forget({ id: ID_A }, { headers: { Origin: 'https://evil.example' } });
+        assert.equal(res.headers.get('access-control-allow-origin'), null);
+      });
+
+      test('a database that is down: 503 and a short log line, so the box asks again later', async () => {
+        const w = makeWorld(backend);
+        await w.ping(pingBody({ id: ID_A }));
+        w.db.broken = new Error('D1_ERROR: down (secret detail)');
+        const res = await w.forget({ id: ID_A });
+        assert.equal(res.status, 503);
+        const text = await res.text();
+        assert.deepEqual(JSON.parse(text), { error: 'unavailable' });
+        assert.equal(text.includes('secret detail'), false);
+        assert.ok(w.log.lines.every((l) => l.startsWith('error: sinko-counter: database error')));
+        assert.equal(w.log.lines.join('\n').includes(ID_A), false);
+        w.db.broken = null;
+        assert.equal((await w.forget({ id: ID_A })).status, 200);
+        assert.deepEqual(await w.db.dump(), []);
+      });
+
+      test('no database binding: 500 not_configured', async () => {
+        const w = makeWorld(backend);
+        const res = await w.worker.fetch(forgetRequest({ id: ID_A }), {});
+        assert.equal(res.status, 500);
+        assert.deepEqual(await res.json(), { error: 'not_configured' });
+      });
+    });
+
     describe('GET /v1/stats', () => {
       test('an empty database', async () => {
         const w = makeWorld(backend);
@@ -271,6 +470,22 @@ for (const backend of backends) {
         assert.equal(fresh.generatedAt, new Date((T0 + 300) * 1000).toISOString());
         assert.equal(readsBefore, 1);
         assert.equal(w.db.calls.filter(([sql]) => sql === SQL.counts).length, 2);
+      });
+
+      test('the counts are still answered when the remembered copy cannot be written (write limit, full database)', async () => {
+        const w = makeWorld(backend, { snapshotTtl: 300 });
+        await w.ping(pingBody({ id: ID_A }));
+        w.clock.advance(301);                                         // the remembered counts are stale: a recount, then a write
+        w.db.failWrites = new Error('D1_ERROR: daily write limit exceeded');
+        const stats = await w.get('/v1/stats');
+        assert.equal(stats.status, 200);
+        const body = await stats.json();
+        assert.deepEqual([body.online, body.active7d, body.total], [1, 1, 1]);
+        assert.equal((await w.get('/badge/online.json')).status, 200);
+        assert.equal((await w.ping(pingBody({ id: ID_B }))).status, 503);   // a ping needs its own write: the box asks again later
+        w.db.failWrites = null;
+        assert.equal((await w.ping(pingBody({ id: ID_B }))).status, 200);
+        assert.equal((await w.stats()).total, 2);
       });
 
       test('a damaged or future snapshot is ignored and rebuilt', async () => {
@@ -472,6 +687,11 @@ for (const backend of backends) {
         const text = await res.text();
         assert.match(text, /anonymous counter/i);
         assert.match(text, /github\.com\/iret33\/sinko\/blob\/master\/docs\/privacy\.md/);
+        // What the public answer says about itself must match docs/privacy.md: what a box sends, what the counter adds,
+        // and that switching the counter off deletes the record.
+        assert.match(text, /random code, its Sinko version and the kind of device/);
+        assert.match(text, /country and the times it first and last heard/);
+        assert.match(text, /off on the box deletes its record/);
         assert.equal((await w.get('/', { method: 'POST' })).status, 405);
       });
 

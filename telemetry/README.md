@@ -9,6 +9,11 @@ boxes whose parent switched the counter on. What a box sends and what happens to
 Running your own counter is optional. Sinko works the same without one, and a box whose counter address is empty
 never sends anything.
 
+This counter is the only thing Sinko itself ever sends to the project, and it never receives the names of the sites a
+family looks up. (The Pi-hole on the box does pass the names it cannot answer itself to its upstream DNS service,
+Cloudflare for Families by default, as every DNS filter does. That service is not this counter and not the project:
+see [`docs/privacy.md`](../docs/privacy.md).)
+
 ## Deploy in five minutes
 
 You need a free Cloudflare account and Node.js 20 or newer.
@@ -80,9 +85,10 @@ download total are also remembered in the database for a few minutes (see "Numbe
 | Request | Answer |
 |---|---|
 | `POST /v1/ping` with `{"id","v","hw"}` | `{"online","total"}`. Only from boxes. No CORS. |
+| `POST /v1/forget` with `{"id"}` | `{"forgotten":true}`. Deletes the box's record. Only from boxes. No CORS. |
 | `GET /v1/stats` | `{"online","active7d","total","countries","versions":{},"hw":{},"downloads","generatedAt"}`, CORS `*`, `Cache-Control: public, max-age=60` |
 | `GET /badge/online.json`, `/badge/total.json`, `/badge/downloads.json` | [shields.io endpoint](https://shields.io/badges/endpoint-badge) JSON, CORS `*`, `Cache-Control: public, max-age=300` |
-| `OPTIONS` | `204`; CORS headers on the three public paths, none on `/v1/ping` |
+| `OPTIONS` | `204`; CORS headers on the three public paths, none on `/v1/ping` and `/v1/forget` |
 | `GET /` | one plain-text paragraph saying what this is |
 | cron, daily at 03:17 UTC | deletes boxes unseen for 180 days |
 
@@ -90,6 +96,29 @@ A ping must be `Content-Type: application/json`, at most 512 bytes, with exactly
 hex characters), `v` (a semantic version such as `3.0.0` or `3.1.0-rc.1`) and `hw` (`orangepi-zero3`, `raspberrypi`,
 `x86` or `other`). Anything else is refused, on purpose: the promise to families is that nothing else is sent, so a
 body that carries more is a bug in the sender that should be loud.
+
+### Forgetting a box
+
+When a parent switches the counter off (in the page, or with `sudo sinko telemetry off` on an own install), the box
+sends `POST /v1/forget` with the body `{"id": "<the same 32 hex characters>"}` and `Content-Type: application/json`,
+and then deletes its own copy of the id. The rules are those of a ping: at most 512 bytes, exactly one field
+(`id`; a body that carries anything else is refused with `unexpected_field`), the id must be 32 lowercase hex
+characters, no CORS, nothing logged about the request.
+
+* The answer is `200 {"forgotten": true}` **whether or not the id was known**, and again on a repeat. It does not tell
+  anyone whether an id exists, and a box that did not see the answer can simply ask again.
+* The row is deleted, with everything in it (first and last time seen, version, kind of box, country). A later ping
+  with the same id would start a new row (the 10-minute repeat rule looks at the row, and the row is gone), but a box
+  that was switched off does not ping.
+* The public numbers stop including the box at once: the remembered counts are dropped when, and only when, a row was
+  really deleted, so a stream of forget requests for ids nobody knows costs nothing and cannot force recounts. (That is
+  two statements, the row first. If only the second fails, the box gets a `503`, asks again, gets `200` because the row
+  is already gone, and the public counts catch up within their 5 minutes. Do not turn it into one batch without teaching
+  the fake database in `test/support` the new statement.)
+* Anything other than `200 {"forgotten": true}` (an old Worker that has no `/v1/forget` answers `404`, a database
+  that is down answers `503`) makes the box **keep its id, send no pings, and ask again about every 6 hours** until it
+  is told. **Deploy this Worker before boxes with the new version reach families**, or a parent who switches the counter
+  off will see the box keep trying. The 180-day purge below is the backstop.
 
 Errors are `{"error": "<code>"}` with the status: `400` (`bad_json`, `bad_body`, `invalid_id`, `invalid_version`,
 `invalid_hw`, `unexpected_field`, `bad_encoding`, `bad_length`), `404`, `405`, `413`, `415`, `503` (`unavailable`: the
@@ -114,7 +143,9 @@ Edges are inclusive (a box seen exactly 12 hours ago is online) except the purge
 than 180 days ago. The counts are worked out from one database statement, so `online <= active7d <= total` always
 holds, and they are kept for 5 minutes: recomputing them for every ping and every visit to the website would read the
 whole table each time. So a box that has just pinged may see a number that is a few minutes old, except that the
-answer to a ping always counts the box that is asking.
+answer to a ping always counts the box that is asking. If the counts were read but the database refuses to remember them
+(a write limit, a full database), they are still answered: the remembered copy is only an optimisation, so the website and
+the badges keep working while pings fail.
 
 ### Downloads
 
@@ -147,9 +178,14 @@ last seen. [`docs/privacy.md`](../docs/privacy.md) says all of this to parents.
 
 ### Delete everything
 
-* One box (a family asks): they run `sudo sinko telemetry payload` and send you the `id` it prints, then
+* One box: the parent switches the counter off (the page, *My box*, *Count this box*, or `sudo sinko telemetry off` on an
+  own install), and the box deletes its own record through `/v1/forget`. Nobody needs to write to you and no shell
+  is needed, which matters because a ready-made box has no login. If the box could not reach the counter at that
+  moment it keeps asking. By hand, if you ever have to (you need the id, which only an own install can print with
+  `sudo sinko telemetry payload`):
   `npx wrangler d1 execute sinko-counter --remote --command "DELETE FROM installs WHERE id = '<id>'"`.
-  They can switch the counter off first (`sudo sinko telemetry off`, or the page).
+* Cloudflare may keep restore points of a D1 database (its "Time Travel" feature) for a limited time after a deletion.
+  Only the account that owns the database can use them, and the privacy statement says so to parents.
 * All boxes: `npx wrangler d1 execute sinko-counter --remote --command "DELETE FROM installs; DELETE FROM meta;"`
 * The whole service: `npx wrangler delete` (the Worker) and `npx wrangler d1 delete sinko-counter` (the database).
 
@@ -170,17 +206,22 @@ held would be public. What limits the damage:
 * `/v1/ping` sends no CORS headers, so a web page cannot make its visitors' browsers count themselves. (A script on a
   computer still can.)
 * On Cloudflare's free plan, the daily limits on requests and database writes are hard stops: a flood makes pings
-  fail instead of costing money. On a paid plan a flood can cost money. The Worker cannot rate-limit by address, because
-  it never sees or keeps one, but Cloudflare can, in front of it: in the Cloudflare dashboard, Security, WAF, Rate
-  limiting rules, add a rule for `URI Path equals /v1/ping` that blocks an address after, say, 30 requests a minute.
+  fail instead of costing money. On a paid plan a flood can cost money.
+* **A per-address rate limit needs a custom domain.** The Worker cannot rate-limit by address, because it never sees or
+  keeps one. Cloudflare's WAF rate limiting rules can do it in front of the Worker (Security, WAF, Rate limiting
+  rules, a rule for `URI Path equals /v1/ping` that blocks an address after, say, 30 requests a minute), but those
+  rules belong to a **zone** that your Cloudflare account owns. A `*.workers.dev` address is not one. With the
+  default `workers.dev` setup there is **no** per-address limit at all: the only protection is the plan's hard
+  limits above. If the number on the website matters to you, use the "Custom domain" setup, then add the rule (cover
+  `/v1/forget` as well). Do not count on a Worker-side limit: the Worker has no address to key it on.
 
 If the numbers ever look wrong, look at the table:
 `npx wrangler d1 execute sinko-counter --remote --command "SELECT version, hw, COUNT(*) FROM installs GROUP BY 1, 2 ORDER BY 3 DESC"`.
 
 ## Cost
 
-On the free plans one box costs about four pings a day, each a request, one row read and about three rows written
-(the row and its index). That is comfortable for a few thousand boxes (the limits are 100,000 requests and 100,000 rows
+On the free plans one box costs about four pings a day, each a request, one row read and about two rows written
+(the row and its index entry). That is comfortable for a few thousand boxes (the limits are 100,000 requests and 100,000 rows
 written a day, and 5 million rows read a day, which is what the 5-minute counts spend most of). Limits and prices change:
 check Cloudflare's current D1 and Workers pages before you promise anything.
 

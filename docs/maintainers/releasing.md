@@ -15,10 +15,21 @@
    `arabic`, `dns`, `family`), social preview image `docs/img/social-preview.png`. Remove the old description that says
    "Pi-hole web interface fork".
 4. **Settings**: enable *Issues* and *Discussions*; Security → *Private vulnerability reporting* on; Pages → source
-   *GitHub Actions*; Branches → protect `master` (require the CI checks, no force pushes); Actions → allow actions from
-   GitHub and `softprops/action-gh-release`, `cloudflare/wrangler-action`.
-5. **Counter service** (optional but wanted): follow `telemetry/README.md`, then put its address in
-   `DEFAULT_TELEMETRY_URL` in `bin/sinko` and in `site/config.js` (`statsUrl`). Until you do, no box can ever send anything.
+   *GitHub Actions*; Actions → allow actions from GitHub and `cloudflare/wrangler-action` (the counter's deploy workflow
+   only; the release workflow uses no third-party action). **Protect everything that decides what every box installs**,
+   because a box runs the installer from a release as root (see `SECURITY.md`, "Who you are trusting"):
+   * turn on two-factor authentication or passkeys on the owner account, and add a second owner so that one stolen
+     account is not enough;
+   * Branches → protect `master` (require the CI checks, no force pushes, and code-owner review, so that a change to
+     `lists/` is reviewed like code: add `lists/` to `.github/CODEOWNERS`);
+   * Rules → a tag ruleset for `v*` that lets only the owner create, move or delete tags;
+   * keep every action in the workflows that can write either GitHub-owned or pinned to a commit (Dependabot, configured in
+     `.github/dependabot.yml`, keeps pins up to date; it does not create them).
+5. **Counter service** (optional but wanted): follow `telemetry/README.md` (deploy it **with `/v1/forget`** before boxes of
+   this version reach families: an older Worker answers 404, and a box whose parent switched the counter off would keep
+   asking), then put its address in `TELEMETRY_URL` near the top of `bin/sinko` and in `site/config.js` (`statsUrl`).
+   Until you do, no box can ever send anything. **Do this before you tag**: the address is part of the release.
+   If you want a per-address rate limit in front of the counter, it needs a custom domain (see the README, "Abuse").
 6. **Website**: set `buyUrl` (your shop page) and `supportUrl` in `site/config.js`; leave `buyUrl` empty to hide the button.
 7. **Where the repository name is written.** If you ever move to another owner or name, change `iret33/sinko` in:
    `install.sh`, `bin/sinko`, `web/links.json`, `site/config.js`, `telemetry/wrangler.toml`, `systemd/sinko.service`,
@@ -30,13 +41,23 @@
 1. Decide the number (`MAJOR.MINOR.PATCH`): a fix is a patch, a feature a minor, anything that changes how an installed
    box must be handled a major.
 2. Put the number in `VERSION` **and** in `VERSION = "…"` in `bin/sinko` (a test fails if they differ), and write the
-   section `## [X.Y.Z] - YYYY-MM-DD` in `CHANGELOG.md`. The section is the text of the GitHub release.
+   section `## [X.Y.Z] - YYYY-MM-DD` in `CHANGELOG.md`, with the real date of the release. The section is the text of the
+   GitHub release, and the Release workflow **refuses** a heading that still says `Unreleased` or has no real date
+   (`tools/changelog-section.py --require-date`), so replace the word with the date before you tag.
 3. Run everything (`CONTRIBUTING.md`), merge to `master`, wait for CI to be green.
 4. Tag and push: `git tag -a vX.Y.Z -m "Sinko X.Y.Z" && git push origin vX.Y.Z`. The *Release* workflow runs the
-   checks again, builds `sinko.tar.gz`, `sinko.tar.gz.sha256` and `install.sh`, and publishes the release.
+   checks again, builds `sinko.tar.gz`, `sinko.tar.gz.sha256` and `install.sh` (in a job that can only read), and a
+   second job that can write publishes the release with the GitHub CLI.
 5. **Check the release like a family would**: on a spare box (or VM) run
    `curl -fsSL https://github.com/iret33/sinko/releases/latest/download/install.sh | sudo bash`; then on a box
    running the previous version open *My box* and press *Update now*; both must end green. Keep the old box until you have.
+
+## Ready-made images follow releases
+
+Pi-hole on a ready-made box is not updated by Sinko (nobody can log in to the box), so the only way a shipped box gets a
+newer Pi-hole is a newer image. Rebuild the golden unit for every Sinko release and whenever Pi-hole publishes a security
+fix ([`../product-image.md`](../product-image.md)), and say in your shop how a customer re-flashes
+([`../selling.md`](../selling.md)).
 
 ## A release turns out to be bad
 
@@ -45,9 +66,27 @@ points to the previous good one, then publish a fixed `X.Y.Z+1`. A box that alre
 `sudo sinko rollback` (it keeps the version before the last update); a box whose update failed has already rolled back
 by itself.
 
+## A list change turns out to be bad
+
+Lists are not part of a release. Pi-hole downloads `lists/*.txt` from `master` every night (03:30 plus up to two hours)
+with no checksum and no rollback, and marking a release as a pre-release does nothing for them. Revert the commit
+(`git revert <sha>`), merge it through a pull request with green CI, and boxes recover at their next nightly refresh, or at
+once with `sudo pihole -g`. No release is needed. A list can change what is blocked; it cannot run anything on a box. The
+tests refuse entries that would block shared infrastructure, but an over-broad entry such as a whole public suffix is not
+caught by them, so review list changes by hand.
+
 ## Download count
 
 Every download of a release asset is counted by GitHub. `sinko.tar.gz` is downloaded by each install and each update,
 `install.sh` by each new install through the one-liner. The README badge and the website sum them; the counter service
 adds them to its statistics (`downloads`). Counts include updates: they are *downloads*, not *families*; the number of
 boxes online comes from the counter service and only includes families who said yes.
+
+## Notes on the policy texts
+
+* [`TRADEMARK.md`](../../TRADEMARK.md) is a plain-language draft written for the project maintainer. **Have a lawyer review
+  it, and register the name where you sell, before you rely on it.** (This note lives here and not in the published
+  policy.)
+* The privacy statement ([`../privacy.md`](../privacy.md)) is part of the release: if a release changes what is sent, what
+  the counter stores, or for how long, change the statement in the same change, and keep the site's text
+  (`site/strings.js`) and the counter's root page in step with it.
