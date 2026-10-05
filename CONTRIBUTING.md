@@ -8,8 +8,9 @@ By taking part you agree to our [Code of Conduct](CODE_OF_CONDUCT.md). Security 
 
 ## Ways to help
 
-* **Report a problem** with the bug template. Run `sudo sinko doctor` first and paste its output (it contains no
-  passwords).
+* **Report a problem** with the bug template. On an own install, run `sudo sinko doctor` first and paste its output
+  (it has no passwords, but it can contain your children's names and their devices' addresses: the issue is public,
+  so replace them first). A ready-made box has no login: describe what *My box* shows instead.
 * **Ask for an app to be blocked** with the *New app* template, or add it yourself (see below).
 * **Improve the Arabic.** Native speakers: strings live in `web/app.js` and `web/pb-box.js`; read them in the page
   (`python3 tests/mock_pihole.py --web web --setup --live`, then open <http://127.0.0.1:8080>, password `test`).
