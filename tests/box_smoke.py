@@ -632,7 +632,9 @@ def part_stale(browser):
     time.sleep(3.0)
     expect(len([h for h in store.static_hits if h == "/"]) == 2, "and only once, although it is still not the box's version: %s" % len([h for h in store.static_hits if h == "/"]))
     page.wait_for_selector(".tile")
+    time.sleep(1.2)                                                              # the toast of an update comes a moment after the page is up
     expect(page.inner_text("#version") == "v" + VERSION, "the footer still says what the page is, not what the box has (%r)" % page.inner_text("#version"))
+    expect(T("en", "boxUpdatedToast", v="3.1.0") not in clean(page.inner_text("#toast")), "and no toast says 'Updated to 3.1.0' about a page that is not (%r)" % page.inner_text("#toast"))
     ctx.close()
     # (b) a tab that cannot remember anything (private mode): no reload at all, since it could not tell it had already reloaded
     url, store = stamped_site()

@@ -1381,7 +1381,8 @@
     if (updated) {
       safeSet(sessionStorage, UPDATED_KEY, null);
       safeSet(sessionStorage, RELOADED_KEY, updated);            // remembered for this tab: see checkStale
-      setTimeout(function () { toast(t('boxUpdatedToast', { v: updated })); }, 700);
+      // Said only when the page really is that version now (an unstamped page cannot tell): a reload that brought the same old page back says nothing.
+      if (!pageStamp || pageStamp === updated) setTimeout(function () { toast(t('boxUpdatedToast', { v: updated })); }, 700);
     }
     document.addEventListener('click', onClick);
     $('timerChips').addEventListener('click', onChipClick);
