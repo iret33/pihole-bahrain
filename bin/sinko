@@ -98,6 +98,10 @@ def block_all_is_ours(rule: dict) -> bool:
 
 DEFAULT_GROUP = 0
 TICK_SECONDS = 15
+GRAVITY_LOCK_NAME = "gravity.lock"       # in the state folder: /var/lib/sinko/gravity.lock (the unit that refreshes the lists uses it)
+GRAVITY_LOCK_WAIT = 30 * 60              # seconds a run waits for the one before it ...
+GRAVITY_RUN_LIMIT = 30 * 60              # ... and a run itself may take
+GRAVITY_POLL = 1.0                       # seconds between two looks at a lock that somebody else holds
 
 DEFAULT_STATE = {
     "v": 1,
@@ -420,6 +424,24 @@ class LogGate:
         return True
 
 
+def open_lock_file(name: str) -> int:
+    """A file descriptor on /var/lib/sinko/<name>, for flock. The file lives in the state folder (mode 0700, root only),
+    never in a folder every user can write to (/run/lock): there another user could keep the lock, or, with
+    fs.protected_regular (Debian's default), make root's own open of an existing file fail. It is opened without
+    following a link, and anything but a plain file of ours is refused."""
+    ensure_state_dir()
+    path = state_path(name)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+            raise OSError("%s is not a plain file of this user" % path)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 class RunLock:
     """An flock on /var/lib/sinko/lock: held for the whole of an update or rollback, so two never run at once.
 
@@ -431,17 +453,9 @@ class RunLock:
         self._fh = None
 
     def acquire(self) -> bool:
-        """True when this object now holds the lock. The file lives in the state folder (mode 0700, root only), never
-        in a folder every user can write to (/run/lock): there another user could keep the lock, or, with
-        fs.protected_regular (Debian's default), make root's own open of an existing file fail. It is opened without
-        following a link, and anything but a plain file of ours is refused."""
-        ensure_state_dir()
-        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-        fd = os.open(state_path("lock"), flags, 0o600)
+        """True when this object now holds the lock (the file: see open_lock_file)."""
+        fd = open_lock_file("lock")
         try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
-                raise OSError("%s is not a plain file of this user" % state_path("lock"))
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             os.close(fd)
@@ -2181,9 +2195,42 @@ class Controller:
             self.gravity()
 
     @staticmethod
-    def gravity() -> None:
-        log.info("updating gravity (this can take a minute)…")
-        subprocess.run(["pihole", "-g"], check=True, stdout=subprocess.DEVNULL, timeout=1800)
+    def gravity(wait: float = GRAVITY_LOCK_WAIT) -> None:
+        """`pihole -g`, one run at a time. Pi-hole's gravity.sh has no lock of its own: every run deletes and rebuilds
+        one fixed temporary database and ends by moving it over the live one, so two that overlap (an update's setup
+        and the nightly list refresh, a self-repair, the retry of an update) leave a mix of both, and a service that
+        should be blocked can stay reachable until the next run, with every check saying all is well. Every run that
+        Sinko starts takes the flock on /var/lib/sinko/gravity.lock first (the systemd service that refreshes the lists
+        takes the same one with flock(1)) and waits for the one that is running, up to `wait` seconds. Pi-hole's own
+        weekly run and the page's restore start gravity without asking: only the timer's hour keeps clear of those."""
+        try:
+            fd = open_lock_file(GRAVITY_LOCK_NAME)
+        except OSError as err:
+            # The lock is the safety, not the job: a folder that cannot be used must not stop the first installation.
+            log.warning("could not open the lock that keeps two updates of the block lists apart (%s): going on without it",
+                        short_text(err, 80))
+            fd = None
+        try:
+            if fd is not None:
+                deadline = time.monotonic() + wait
+                announced = False
+                while True:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise subprocess.TimeoutExpired("pihole -g", wait)   # as for a run that takes too long
+                        if not announced:
+                            announced = True
+                            log.info("the block lists are being updated by another run: waiting for it (up to %d minutes)",
+                                     wait // 60)
+                        time.sleep(GRAVITY_POLL)
+            log.info("updating gravity (this can take a minute)…")
+            subprocess.run(["pihole", "-g"], check=True, stdout=subprocess.DEVNULL, timeout=GRAVITY_RUN_LIMIT)
+        finally:
+            if fd is not None:
+                os.close(fd)                                                     # closing drops the lock
 
     def migrate_legacy(self) -> None:
         """Remove objects created by the old (pre-2.0) installer."""
