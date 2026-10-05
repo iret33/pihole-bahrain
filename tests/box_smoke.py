@@ -42,6 +42,7 @@ CATALOG = pb.load_catalog(os.path.join(ROOT, "lists"))
 BOX = pbstrings.box_strings()          # {en: {...}, ar: {...}} the My box sheet's words
 FIRST = pbstrings.first_strings()      # the claim screen, setup list, update banner
 APP = pbstrings.app_strings()          # sign-in, devices, bedtime
+BRAND = pbstrings.brand()              # the name and tagline the brand tool draws (one tagline everywhere)
 with open(os.path.join(ROOT, "VERSION"), encoding="utf-8") as fh:
     VERSION = fh.read().strip()
 NOTES = "https://github.com/iret33/sinko/releases/tag/v3.1.0"
@@ -1118,6 +1119,26 @@ def part_counter(browser):
         expect(T(lang, "boxCounterOffToast") in page.inner_text("#boxToast"), "[%s] and says plainly that the box now asks the counter service to forget it: %r" % (lang, page.inner_text("#boxToast")))
         expect(T(lang, "boxCounterForget") in box_text(page), "[%s] (the card says so before the switch is touched, too)" % lang)
         ctx.close()
+        # the line about the others: the counter counts the asking box itself, so 0 and 1 mean nobody else yet; exactly 2 has its own words
+        for online, want in ((1, None), (0, None), (2, "boxCounterOnlineTwo"), (3, "boxCounterOnline"), (1234, "boxCounterOnline")):
+            url, store = make_site()
+            store.edit_state(lambda st: st.update({"community": {"online": online, "at": 1800000000}, "telemetry": {"on": True}}))
+            ctx, page = open_page(browser, url, lang)
+            open_box(page)
+            if want is None:
+                time.sleep(0.5)
+                expect(page.is_hidden("#boxCounterOnline") and "Sinko boxes" not in page.inner_text("#boxCounterOnline") and page.locator("#boxCounterCard").is_visible(),
+                       "[%s] %d box(es) online: no line at all (never 'one of 1'), the rest of the card is there" % (lang, online))
+                expect(not re.search(r"\bone of 1\b", box_text(page)) and "واحد من 1" not in box_text(page), "[%s] and nowhere does the sheet say 'one of 1'" % lang)
+            else:
+                shown = eventually(lambda: page.is_visible("#boxCounterOnline") and clean(page.inner_text("#boxCounterOnline")))
+                n = "{:,}".format(online)
+                expect(shown == T(lang, want, n=n), "[%s] %d boxes online: %r" % (lang, online, shown))
+                if online == 2:
+                    expect("2" not in shown and "one other" in T("en", want), "[%s] exactly two is said in words, with no number" % lang)
+                if online == 3:
+                    shot(page, "box-counter-three-%s.png" % lang)
+            ctx.close()
         # a box with no counter address (or an older box) offers no counter: better silent than a promise nothing keeps
         for what, change in (("box.json says no counter address is set", {"counter": False}), ("an older box with no box.json", None)):
             url, store = make_site()
@@ -1137,10 +1158,23 @@ def part_about(browser):
     for lang in ("en", "ar"):
         url, store = make_site()
         ctx, page = open_page(browser, url, lang)
+        asked = []
+        page.on("request", lambda r: asked.append(r.url) if "/api/info/version" in r.url else None)
         open_box(page)
         eventually(lambda: page.locator("#boxAbout a").count() >= 5)
+        pihole = T(lang, "boxAboutPihole", v="v6.3")
+        expect(eventually(lambda: pihole in clean(page.inner_text("#boxAbout"))), "[%s] About says which Pi-hole the box runs (the mock's core is v6.3): %r" % (lang, page.inner_text("#boxAbout")))
         text = clean(page.inner_text("#boxAbout"))
         expect(T(lang, "boxAboutVersion", v=VERSION) in text, "[%s] the version: %r" % (lang, page.inner_text("#boxAboutVersion")))
+        expect(text.index(T(lang, "boxAboutVersion", v=VERSION)) < text.index(pihole) < text.index("GPL-3.0-or-later"), "[%s] the Pi-hole line comes under Sinko's own version, before the licence" % lang)
+        expect(page.is_visible("#boxAboutPihole") and page.get_attribute("#boxAboutPihole", "class") == "box-note", "[%s] and is a plain note, not a headline" % lang)
+        if lang == "ar":
+            expect("\u2066v6.3\u2069" in page.inner_text("#boxAboutPihole"), "[ar] the version is kept whole inside the Arabic sentence")
+        expect(len(asked) == 1, "[%s] the version was asked for once, when the sheet opened (not with every health round): %s" % (lang, len(asked)))
+        page.click("#boxDialog [data-act=boxClose]")
+        open_box(page)
+        expect(eventually(lambda: len(asked) == 2), "[%s] and again each time the sheet is opened: %s" % (lang, len(asked)))
+        expect(pihole in clean(page.inner_text("#boxAbout")), "[%s] with the line still there" % lang)
         expect("GPL-3.0-or-later" in text, "[%s] the licence is named" % lang)
         expect(T(lang, "boxAboutTrademark") in text, "[%s] the trademark sentence is there" % lang)
         links = page.evaluate("() => [...document.querySelectorAll('#boxAbout a')].map(a => [a.getAttribute('href'), a.getAttribute('target'), a.getAttribute('rel')])")
@@ -1149,6 +1183,24 @@ def part_about(browser):
         expect(all(l[1] == "_blank" and "noopener" in l[2] for l in links), "[%s] they open in a new tab, safely" % lang)
         shot(page, "box-about-%s.png" % lang)
         ctx.close()
+        # a box that cannot say (an older Pi-hole, a call that fails, a development build): no row, no empty line, no error, the rest unchanged
+        for what, setup in (("the call fails", lambda s: s.info_fail.add("version")),
+                            ("a development build with no release number", lambda s: setattr(s, "core_version", "vDev-5f2c3d1"))):
+            url, store = make_site()
+            setup(store)
+            ctx, page = open_page(browser, url, lang)
+            asked = []
+            page.on("request", lambda r: asked.append(r.url) if "/api/info/version" in r.url else None)
+            open_box(page)
+            expect(eventually(lambda: len(asked) >= 1), "[%s] (set-up: %s, and the page asked)" % (lang, what))
+            time.sleep(0.6)
+            text = clean(page.inner_text("#boxAbout"))
+            expect(page.is_hidden("#boxAboutPihole") and "Pi-hole v" not in text and "vDev" not in text, "[%s] %s: nothing is said about the Pi-hole version: %r" % (lang, what, text))
+            expect(T(lang, "boxAboutVersion", v=VERSION) in text and T(lang, "boxAboutTrademark") in text and page.locator("#boxAbout a").count() >= 5,
+                   "[%s] and the rest of About is all there" % lang)
+            expect(page.is_hidden("#login") and page.locator("#boxToast.show").count() == 0, "[%s] and nothing else reacts (no sign-in screen, no toast)" % lang)
+            ctx.close()
+        errors[:] = [e for e in errors if "status of 500" not in e]            # the mock was told to fail the call, on purpose
 
 
 def part_firstrun(browser):
@@ -1309,7 +1361,7 @@ def part_branding(browser):
     ctx, page = open_page(browser, url, "en", sign_in=False)
     page.wait_for_selector("#login:not([hidden])")
     expect(page.title() == "Sinko", "the title is Sinko (%r)" % page.title())
-    expect(page.inner_text("#login h1") == "Sinko" and page.inner_text("#login .tagline") == "Family internet", "the login screen: name and tagline")
+    expect(page.inner_text("#login h1") == "Sinko" and page.inner_text("#login .tagline") == BRAND["TAGLINE_EN"], "the login screen: name and the brand's tagline")
     icon = page.evaluate("() => { const l = document.querySelector('link[rel=icon]'); return l && [l.getAttribute('href'), l.getAttribute('type')]; }")
     touch = page.evaluate("() => { const l = document.querySelector('link[rel=apple-touch-icon]'); return l && l.getAttribute('href'); }")
     expect(icon == ["/pb/icon.svg", "image/svg+xml"], "the page links its icon: %s" % (icon,))
@@ -1320,7 +1372,7 @@ def part_branding(browser):
     expect(page.evaluate("() => !!document.querySelector('symbol#i-sinko path[stroke-linecap=round]')"), "and the symbol has the arcs")
     shot(page, "login-en.png")
     page.click("#login .lang-toggle")
-    expect(page.inner_text("#login h1") == "سينكو" and page.inner_text("#login .tagline") == "إنترنت العائلة", "Arabic: the name is سينكو, the tagline إنترنت العائلة")
+    expect(page.inner_text("#login h1") == "سينكو" and page.inner_text("#login .tagline") == BRAND["TAGLINE_AR"], "Arabic: the name is سينكو, the tagline is the brand's (%s)" % BRAND["TAGLINE_AR"])
     expect(page.title() == "سينكو", "and the title follows the language (%r)" % page.title())
     shot(page, "login-ar.png")
     ctx.close()

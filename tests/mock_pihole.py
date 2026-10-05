@@ -18,6 +18,11 @@ box_info (the content of /pb/box.json, or None), box_info_age (seconds the file 
 gravity_fail, and `scheduler`, a SchedulerSim that plays the scheduler's side of the request protocol in
 docs/maintainers/architecture.md whenever the page writes the pb-state group (so a browser test can watch "Update now" become
 running and then ok or failed; a power request that arrives while an update runs is dropped and cleared, as bin/sinko does).
+Two more switches play the box's web server and installer for the browser tests of "the page after an update": `static_cache` makes every
+page file answer the way Pi-hole's web server (civetweb) does, with `Cache-Control: max-age=3600`, an ETag and 304 for a revalidation, so a
+browser keeps old scripts and styles for an hour exactly as it does on a box; `stamp_pages` plays the installer: `@VERSION@` in index.html
+becomes the installed version, and every script says which release it belongs to (window.__pbAssets). `log_static` keeps the address
+(with its query) of every file the page asked for in `static_hits`, so a test can prove from the server's side that a file was fetched again.
 
 Run standalone to develop the web page without a Raspberry Pi:
     python3 tests/mock_pihole.py --web web --port 8080   (password: test; --open starts without a password)
@@ -112,10 +117,15 @@ class Store:
         self.nodename = "sinko"
         self.model = "OrangePi Zero3"
         self.info_fail = set()            # names among system, sensors, version, host, blocking that answer 500
+        self.core_version = "v6.3"        # what /api/info/version says the Pi-hole core is ("vDev-5f2c3d1" for a development build)
         # -- test-only switches --
         self.clock_skew = 0               # seconds added to the Date header: the box's clock is wrong by this much
         self.outage_until = 0.0           # until this time the server drops every connection (services restarting)
         self.version = None               # when set, /pb/version.txt answers this instead of the VERSION file
+        self.static_cache = False         # page files answer with civetweb's Cache-Control: max-age=3600 + ETag (and 304 to a revalidation)
+        self.stamp_pages = False          # the installer's work: @VERSION@ in index.html -> the installed version; scripts say which release they are
+        self.log_static = False           # keep the address (with its query string) of every page file asked for in static_hits
+        self.static_hits = []
         # What `sinko box-info` writes to /pb/box.json (architecture.md, "Amendments"). `at` is left out here: it is the box's clock at
         # the moment of the request, minus box_info_age. None = an older box, which has no such file (the page must cope).
         self.box_info = default_box_info()
@@ -599,8 +609,9 @@ class Handler(BaseHTTPRequestHandler):
     def info_version(self):
         def part(branch, version, h):
             return {"local": {"branch": branch, "version": version, "hash": h}, "remote": {"version": version, "hash": h}}
-        return {"version": {"core": part("master", "v6.3", "955e36a9"), "web": part("master", "v6.3", "f69f7e88"),
-                            "ftl": part("master", "v6.3", "1a2b3c4d"), "docker": {"local": None, "remote": None}}, "took": 0.0004}
+        # core, web and FTL have their own numbers (a page that read the wrong component would show it)
+        return {"version": {"core": part("master", self.store.core_version, "955e36a9"), "web": part("master", "v6.2.1", "f69f7e88"),
+                            "ftl": part("master", "v6.3.2", "1a2b3c4d"), "docker": {"local": None, "remote": None}}, "took": 0.0004}
 
     def info_system(self):
         s = self.store
@@ -942,11 +953,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.err(404, "not_found", "Not found")
         else:
             data = json.dumps(dict({"at": int(time.time() + s.clock_skew - s.box_info_age)}, **s.box_info), separators=(",", ":")).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        self.send_static("application/json", data, "box.json")
 
     def static(self, path):
         if not self.web_dir:
@@ -958,7 +965,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.box_json()
         base = self.web_dir
         if rel == "version.txt" and self.store.version:        # an update "installed" a new version
-            return self.send_raw(200, "text/plain; charset=utf-8", (self.store.version + "\n").encode())
+            return self.send_static("text/plain; charset=utf-8", (self.store.version + "\n").encode(), rel)
         if rel == "version.txt":
             rel = "VERSION"
             base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -967,12 +974,7 @@ class Handler(BaseHTTPRequestHandler):
         elif rel == "domains.json":
             body = json.dumps(load_cli().build_domain_map(load_cli().load_catalog(os.path.join(HERE, "..", "lists")),
                                                          os.path.join(HERE, "..", "lists")), separators=(",", ":")).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
+            return self.send_static("application/json", body, rel)
         full = os.path.realpath(os.path.join(base, rel))
         if not full.startswith(os.path.realpath(base)) or not os.path.isfile(full):
             return self.err(404, "not_found", "Not found")
@@ -982,12 +984,44 @@ class Handler(BaseHTTPRequestHandler):
             os.path.splitext(full)[1], "application/octet-stream")
         with open(full, "rb") as fh:
             data = fh.read()
+        self.send_static(ctype, self.stamped(rel, data), rel, csp=True, mtime=os.path.getmtime(full))
+
+    def stamped(self, rel, data):
+        """What the installer does to the page (`stamp_pages`): index.html learns which release it belongs to, and each script says so too."""
+        s = self.store
+        if not s.stamp_pages:
+            return data
+        version = (s.version or VERSION).encode()
+        if rel == "index.html":
+            return data.replace(b"@VERSION@", version)
+        if rel.endswith(".js"):
+            return data + b'\n;(window.__pbAssets = window.__pbAssets || {})["' + rel.encode() + b'"] = "' + version + b'";\n'
+        return data
+
+    def send_static(self, ctype, data, rel, csp=False, mtime=None):
+        """One page file. With `static_cache` it answers like civetweb: max-age=3600, an ETag, and 304 when the browser revalidates."""
+        s = self.store
+        if s.log_static:
+            s.static_hits.append(self.path)
+        extra = {}
+        if s.static_cache:
+            etag = '"%s"' % hashlib.sha256(data).hexdigest()[:20]
+            extra = {"Cache-Control": "max-age=3600", "ETag": etag, "Last-Modified": self.date_time_string(mtime or time.time())}
+            if self.headers.get("If-None-Match") == etag:
+                self.send_response(304)
+                for k, v in extra.items():
+                    self.send_header(k, v)
+                self.end_headers()
+                return
         self.send_response(200)
         self.send_header("Content-Type", ctype)
-        self.send_header("Content-Security-Policy",
-                         "default-src 'none'; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; "
-                         "img-src 'self'; manifest-src 'self'; script-src 'self'; "
-                         "style-src 'self' 'unsafe-inline'; form-action 'self'")
+        if csp:
+            self.send_header("Content-Security-Policy",
+                             "default-src 'none'; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; "
+                             "img-src 'self'; manifest-src 'self'; script-src 'self'; "
+                             "style-src 'self' 'unsafe-inline'; form-action 'self'")
+        for k, v in extra.items():
+            self.send_header(k, v)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)

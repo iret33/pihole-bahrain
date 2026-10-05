@@ -122,10 +122,11 @@
       boxCounterForget: 'If you switch it off, the box asks the counter service to forget this box and deletes its random code.',
       boxCounterNotTitle: 'What is never sent:',
       boxCounterNot: 'Websites, apps, names of children or devices, the addresses of your devices, rules, passwords, language or time zone.',
-      boxCounterOnline: 'This box is one of {n} Sinko boxes online.',
+      // Said only from two boxes up (counterOnlineKey): a box that is the only one counted so far has nothing to compare itself with.
+      boxCounterOnline: 'This box is one of {n} Sinko boxes online.', boxCounterOnlineTwo: 'This box and one other Sinko box are online.',
       boxCounterOnToast: 'The counter is on. Thank you.', boxCounterOffToast: 'The counter is off. The box will ask the counter service to forget it.',
       // about
-      boxAboutTitle: 'About', boxAboutVersion: 'Sinko {v}', boxAboutLicence: 'Free software, licensed GPL-3.0-or-later.',
+      boxAboutTitle: 'About', boxAboutVersion: 'Sinko {v}', boxAboutPihole: 'Pi-hole {v}', boxAboutLicence: 'Free software, licensed GPL-3.0-or-later.',
       boxAboutTrademark: 'Pi-hole is a trademark of Pi-hole LLC. Sinko is independent software that works with it.',
       boxLinkHome: 'Project page', boxLinkIssues: 'Report a problem', boxLinkReleases: 'All versions', boxLinkPrivacy: 'Privacy',
       boxLinkLicense: 'Licence', boxLinkSupport: 'Get help', boxLinkBuy: 'Buy a ready-made box'
@@ -220,9 +221,9 @@
       boxCounterForget: 'إذا أوقفته، يطلب الصندوق من خدمة العدّاد أن تنسى هذا الصندوق، ويحذف رمزه العشوائي.',
       boxCounterNotTitle: 'ما لا يُرسل أبدًا:',
       boxCounterNot: 'المواقع، التطبيقات، أسماء الأطفال أو الأجهزة، عناوين أجهزتك، القواعد، كلمات المرور، اللغة أو المنطقة الزمنية.',
-      boxCounterOnline: 'هذا الصندوق واحد من {n} من صناديق سينكو المتصلة.',
+      boxCounterOnline: 'هذا الصندوق واحد من صناديق سينكو المتصلة، وعددها {n}.', boxCounterOnlineTwo: 'هذا الصندوق وصندوق آخر من سينكو متصلان.',
       boxCounterOnToast: 'تم تشغيل العدّاد. شكرًا لك.', boxCounterOffToast: 'تم إيقاف العدّاد. سيطلب الصندوق من خدمة العدّاد أن تنسى هذا الصندوق.',
-      boxAboutTitle: 'عن سينكو', boxAboutVersion: 'سينكو {v}', boxAboutLicence: 'برنامج حر، مرخّص بموجب GPL-3.0-or-later.',
+      boxAboutTitle: 'عن سينكو', boxAboutVersion: 'سينكو {v}', boxAboutPihole: 'محرّك الحجب Pi-hole {v}', boxAboutLicence: 'برنامج حر، مرخّص بموجب GPL-3.0-or-later.',
       boxAboutTrademark: 'Pi-hole علامة تجارية لشركة Pi-hole LLC. سينكو برنامج مستقل يعمل معه.',
       boxLinkHome: 'صفحة المشروع', boxLinkIssues: 'الإبلاغ عن مشكلة', boxLinkReleases: 'كل الإصدارات', boxLinkPrivacy: 'الخصوصية',
       boxLinkLicense: 'الترخيص', boxLinkSupport: 'احصل على مساعدة', boxLinkBuy: 'اشترِ صندوقًا جاهزًا'
@@ -254,6 +255,49 @@
   // means "everything" to Pi-hole.
   var RESTORE_IMPORT = { config: false, dhcp_leases: false, gravity: { group: true, adlist: true, adlist_by_group: true,
     domainlist: true, domainlist_by_group: true, client: true, client_by_group: true } };
+
+  /**
+   * Which sentence says how many Sinko boxes are online, or null for none. The counter always counts the asking box itself, so 0 and 1 are
+   * "nobody else yet": a line that says "one of 1" reads like an error, so it is not shown until there are two. Exactly two has its own wording
+   * ("one of 2 boxes" is not how anybody talks). Not a number (a damaged state) = none.
+   */
+  function counterOnlineKey(n) {
+    if (typeof n !== 'number' || !isFinite(n) || n < 2) return null;
+    return n === 2 ? 'boxCounterOnlineTwo' : 'boxCounterOnline';
+  }
+
+  /**
+   * The release this page was installed as: the content of <meta name="sinko-version">, which the installer fills in. '' when it is not a
+   * version: the placeholder is still there (development, a page copied by hand) or the tag is missing; the page then goes by the box's
+   * version file, as before.
+   */
+  function pageStamp(content) {
+    return parseSemver(content) ? String(content).trim() : '';
+  }
+  /**
+   * The version a page should reload for, or '': the box has another version than the one this page was installed as. The browser may
+   * keep the page and its scripts for an hour after the box was updated (by a phone that stayed open, another phone, the night's automatic
+   * update), and a reload brings in files of one release only. Never for an unstamped page (nothing to compare), and never twice for the
+   * same version: `reloadedFor` is the version this tab already reloaded for, so a box that keeps saying something else (a page that was
+   * not stamped right, a proxy) cannot make a phone reload for ever.
+   */
+  function staleTarget(stamp, installed, reloadedFor) {
+    if (!parseSemver(stamp) || !parseSemver(installed)) return '';
+    var s = String(stamp).trim(), i = String(installed).trim();
+    return s === i || i === reloadedFor ? '' : i;
+  }
+
+  var PIHOLE_VERSION = /^v?(\d{1,3}(?:\.\d{1,3}){1,3})$/;
+  /**
+   * The Pi-hole core version out of GET /api/info/version ({ version: { core: { local: { version: "v6.3" } } } }), written "v6.3" the way
+   * `pihole -v` prints it; '' when the answer has no plain release number (a development build prints a branch and a hash, an older Pi-hole
+   * has no such call): the About card then says nothing about it.
+   */
+  function piholeVersion(info) {
+    var v = info && info.version && info.version.core && info.version.core.local && info.version.core.local.version;
+    var m = typeof v === 'string' ? PIHOLE_VERSION.exec(v.trim()) : null;
+    return m ? 'v' + m[1] : '';
+  }
 
   function parseSemver(v) {
     var m = /^(\d{1,4})\.(\d{1,4})\.(\d{1,4})$/.exec(String(v === null || v === undefined ? '' : v).trim());
@@ -525,6 +569,7 @@
     durationParts: durationParts, roundGap: roundGap, lastDevice: lastDevice, addressRows: addressRows, passwordProblem: passwordProblem,
     keepBoxFields: keepBoxFields, hasSinkoGroups: hasSinkoGroups, safeLinks: safeLinks, backupName: backupName,
     updateBusy: updateBusy, usableIpv4: usableIpv4, parseBoxInfo: parseBoxInfo, heartbeatLate: heartbeatLate, zoneInfo: zoneInfo,
+    counterOnlineKey: counterOnlineKey, piholeVersion: piholeVersion, pageStamp: pageStamp, staleTarget: staleTarget,
     boxWallTime: boxWallTime, reasonDetails: reasonDetails, restoreVerdict: restoreVerdict, gravityVerdict: gravityVerdict,
     RESTORE_IMPORT: RESTORE_IMPORT, MIN_PASSWORD: MIN_PASSWORD, STALL_SEC: STALL_SEC, HEARTBEAT_LATE_SEC: HEARTBEAT_LATE_SEC
   };
@@ -534,7 +579,8 @@
   var timing = { checkOffline: 20000, checkSlow: 45000, powerStuck: 45000, powerStale: 60000, powerNoRestart: 180000, startLate: 90000, longDown: 600000,
     startLost: 360000,                // the scheduler waits up to 5 minutes between runs
     healthDown: 6000,                 // how long the box is silent before the health card stops showing its old readings
-    heartbeatGrace: 60000 };          // how long box.json must have been late (seen by this page) before the main page says the scheduler is not running
+    heartbeatGrace: 60000,            // how long box.json must have been late (seen by this page) before the main page says the scheduler is not running
+    clockStepHold: 6 * 60000 };       // after the box's clock was seen to jump: how long the scheduler gets to catch up (it refreshes box.json every 5 minutes) before it is judged
   var env = null;                    // what the page lends us, see init()
   var ui = null;                     // the elements, built on first open (and again after a language change)
   var poller = null;
@@ -542,6 +588,7 @@
   var health = null;                 // { system, sensors, blocking, host } as last read (each may be null)
   var hosts = null;                  // dns.hosts, read when the sheet opens
   var links = null;                  // links.json
+  var pihole = '';                   // the Pi-hole version ("v6.3"), read when the sheet opens; '' while unknown or when the box does not say
   var upd = null;                    // { kind: 'update' | 'check', since, checkedBefore }
   var updNotice = '';                // one line under the update card: "could not reach the internet", ...
   var updSig = '';
@@ -586,7 +633,7 @@
     var d = document.getElementById('boxDialog');
     if (d && d.open) { skipReload = true; env.closeDialog('boxDialog'); }
     clearSecrets();
-    upd = null; power = null; signedOut = false; restoring = false; st = null; health = null; hosts = null; updSig = ''; pending = null;
+    upd = null; power = null; signedOut = false; restoring = false; st = null; health = null; hosts = null; pihole = ''; updSig = ''; pending = null;
     pendingPower = null; healthStale = false; down.since = 0;
   }
 
@@ -602,6 +649,7 @@
     var h = document.getElementById('boxTitle'); if (h) h.focus();
     loadLinks();
     loadHosts();
+    loadPihole();
     if (env.refreshBoxInfo) env.refreshBoxInfo().then(function () { renderAll(); });
     startPolling();
     checkInstalledVersion();
@@ -743,7 +791,8 @@
     // about
     ui.aboutLinks = el('ul', { class: 'box-links' });
     ui.aboutVersion = el('p', { class: 'box-about-version', id: 'boxAboutVersion' });
-    ui.aboutCard = card('boxAbout', 'boxAboutTitle', [ui.aboutVersion, el('p', { class: 'box-note', text: t('boxAboutLicence') }), ui.aboutLinks,
+    ui.aboutPihole = el('p', { class: 'box-note', id: 'boxAboutPihole', hidden: true });
+    ui.aboutCard = card('boxAbout', 'boxAboutTitle', [ui.aboutVersion, ui.aboutPihole, el('p', { class: 'box-note', text: t('boxAboutLicence') }), ui.aboutLinks,
       el('p', { class: 'box-note', text: t('boxAboutTrademark') })]);
 
     [ui.updCard, ui.healthCard, ui.netCard, ui.pwCard, ui.backupCard, ui.powerCard, ui.counterCard, ui.aboutCard].forEach(function (c) { body.appendChild(c); });
@@ -968,15 +1017,18 @@
     ui.counterCard.hidden = !avail;
     if (!avail) { ui.counterOnline.hidden = true; return; }
     if (document.activeElement !== ui.counter.input) ui.counter.input.checked = !!(st && st.telemetry.on === true);
-    var show = !!(st && st.community && st.telemetry.on !== false);
+    var key = st && st.community ? pure.counterOnlineKey(st.community.online) : null;
+    var show = !!key && st.telemetry.on !== false;
     ui.counterOnline.hidden = !show;
-    if (show) ui.counterOnline.textContent = t('boxCounterOnline', { n: env.formatCount(st.community.online) });
+    if (show) ui.counterOnline.textContent = t(key, { n: env.formatCount(st.community.online) });
   }
 
   function renderAbout() {
     if (!ui) return;
     var v = env.version();
     ui.aboutVersion.textContent = v ? t('boxAboutVersion', { v: iso(v) }) : t('appName');
+    ui.aboutPihole.hidden = !pihole;                           // a box that does not say stays quiet: no empty row, no apology
+    if (pihole) ui.aboutPihole.textContent = t('boxAboutPihole', { v: iso(pihole) });
     var l = links || {};
     var items = [['home', 'boxLinkHome'], ['issues', 'boxLinkIssues'], ['releases', 'boxLinkReleases'], ['privacy', 'boxLinkPrivacy'],
       ['license', 'boxLinkLicense'], ['support', 'boxLinkSupport'], ['buy', 'boxLinkBuy']].filter(function (i) { return l[i[0]]; });
@@ -1185,7 +1237,7 @@
     });
   }
   function reloadFor(v) {
-    if (reloading) return;
+    if (reloading || (env.reloadedFor && env.reloadedFor() === v)) return;     // once per version in this tab: a reload that did not help is not repeated
     reloading = true;
     env.rememberUpdate(v);
     updSig = ''; if (ui) renderUpdate();
@@ -1219,6 +1271,15 @@
       hosts = h instanceof Array ? h : [];
       renderNetwork();
     }, function () { hosts = []; renderNetwork(); });
+  }
+  /** Which Pi-hole this box runs, for About: it is the parent's one view of how old the Pi-hole on a sealed box is (it changes only by re-flashing).
+   *  Read each time the sheet opens, not with the 15-second health round: it hardly ever changes. An answer that is not a plain version, or no
+   *  answer (an older Pi-hole, a box that is busy), leaves what was known; nothing is said about the failure. */
+  function loadPihole() {
+    quiet('GET', '/api/info/version').then(function (j) {
+      var v = piholeVersion(j);
+      if (v && v !== pihole) { pihole = v; renderAbout(); }
+    }, function () { /* hidden quietly: About is complete without it */ });
   }
   function loadLinks() {
     if (links) return;

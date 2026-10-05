@@ -7,16 +7,21 @@
 <meta name="theme-color" content="#0F766E">
 <meta name="robots" content="noindex">
 <meta name="generator" content="sinko">
+<!-- The installer (install.sh) replaces the version placeholder, here and in the six addresses below, with the release's version. Pi-hole's
+     web server lets a browser keep a file for an hour; a new version in the address is what makes a phone fetch the new scripts and styles
+     after an update. In development (the mock, a plain file server) the placeholder stays: the query string is ignored and the page knows
+     it is unstamped (see pageStamp in app.js). -->
+<meta name="sinko-version" content="@VERSION@">
 <title>Sinko</title>
 <link rel="icon" href="/pb/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/pb/apple-touch-icon.png">
-<link rel="stylesheet" href="/pb/style.css">
+<link rel="stylesheet" href="/pb/style.css?v=@VERSION@">
 <link rel="manifest" href="/pb/manifest.json">
-<script src="/pb/pb-core.js" defer></script>
-<script src="/pb/pb-live.js" defer></script>
-<script src="/pb/pb-picture.js" defer></script>
-<script src="/pb/pb-box.js" defer></script>
-<script src="/pb/app.js" defer></script>
+<script src="/pb/pb-core.js?v=@VERSION@" defer></script>
+<script src="/pb/pb-live.js?v=@VERSION@" defer></script>
+<script src="/pb/pb-picture.js?v=@VERSION@" defer></script>
+<script src="/pb/pb-box.js?v=@VERSION@" defer></script>
+<script src="/pb/app.js?v=@VERSION@" defer></script>
 </head>
 <body>
 
@@ -51,7 +56,7 @@
     <span class="brand-mark"><svg aria-hidden="true"><use href="#i-sinko"/></svg></span>
     <div class="login-title">
       <h1 data-i18n="appName">Sinko</h1>
-      <p class="tagline" data-i18n="tagline">Family internet</p>
+      <p class="tagline" data-i18n="tagline">Calm internet for the family</p>
     </div>
     <p class="muted" data-i18n="loginHint">Sign in with the parent password chosen during setup.</p>
     <p class="login-note" id="loginNote" role="status" hidden></p>
@@ -75,7 +80,7 @@
     <span class="brand-mark"><svg aria-hidden="true"><use href="#i-sinko"/></svg></span>
     <div class="login-title">
       <h1 data-i18n="claimTitle">Welcome to Sinko</h1>
-      <p class="tagline" data-i18n="tagline">Family internet</p>
+      <p class="tagline" data-i18n="tagline">Calm internet for the family</p>
     </div>
     <p class="muted" data-i18n="claimLead">Choose a parent password for this box. You will use it to sign in on this page.</p>
     <p class="claim-why" data-i18n="claimWhy">Until you do, anyone on your Wi‑Fi can open this page and change the rules.</p>
