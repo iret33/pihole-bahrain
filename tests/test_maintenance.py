@@ -2,6 +2,7 @@
 address watch, reconciling the update result. Pi-hole is the in-memory mock; everything slow or dangerous (network,
 systemd, reboot, pihole-FTL) is a fake that records what it was asked, so no test can reboot or update this machine."""
 import datetime as dt
+import contextlib
 import importlib.machinery
 import importlib.util
 import json
@@ -27,6 +28,11 @@ pb = importlib.util.module_from_spec(spec)
 loader.exec_module(pb)
 
 CONFIG = "SINKO_HOSTNAME=family.lan\nSINKO_IP=192.168.1.5\nSINKO_REF=latest\n"
+
+# The real ones, kept before the fixture swaps them for fakes that record what a test must not reach.
+REAL_RECOVER_CHECK = pb.recover_check
+REAL_WRITE_BOX_INFO = pb.write_box_info
+REAL_RUN_SELF_HEAL = pb.run_self_heal
 
 
 class InlineJob:
@@ -72,7 +78,10 @@ class Fixture(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.tmp = tmp.name
         self.state_dir = os.path.join(self.tmp, "state")
-        env = mock.patch.dict(os.environ, {"SINKO_STATE_DIR": self.state_dir})
+        self.run_dir = os.path.join(self.tmp, "run")
+        self.webroot = os.path.join(self.tmp, "www")
+        env = mock.patch.dict(os.environ, {"SINKO_STATE_DIR": self.state_dir, "SINKO_RUN_DIR": self.run_dir,
+                                           "SINKO_WEBROOT": self.webroot})
         env.start()
         self.addCleanup(env.stop)
         for key in ("SINKO_RELEASE_BASE", "SINKO_RELEASE_API", "SINKO_REF", "SINKO_REPO", "SINKO_REPO_SLUG",
@@ -80,10 +89,13 @@ class Fixture(unittest.TestCase):
             os.environ.pop(key, None)
         self.reached = []
         for name in ("run_power", "start_update_runner", "apply_new_address", "default_route_ipv4", "check_for_update",
-                     "send_ping", "telemetry_body"):
+                     "send_ping", "telemetry_body", "send_forget", "run_self_heal", "recover_check"):
             patch = mock.patch.object(pb, name, side_effect=lambda *a, _n=name, **k: self.reached.append(_n))
             patch.start()
             self.addCleanup(patch.stop)
+        patch = mock.patch.object(pb, "write_box_info", lambda conf=None, **kw: self.fake_box_info(conf, **kw))
+        patch.start()
+        self.addCleanup(patch.stop)
         self.addCleanup(lambda: self.assertEqual(self.reached, [], "a test reached the real thing (reboot, systemd, pihole-FTL, GitHub)"))
         self.config_path = os.path.join(self.tmp, "config")
         with open(self.config_path, "w") as fh:
@@ -103,11 +115,21 @@ class Fixture(unittest.TestCase):
         self.ping_answer = {"online": 5, "total": 20}
         self.jitter_calls = []
         self.seen_at_call = {}
+        self.boxinfo_calls = []
+        self.boxinfo_error = None
+        self.forget_calls = []
+        self.forget_answer = True
+        self.heal_calls = []
+        self.heal_error = None
+        self.recover_calls = []
+        self.recover_answer = {"ok": True, "detail": ""}
         self.m = pb.Maintenance(self.api, config_path=self.config_path, monotonic=lambda: self.mono,
                                 job_factory=InlineJob, clock_ok=lambda: self.clock_trusted,
                                 check=self.fake_check, start_runner=self.fake_runner, power=self.fake_power,
                                 default_ip=lambda: self.ip, apply_address=self.fake_apply, ping=self.fake_ping,
-                                body=lambda: "BODY", jitter=self.fake_jitter)
+                                body=lambda: "BODY", jitter=self.fake_jitter, box_info=self.fake_box_info,
+                                forget=self.fake_forget, heal=self.fake_heal, recover=self.fake_recover,
+                                catalog=lambda: self.catalog)
 
     # ----- fakes -----
     def fake_check(self, conf):
@@ -138,6 +160,32 @@ class Fixture(unittest.TestCase):
     def fake_jitter(self, low, high):
         self.jitter_calls.append((low, high))
         return 0
+
+    def fake_box_info(self, conf, **kw):
+        self.boxinfo_calls.append((conf, kw))
+        if self.boxinfo_error:
+            raise self.boxinfo_error
+        return "written"
+
+    def fake_forget(self, url, ident):
+        self.forget_calls.append((url, ident))
+        if isinstance(self.forget_answer, Exception):
+            raise self.forget_answer
+        return self.forget_answer
+
+    def fake_heal(self):
+        self.heal_calls.append(self.state()["update"]["status"] if self.group_exists("pb-state") else None)
+        if self.heal_error:
+            raise self.heal_error
+
+    def fake_recover(self):
+        self.recover_calls.append(1)
+        if isinstance(self.recover_answer, Exception):
+            raise self.recover_answer
+        return self.recover_answer
+
+    def group_exists(self, name):
+        return any(g["name"] == name for g in self.store.groups)
 
     def fake_apply(self, ip, conf, path):
         self.address_calls.append((ip, dict(conf), path))
@@ -317,6 +365,7 @@ class UpdateRequestTests(Fixture):
         u = self.state()["update"]
         self.assertEqual(u["status"], "failed")
         self.assertEqual(u["error"], "The update could not be started.")
+        self.assertIsNone(u["rolledBack"], "nothing was installed and nothing was checked: not claimed either way")
 
     def test_a_runner_start_that_raises_is_reported_as_failed(self):
         self.runner_ok = OSError("no systemd")
@@ -507,12 +556,20 @@ class ReconcileTests(Fixture):
         self.pass_()
         self.assertEqual(self.state()["update"]["status"], "running")
 
-    def test_running_for_over_twenty_minutes_with_no_runner_is_marked_failed(self):
-        self.running(at=self.now.timestamp() - 21 * 60)
+    def test_a_run_with_no_runner_for_over_three_minutes_is_looked_at_and_then_judged(self):
+        # The box lost power in the middle of an update, or the runner was killed: nothing holds the update lock.
+        # What the box looks like decides what is said (see the tests of that below).
+        self.running(at=self.now.timestamp() - 4 * 60)
+        self.recover_answer = {"ok": False, "detail": "the page files are not installed"}
+        self.pass_()
+        self.assertEqual(self.state()["update"]["status"], "running", "the check is running in the background")
         actions = self.pass_()
         u = self.state()["update"]
-        self.assertEqual((u["status"], u["error"]), ("failed", "The update did not finish."))
-        self.assertIn("update did not finish", actions)
+        self.assertEqual((u["status"], u["rolledBack"]), ("failed", False))
+        self.assertEqual(u["error"], "The update did not finish, and the box does not pass its own check (the page files are not installed).")
+        self.assertEqual(u["at"], self.now.timestamp())
+        self.assertIn("update did not finish (the box was checked)", actions)
+        self.assertEqual(len(self.recover_calls), 1)
 
     def test_a_run_that_is_still_alive_is_never_called_stuck(self):
         self.running(at=self.now.timestamp() - 3 * 3600)
@@ -523,11 +580,12 @@ class ReconcileTests(Fixture):
         self.assertEqual(self.state()["update"]["status"], "running")
 
     def test_a_young_run_is_left_alone(self):
-        self.running(at=self.now.timestamp() - 19 * 60)
+        self.running(at=self.now.timestamp() - 170)
         writes = self.store.writes
-        self.pass_()
+        self.settle()
         self.assertEqual(self.state()["update"]["status"], "running")
         self.assertEqual(self.store.writes, writes)
+        self.assertEqual(self.recover_calls, [])
 
     def test_the_result_arriving_after_a_scheduler_restart_is_still_picked_up(self):
         # The installer restarts this service: the new process has no memory of the run, only the state and the file.
@@ -552,6 +610,209 @@ class ReconcileTests(Fixture):
                         json.dumps({"status": "failed", "from": "3.0.0", "to": "3.1.0", "error": "e" * 900, "at": self.now.timestamp()}))
         self.pass_()
         self.assertEqual(len(self.state()["update"]["error"]), 200)
+
+
+class RolledBackTests(Fixture):
+    """update.rolledBack: from the runner's result into the state, and what the scheduler itself says when the runner is gone."""
+
+    def running(self, **kw):
+        fields = dict(status="running", **{"from": "3.0.0"})
+        fields.update(to="3.1.0", at=self.now.timestamp() - 60, latest="3.1.0")
+        fields.update(kw)
+        self.set_state(lambda s: s["update"].update(fields))
+
+    def test_the_runners_answer_is_copied_for_a_failure_and_dropped_for_a_success(self):
+        for rolled, want in ((True, True), (False, False), (None, None)):
+            self.running()
+            pb.write_update_result("failed", "3.0.0", "3.1.0", "x", self.now.timestamp() - 5, rolled_back=rolled)
+            self.pass_()
+            self.assertIs(self.state()["update"]["rolledBack"], want, rolled)
+        self.running(rolledBack=True)
+        pb.write_update_result("ok", "3.0.0", "3.1.0", None, self.now.timestamp() - 5, rolled_back=True)
+        with mock.patch.object(pb, "VERSION", "3.1.0"):
+            self.pass_()
+        self.assertEqual((self.state()["update"]["status"], self.state()["update"]["rolledBack"]), ("ok", None))
+
+    def test_a_new_run_forgets_the_last_ones_answer(self):
+        self.set_state(lambda s: s["update"].update(status="failed", rolledBack=True, at=0, request=3, latest="3.1.0"))
+        self.pass_()
+        self.assertEqual((self.state()["update"]["status"], self.state()["update"]["rolledBack"]), ("running", None))
+
+    def test_a_result_that_says_the_failure_was_the_network_is_remembered_for_the_retry_rule(self):
+        self.running()
+        pb.write_update_result("failed", "3.0.0", "3.1.0", "The server answered HTTP 502 for sinko.tar.gz.",
+                               self.now.timestamp() - 5, rolled_back=True, transient=True)
+        self.pass_()
+        self.assertTrue(pb.failure_is_transient(self.state()["update"]))
+        self.running()
+        pb.write_update_result("failed", "3.0.0", "3.1.0", "The installer stopped with an error (exit status 1).",
+                               self.now.timestamp() - 4, rolled_back=True, transient=False)
+        self.pass_()
+        self.assertFalse(pb.failure_is_transient(self.state()["update"]))
+
+    def gone(self, **kw):
+        self.running(at=self.now.timestamp() - 5 * 60, **kw)
+
+    def test_the_new_version_in_place_and_passing_its_check_means_the_update_did_finish(self):
+        # The box lost power during the 90 seconds of the check: the update was fine, and it must not be called failed.
+        self.gone()
+        with mock.patch.object(pb, "VERSION", "3.1.0"):
+            self.settle()
+        u = self.state()["update"]
+        self.assertEqual((u["status"], u["error"], u["rolledBack"], u["latest"]), ("ok", None, None, None))
+        self.assertEqual(u["at"], self.now.timestamp())
+
+    def test_the_old_version_still_working_is_said_with_rolled_back_true(self):
+        self.gone()
+        self.settle()
+        u = self.state()["update"]
+        self.assertEqual((u["status"], u["rolledBack"]), ("failed", True))
+        self.assertEqual(u["error"], "The update did not finish. This box still works with version 3.0.0.")
+        self.assertEqual(u["latest"], "3.1.0", "the release stays on offer")
+
+    def test_a_box_that_fails_its_check_is_said_to_have_nothing_to_go_back_to(self):
+        self.gone()
+        self.recover_answer = {"ok": False, "detail": "scheduler service is not running"}
+        self.settle()
+        u = self.state()["update"]
+        self.assertEqual((u["status"], u["rolledBack"]), ("failed", False))
+        self.assertIn("scheduler service is not running", u["error"])
+        self.assertLessEqual(len(u["error"]), 200)
+
+    def test_a_check_that_cannot_run_is_a_failure_that_says_so(self):
+        self.gone()
+        self.recover_answer = OSError("no pihole-FTL")
+        with self.assertLogs("sinko", level="WARNING"):
+            self.settle()
+        u = self.state()["update"]
+        self.assertEqual((u["status"], u["rolledBack"]), ("failed", False))
+
+    def test_nothing_is_decided_while_a_runner_is_alive_or_the_clock_is_not_believed(self):
+        self.gone()
+        holder = pb.RunLock()
+        self.assertTrue(holder.acquire())
+        self.settle()
+        self.assertEqual((self.state()["update"]["status"], self.recover_calls), ("running", []))
+        holder.release()
+        self.clock_trusted = False
+        self.settle()
+        self.assertEqual((self.state()["update"]["status"], self.recover_calls), ("running", []))
+        self.clock_trusted = True
+        self.settle()
+        self.assertEqual(self.state()["update"]["status"], "failed")
+
+    def test_a_runner_that_took_the_lock_while_the_check_was_running_wins(self):
+        self.gone()
+        holder = pb.RunLock()
+        self.pass_()                                            # the check ran; its answer is collected on the next pass
+        self.assertTrue(holder.acquire())
+        self.addCleanup(holder.release)
+        self.pass_()
+        self.assertEqual(self.state()["update"]["status"], "running")
+
+    def test_a_result_that_arrives_while_the_check_runs_is_not_overwritten(self):
+        self.gone()
+        self.pass_()
+        pb.write_update_result("failed", "3.0.0", "3.1.0", "The installer stopped with an error (exit status 1).",
+                               self.now.timestamp(), rolled_back=True)
+        self.set_state(lambda s: s["update"].update(at=self.now.timestamp() - 1))        # the page or a new run moved on
+        self.pass_()
+        self.assertNotIn("This box still works", self.state()["update"]["error"] or "")
+
+    def test_the_real_recover_check_uses_the_selfcheck_without_asking_whether_the_scheduler_runs(self):
+        seen = {}
+
+        def round_(catalog, scheduler=None):
+            seen["scheduler"] = scheduler()
+            return [(True, "a"), (False, "the page is old"), (False, "second")]
+        with mock.patch.object(pb, "load_catalog_safely", return_value={"services": []}), \
+                mock.patch.object(pb, "selfcheck_round", round_):
+            self.assertEqual(REAL_RECOVER_CHECK(), {"ok": False, "detail": "the page is old"})
+        self.assertEqual(seen["scheduler"][0], True)
+        with mock.patch.object(pb, "load_catalog_safely", side_effect=pb.CatalogError("missing list file")):
+            result = REAL_RECOVER_CHECK()
+        self.assertFalse(result["ok"])
+        self.assertIn("missing list file", result["detail"])
+        with mock.patch.object(pb, "load_catalog_safely", return_value={"services": []}), \
+                mock.patch.object(pb, "selfcheck_round", lambda catalog, scheduler=None: [(True, "a")]):
+            self.assertEqual(REAL_RECOVER_CHECK(), {"ok": True, "detail": ""})
+
+
+class RetryPolicyTests(Fixture):
+    """A failed check, or a failed update that was only the network, is not given up on for a day or a week."""
+
+    def test_a_failed_check_is_tried_again_in_half_an_hour_to_an_hour_not_tomorrow(self):
+        self.found = pb.UpdateError("The server answered HTTP 403 for latest.")
+        self.advance(121)
+        with self.assertLogs("sinko", level="WARNING"):
+            self.settle()
+        self.assertEqual(len(self.check_calls), 1)
+        self.assertIn((0, 1800), self.jitter_calls)
+        self.advance(1799)
+        self.settle()
+        self.assertEqual(len(self.check_calls), 1, "not before half an hour")
+        self.found = self.release("3.1.0")
+        self.advance(2)
+        self.settle()
+        self.assertEqual(len(self.check_calls), 2)
+        self.assertEqual(self.state()["update"]["latest"], "3.1.0", "found a day sooner than before")
+
+    def test_the_retry_is_spread_so_that_boxes_behind_one_address_do_not_ask_together(self):
+        self.found = pb.UpdateError("offline")
+        self.m.jitter = lambda low, high: high
+        self.advance(121)
+        with self.assertLogs("sinko", level="WARNING"):
+            self.settle()
+        self.advance(3599)
+        self.settle()
+        self.assertEqual(len(self.check_calls), 1)
+        self.advance(2)
+        with self.assertLogs("sinko", level="WARNING"):
+            self.settle()
+        self.assertEqual(len(self.check_calls), 2)
+
+    def test_a_good_check_still_waits_a_day(self):
+        self.found = self.release("3.1.0")
+        self.advance(121)
+        self.settle()
+        self.advance(3 * 3600)
+        self.settle()
+        self.assertEqual(len(self.check_calls), 1)
+
+    def failed(self, transient, age):
+        self.set_state(lambda s: s["update"].update(auto=True, latest="3.1.0", status="failed", to="3.1.0", error="x",
+                                                    at=self.now.timestamp() - age))
+        pb.note_failure({"at": self.now.timestamp() - age, "to": "3.1.0", "transient": transient})
+
+    def test_a_failure_of_the_network_is_tried_again_the_same_night_after_half_an_hour(self):
+        self.now = dt.datetime(2026, 9, 18, 3, 30)
+        self.failed(True, 29 * 60)
+        self.settle()
+        self.assertEqual(self.runner_calls, [])
+        self.advance(121)
+        self.settle()
+        self.assertEqual(self.runner_calls, ["running"])
+
+    def test_a_failure_of_the_release_itself_keeps_the_week(self):
+        self.now = dt.datetime(2026, 9, 18, 3, 30)
+        self.failed(False, 3 * 3600)
+        self.settle()
+        self.assertEqual(self.runner_calls, [])
+
+    def test_the_note_belongs_to_one_run_only(self):
+        self.now = dt.datetime(2026, 9, 18, 3, 30)
+        self.set_state(lambda s: s["update"].update(auto=True, latest="3.1.0", status="failed", to="3.1.0", error="x",
+                                                    at=self.now.timestamp() - 3600))
+        pb.note_failure({"at": 12345.0, "to": "3.1.0", "transient": True})          # about an older run
+        self.settle()
+        self.assertEqual(self.runner_calls, [])
+
+    def test_the_parent_can_always_try_again_by_hand(self):
+        self.failed(True, 60)
+        self.set_state(lambda s: s["update"].update(request=9))
+        self.advance(300)
+        self.settle()
+        self.assertEqual(self.runner_calls, ["running"])
 
 
 class CheckTests(Fixture):
@@ -713,14 +974,35 @@ class PowerTests(Fixture):
         self.settle()
         self.assertEqual(self.power_calls, ["reboot", "poweroff"])
 
-    def test_power_waits_while_an_update_is_installing(self):
+    def test_a_power_request_during_an_update_is_dropped_not_held(self):
+        # Held in the shared state it would survive a power cycle (the parent is told to unplug a box that is being
+        # updated...) and fire at a moment nobody chose. The page disables the buttons during an update and withdraws a
+        # request nobody answered; the scheduler never keeps one.
         self.set_state(lambda s: s["update"].update(status="running", at=self.now.timestamp()))
+        self.set_state(lambda s: s["power"].update(request=5, action="reboot"))
+        actions = self.settle()
+        self.assertEqual(self.power_calls, [])
+        self.assertIn("power request ignored: an update is running", actions)
+        self.assertEqual(self.state()["power"], {"request": None, "action": None}, "cleared, not kept")
+        self.assertEqual(pb.load_handled(), {"power": 5}, "and never to be acted on")
+        self.set_state(lambda s: s["update"].update(status="ok"))
+        self.advance(15)
+        self.settle()
+        self.assertEqual(self.power_calls, [], "not even once the update is over")
+
+    def test_a_request_the_box_already_dropped_is_not_acted_on_after_a_restart_either(self):
+        pb.set_handled("power", 5)
         self.set_state(lambda s: s["power"].update(request=5, action="reboot"))
         self.settle()
         self.assertEqual(self.power_calls, [])
-        self.assertEqual(self.state()["power"]["request"], 5, "kept for later")
-        self.assertEqual(pb.load_handled(), {})
+        self.assertIsNone(self.state()["power"]["request"])
+
+    def test_a_new_request_after_the_update_is_acted_on(self):
+        self.set_state(lambda s: s["update"].update(status="running", at=self.now.timestamp()))
+        self.set_state(lambda s: s["power"].update(request=5, action="reboot"))
+        self.settle()
         self.set_state(lambda s: s["update"].update(status="ok"))
+        self.set_state(lambda s: s["power"].update(request=6, action="reboot"))
         self.settle()
         self.assertEqual(self.power_calls, ["reboot"])
 
@@ -1013,6 +1295,318 @@ class RunnerStartTests(unittest.TestCase):
             run.assert_not_called()
 
 
+class BoxInfoJobTests(Fixture):
+    """/pb/box.json is refreshed by a job of its own, every five minutes, while the rules are being applied."""
+
+    def calls(self):
+        return [kw for _, kw in self.boxinfo_calls]
+
+    def test_the_first_write_is_soon_after_start_and_then_every_five_minutes(self):
+        self.advance(9)
+        self.settle()
+        self.assertEqual(self.boxinfo_calls, [])
+        self.advance(2)
+        self.settle()
+        self.assertEqual(self.calls(), [{"force": False}])
+        self.advance(299)
+        self.settle()
+        self.assertEqual(len(self.boxinfo_calls), 1)
+        self.advance(2)
+        self.settle()
+        self.assertEqual(len(self.boxinfo_calls), 2)
+
+    def test_it_gets_the_settings_that_are_in_force_now(self):
+        self.advance(11)
+        self.settle()
+        self.assertEqual(self.boxinfo_calls[0][0]["SINKO_IP"], "192.168.1.5")
+
+    def test_not_while_the_tick_is_failing_because_the_file_says_the_scheduler_works(self):
+        self.m.tick_ok = False
+        self.advance(400)
+        self.settle()
+        self.assertEqual(self.boxinfo_calls, [])
+        self.m.tick_ok = True
+        self.settle()
+        self.assertEqual(len(self.boxinfo_calls), 1)
+
+    def test_not_while_an_update_is_installing_because_the_installer_swaps_the_folder_it_lives_in(self):
+        self.set_state(lambda s: s["update"].update(status="running", at=self.now.timestamp()))
+        self.advance(20)
+        self.settle()
+        self.assertEqual(self.boxinfo_calls, [])
+        holder = pb.RunLock()
+        self.assertTrue(holder.acquire())
+        self.addCleanup(holder.release)
+        self.set_state(lambda s: s["update"].update(status="ok"))
+        self.settle()
+        self.assertEqual(self.boxinfo_calls, [], "a runner holds the lock even before it has said running")
+        holder.release()
+        self.settle()
+        self.assertEqual(len(self.boxinfo_calls), 1)
+
+    def test_a_clock_that_is_not_believed_writes_nothing_and_the_moment_it_is_believed_writes_at_once(self):
+        self.clock_trusted = False
+        self.advance(400)
+        self.settle()
+        self.assertEqual(self.boxinfo_calls, [])
+        self.clock_trusted = True
+        self.pass_()
+        self.assertEqual(self.calls(), [{"force": True}], "the time in the file must match the clock again")
+        self.advance(15)
+        self.settle()
+        self.assertEqual(len(self.boxinfo_calls), 1, "once, then back to the five minutes")
+
+    def test_a_failure_to_write_is_logged_now_and_then_never_reaches_the_tick_and_is_retried_in_a_minute(self):
+        self.boxinfo_error = OSError(30, "Read-only file system")
+        self.advance(11)
+        with self.assertLogs("sinko", level="WARNING") as logs:
+            actions = self.settle()
+            self.assertIsInstance(actions, list, "the pass went on")
+            self.advance(61)
+            self.settle()
+            self.advance(61)
+            self.settle()
+        self.assertGreaterEqual(len(self.boxinfo_calls), 3, "tried again every minute")
+        self.assertEqual(len(logs.records), 1, "but said once")
+        self.assertIn("box.json", logs.records[0].getMessage())
+        self.boxinfo_error = None
+        self.advance(61)
+        self.settle()
+        count = len(self.boxinfo_calls)
+        self.advance(100)
+        self.settle()
+        self.assertEqual(len(self.boxinfo_calls), count, "back to five minutes")
+
+    def test_a_missing_page_folder_is_not_a_failure_at_all(self):
+        # the real function, a web root without a pb folder: "nothing to write"
+        m = pb.Maintenance(self.api, config_path=self.config_path, monotonic=lambda: self.mono, job_factory=InlineJob,
+                           box_info=REAL_WRITE_BOX_INFO, catalog=lambda: self.catalog, check=lambda c: None,
+                           default_ip=lambda: "192.168.1.5")
+        os.makedirs(self.webroot)
+        self.advance(11)
+        with mock.patch.object(pb, "unit_active", return_value=True), mock.patch.object(pb, "default_route_ipv4", return_value=None):
+            m.run(self.now)
+            with self.assertNoLogs("sinko", level="WARNING") if hasattr(self, "assertNoLogs") else contextlib.nullcontext():
+                m.run(self.now)
+        self.assertEqual(os.listdir(self.webroot), [])
+
+    def test_the_real_writer_leaves_a_pulse_the_page_can_read(self):
+        m = pb.Maintenance(self.api, config_path=self.config_path, monotonic=lambda: self.mono, job_factory=InlineJob,
+                           box_info=REAL_WRITE_BOX_INFO, catalog=lambda: self.catalog, check=lambda c: None,
+                           default_ip=lambda: "192.168.1.5")
+        os.makedirs(os.path.join(self.webroot, "pb"))
+        self.advance(11)
+        with mock.patch.object(pb, "unit_active", return_value=True), \
+                mock.patch.object(pb, "default_route_ipv4", return_value="192.168.1.50"):
+            m.run(self.now)
+            m.run(self.now)
+        with open(os.path.join(self.webroot, "pb", "box.json")) as fh:
+            info = json.load(fh)
+        self.assertEqual((info["v"], info["version"], info["ip"], info["mdns"], info["counter"]),
+                         (1, pb.VERSION, "192.168.1.50", True, False))
+        self.assertLess(abs(info["at"] - time.time()), 30)
+
+    def test_a_slow_writer_never_delays_the_tick(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        started = []
+
+        def slow(conf, **kw):
+            started.append(1)
+            gate.wait(5)
+            return "written"
+        m = pb.Maintenance(self.api, config_path=self.config_path, monotonic=lambda: self.mono, box_info=slow,
+                           catalog=lambda: self.catalog, check=lambda c: None, default_ip=lambda: None)
+        self.advance(11)
+        began = time.monotonic()
+        for _ in range(5):
+            m.run(self.now)
+        self.assertLess(time.monotonic() - began, 1.5)
+        for _ in range(100):
+            if started:
+                break
+            time.sleep(0.01)
+        self.assertEqual(started, [1], "one at a time")
+
+
+class HealTests(Fixture):
+    """A group or list that Sinko needs went missing from Pi-hole: run setup again, in a job, at most once an hour."""
+
+    def passes(self, count):
+        out = []
+        for _ in range(count):
+            self.advance(15)
+            out += self.pass_()
+        return out
+
+    def delete_group(self, name):
+        self.store.groups[:] = [g for g in self.store.groups if g["name"] != name]
+
+    def test_a_deleted_service_group_is_put_back_after_a_few_passes_not_at_the_first_sight(self):
+        self.delete_group("pb-svc-youtube")
+        with self.assertLogs("sinko", level="WARNING") as logs:
+            self.passes(2)
+            self.assertEqual(self.heal_calls, [], "FTL may be rebuilding: it has to look like this for a while")
+            self.passes(1)
+        self.assertEqual(len(self.heal_calls), 1)
+        self.assertIn("pb-svc-youtube", logs.records[0].getMessage())
+
+    def test_a_deleted_list_is_found_within_five_minutes(self):
+        self.store.lists[:] = [l for l in self.store.lists if l["comment"] != "pb:tiktok"]
+        with self.assertLogs("sinko", level="WARNING") as logs:
+            self.passes(3)
+        self.assertEqual(len(self.heal_calls), 1)
+        self.assertIn("the list of tiktok", logs.records[0].getMessage())
+
+    def test_a_list_that_goes_missing_later_is_seen_at_the_next_look(self):
+        self.passes(1)
+        self.store.lists[:] = [l for l in self.store.lists if l["comment"] != "pb:guard"]
+        self.passes(3)
+        self.assertEqual(self.heal_calls, [], "the lists are looked at every five minutes")
+        with self.assertLogs("sinko", level="WARNING"):
+            self.passes(24)
+        self.assertEqual(len(self.heal_calls), 1)
+
+    def test_not_more_than_once_an_hour_and_the_log_says_so_at_most_every_half_hour(self):
+        self.delete_group("pb-svc-youtube")                      # the fake repair does not fix it
+        with self.assertLogs("sinko", level="WARNING") as logs:
+            self.passes(3)
+            self.assertEqual(len(self.heal_calls), 1)
+            self.passes(200)                                     # fifty minutes
+            self.assertEqual(len(self.heal_calls), 1)
+            self.passes(40)                                      # now over the hour
+            self.assertEqual(len(self.heal_calls), 2)
+        self.assertEqual(len(logs.records), 2, "one line per repair")
+
+    def test_a_group_that_comes_back_by_itself_cancels_the_count(self):
+        self.delete_group("pb-svc-youtube")
+        self.passes(2)
+        self.ctl.setup(run_gravity=False)
+        self.passes(5)
+        self.assertEqual(self.heal_calls, [])
+
+    def test_nothing_is_repaired_while_an_update_runs_or_after_sinko_was_removed(self):
+        self.delete_group("pb-svc-youtube")
+        self.set_state(lambda s: s["update"].update(status="running", at=self.now.timestamp()))
+        self.passes(6)
+        self.assertEqual(self.heal_calls, [])
+        self.set_state(lambda s: s["update"].update(status="idle"))
+        pb.ensure_state_dir()
+        pb.atomic_write(pb.state_path("removed"), "1\n")
+        self.passes(6)
+        self.assertEqual(self.heal_calls, [], "somebody ran `sinko remove`: that is not damage")
+        os.unlink(pb.state_path("removed"))
+        with self.assertLogs("sinko", level="WARNING"):
+            self.passes(3)
+        self.assertEqual(len(self.heal_calls), 1)
+
+    def test_an_answer_without_pihole_s_own_group_is_not_believed(self):
+        self.store.groups[:] = []
+        self.passes(8)
+        self.assertEqual(self.heal_calls, [])
+
+    def test_when_the_shared_state_itself_is_gone_the_repair_still_runs(self):
+        self.delete_group("pb-state")
+        with self.assertLogs("sinko", level="WARNING") as logs:
+            self.passes(3)
+        self.assertEqual(self.heal_calls, [None])
+        self.assertIn("pb-state", logs.records[0].getMessage())
+
+    def test_a_repair_that_fails_is_logged_and_tried_again_after_the_hour(self):
+        self.delete_group("pb-svc-youtube")
+        self.heal_error = RuntimeError("gravity could not be updated")
+        with self.assertLogs("sinko", level="WARNING") as logs:
+            self.passes(3)
+            self.assertEqual(len(self.heal_calls), 1)
+            self.passes(60)
+            self.assertEqual(len(self.heal_calls), 1)
+        self.assertTrue(any("self-repair" in r.getMessage() for r in logs.records))
+        self.heal_error = None
+        with self.assertLogs("sinko", level="INFO"):
+            self.passes(200)
+        self.assertEqual(len(self.heal_calls), 2)
+
+    def test_an_unreadable_catalog_means_nothing_to_compare_with(self):
+        def broken():
+            raise pb.CatalogError("missing list file")
+        self.m.catalog = broken
+        self.delete_group("pb-svc-youtube")
+        self.passes(6)
+        self.assertEqual(self.heal_calls, [])
+
+    def test_an_intact_box_is_never_touched(self):
+        self.m._next_check = 10 ** 9                              # (the daily check writes its answer: not what is looked at here)
+        writes = self.store.writes
+        self.passes(30)
+        self.assertEqual(self.heal_calls, [])
+        self.assertEqual(self.store.writes, writes)
+
+
+class RealHealTests(unittest.TestCase):
+    """The real repair against the mock Pi-hole: pb-* objects are put back, nothing else is touched."""
+
+    def setUp(self):
+        self.httpd, self.store = fake_release.serve_pihole()
+        self.addCleanup(self.httpd.server_close)
+        self.addCleanup(self.httpd.shutdown)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with open(os.path.join(tmp.name, "pw"), "w") as fh:
+            fh.write(mock_pihole.PASSWORD)
+        env = mock.patch.dict(os.environ, {"SINKO_API_URL": "http://127.0.0.1:%d" % self.httpd.server_port,
+                                           "SINKO_STATE_DIR": os.path.join(tmp.name, "state")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.catalog = pb.load_catalog(LISTS)
+        self.gravity = []
+        for patch in (mock.patch.object(pb, "CLI_PW_FILE", os.path.join(tmp.name, "pw")),
+                      mock.patch.object(pb, "load_catalog", lambda *a, **k: self.catalog),
+                      mock.patch.object(pb.Controller, "gravity", staticmethod(lambda: self.gravity.append(1)))):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.api = pb.Api()
+        self.api.login()
+        pb.Controller(self.api, self.catalog, "https://lists.example/l").setup(run_gravity=False)
+
+    def snapshot(self, only_user=False):
+        groups = [g for g in self.store.groups if not only_user or not g["name"].startswith("pb-")]
+        lists = [l for l in self.store.lists if not only_user or not (l.get("comment") or "").startswith("pb:")]
+        domains = [d for d in self.store.domains if not only_user or d.get("comment") != pb.BLOCK_ALL_COMMENT]
+        return json.dumps([groups, lists, domains, self.store.clients], sort_keys=True)
+
+    def test_what_went_missing_comes_back_and_gravity_is_updated_once(self):
+        self.api.request("POST", "/api/groups", {"name": "Guests", "comment": "mine", "enabled": True})
+        self.api.request("POST", "/api/lists?type=block", {"address": "https://example.com/ads.txt", "comment": "StevenBlack"})
+        self.api.request("POST", "/api/domains/deny/regex", {"domain": "ads\\.example", "comment": "user regex"})
+        self.api.request("POST", "/api/groups", {"name": "Kids", "comment": "Parental-control service blocklists"})
+        self.api.request("POST", "/api/domains/deny/regex", {"domain": ".*", "comment": "left by the 1.x installer", "groups": [0]})
+        before_user = self.snapshot(only_user=True)
+        self.store.groups[:] = [g for g in self.store.groups if g["name"] != "pb-svc-youtube"]
+        self.store.lists[:] = [l for l in self.store.lists if l["comment"] != "pb:tiktok"]
+        sessions = len(self.store.sessions)
+        REAL_RUN_SELF_HEAL()
+        self.assertIn("pb-svc-youtube", {g["name"] for g in self.store.groups})
+        self.assertIn("pb:tiktok", {l["comment"] for l in self.store.lists})
+        self.assertEqual(self.gravity, [1], "the lists must be in gravity again")
+        self.assertEqual(self.snapshot(only_user=True), before_user, "nothing that is not pb-* was touched (not even the 1.x leftovers)")
+        self.assertEqual(len(self.store.sessions), sessions, "the session of the repair was given back")
+
+    def test_a_failing_repair_still_gives_the_session_back(self):
+        sessions = len(self.store.sessions)
+        with mock.patch.object(pb.Controller, "setup", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                REAL_RUN_SELF_HEAL()
+        self.assertEqual(len(self.store.sessions), sessions)
+
+    def test_the_owners_own_block_everything_rule_is_not_touched_by_a_repair_either(self):
+        self.api.request("DELETE", "/api/domains/deny/regex/" + pb.Api.q(pb.BLOCK_ALL_REGEX))
+        self.api.request("POST", "/api/domains/deny/regex", {"domain": pb.BLOCK_ALL_REGEX, "comment": "my allow-list mode", "groups": [0]})
+        self.store.groups[:] = [g for g in self.store.groups if g["name"] != "pb-svc-youtube"]
+        REAL_RUN_SELF_HEAL()
+        rule = next(d for d in self.store.domains if d["domain"] == pb.BLOCK_ALL_REGEX)
+        self.assertEqual(rule["comment"], "my allow-list mode")
+
+
 class BackgroundJobTests(unittest.TestCase):
     def test_a_result_is_collected_once(self):
         job = pb.BackgroundJob("t")
@@ -1175,15 +1769,16 @@ class OneTickTests(Fixture):
         self.assertEqual((u["status"], u["request"], u["checkRequest"], u["latest"]), ("running", None, None, "3.1.0"))
         self.assertEqual(pb.load_handled(), {"update": 11, "check": 12})
 
-    def test_a_power_request_in_the_same_tick_waits_for_the_update_to_finish(self):
+    def test_a_power_request_in_the_same_tick_is_dropped_because_the_update_has_just_begun(self):
         self.everything_at_once()
         self.set_state(lambda s: s["power"].update(request=13, action="reboot"))
-        self.settle()
+        actions = self.settle()
         self.assertEqual(self.power_calls, [], "never reboot in the middle of an installation")
-        self.assertEqual(self.state()["power"]["request"], 13)
+        self.assertIn("power request ignored: an update is running", actions)
+        self.assertEqual(self.state()["power"]["request"], None, "and never kept for after it")
         self.set_state(lambda s: s["update"].update(status="ok"))
         self.settle()
-        self.assertEqual(self.power_calls, ["reboot"])
+        self.assertEqual(self.power_calls, [])
 
     def test_after_a_restart_nothing_that_was_handled_happens_again(self):
         self.everything_at_once()
@@ -1236,7 +1831,7 @@ class EverythingFailsTests(Fixture):
         self.assertIsNone(u["request"])
         self.assertIsNone(u["checkRequest"])
         self.assertEqual(self.state()["power"], {"request": None, "action": None})
-        self.assertEqual(self.power_calls, ["reboot"])
+        self.assertEqual(self.power_calls, [], "the power request came while the update was starting: dropped")
         self.assertEqual(self.rules(), json.dumps([g for g in self.store.groups if g["name"] != "pb-state"], sort_keys=True))
 
 

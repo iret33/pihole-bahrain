@@ -250,7 +250,7 @@ class StatusTests(Pihole):
         self.assertEqual(status["update"], {"auto": True, "latest": "3.1.0",
                                             "notes": "https://github.com/iret33/sinko/releases/tag/v3.1.0",
                                             "checked": 1700000000.0, "status": "failed", "from": None, "to": None,
-                                            "at": 1700000100.0, "error": "x"})
+                                            "at": 1700000100.0, "error": "x", "rolledBack": None})
         self.assertEqual(status["telemetry"], {"on": True})
 
     def test_the_pages_request_markers_are_not_part_of_the_picture(self):
@@ -290,13 +290,17 @@ class StatusTests(Pihole):
 class DoctorTests(Pihole):
     """The whole command: the new lines appear after the old ones and the old ones are unchanged."""
 
+    scheduler = ("ok", "the scheduler service has run for 300 s and keeps finishing its passes")
+
     def run_doctor(self, probe, **env):
         os.makedirs(os.path.join(self.tmp, "pb"), exist_ok=True)
-        with open(os.path.join(self.tmp, "pb", "app.js"), "w") as fh:
-            fh.write("x")
+        for name in ("index.html", "pb/app.js", "pb/version.txt", "pb/services.json"):
+            with open(os.path.join(self.tmp, name), "w") as fh:
+                fh.write("x")
         out = io.StringIO()
         ok = subprocess.CompletedProcess([], 0, "", "")
         with contextlib.redirect_stdout(out), mock.patch.object(pb.subprocess, "run", return_value=ok), \
+                mock.patch.object(pb, "scheduler_status", lambda *a, **k: self.scheduler), \
                 mock.patch.object(pb, "ftl_config", lambda key: "true" if "webroot" not in key else self.tmp), \
                 mock.patch.object(pb, "doctor_api_checks", lambda rep, api, catalog: rep.ok("api checks ran")), \
                 mock.patch.object(pb, "SystemProbe", lambda: probe), mock.patch.object(pb, "lists_base", lambda *a: "/local"):
@@ -321,6 +325,34 @@ class DoctorTests(Pihole):
     def test_a_clean_box_says_all_good(self):
         _, out = self.run_doctor(FakeProbe())
         self.assertTrue(out.rstrip().endswith("All good."), out)
+
+    def test_a_scheduler_that_keeps_restarting_or_never_finishes_a_pass_is_a_problem(self):
+        for state in ("crashing", "idle", "stopped"):
+            self.scheduler = (state, "the scheduler is " + state)
+            code, out = self.run_doctor(FakeProbe())
+            self.assertEqual(code, 1, state)
+            self.assertIn("  FIX   sinko scheduler: the scheduler is " + state, out)
+
+    def test_a_scheduler_that_has_only_just_started_is_not_a_problem(self):
+        self.scheduler = ("starting", "the scheduler service started 4 s ago")
+        code, out = self.run_doctor(FakeProbe())
+        self.assertEqual(code, 0)
+        self.assertIn("  ok    sinko scheduler: the scheduler service started 4 s ago", out)
+
+    def test_a_page_that_lacks_a_file_it_loads_is_a_problem(self):
+        self.run_doctor(FakeProbe())
+        with open(os.path.join(self.tmp, "index.html"), "w") as fh:
+            fh.write('<script src="/pb/pb-core.js"></script><script src="/pb/app.js"></script>')
+        out = io.StringIO()
+        ok = subprocess.CompletedProcess([], 0, "", "")
+        with contextlib.redirect_stdout(out), mock.patch.object(pb.subprocess, "run", return_value=ok), \
+                mock.patch.object(pb, "scheduler_status", lambda *a, **k: self.scheduler), \
+                mock.patch.object(pb, "ftl_config", lambda key: "true" if "webroot" not in key else self.tmp), \
+                mock.patch.object(pb, "doctor_api_checks", lambda rep, api, catalog: rep.ok("api checks ran")), \
+                mock.patch.object(pb, "SystemProbe", lambda: FakeProbe()), mock.patch.object(pb, "lists_base", lambda *a: "/local"):
+            code = pb.main(["doctor"])
+        self.assertEqual(code, 1)
+        self.assertIn("  FIX   web page installed in %s (missing: pb/pb-core.js)" % self.tmp, out.getvalue())
 
     def test_with_pihole_unreachable_the_machine_checks_still_run(self):
         self.httpd.shutdown()

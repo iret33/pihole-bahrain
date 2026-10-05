@@ -133,6 +133,174 @@ class SetupTests(Base):
         self.assertIn(self.group("pb-svc-youtube")["id"], sara["groups"])
 
 
+OLD_COMMENT = "pihole-bahrain: blocks everything for offline/paused kid devices"
+
+
+class OwnersBlockAllRuleTests(Base):
+    """An allow-list-only Pi-hole already has a deny rule for "^.*$". Pi-hole keeps one entry per pattern, so Sinko
+    cannot add its own: it must join the owner's rule, never rewrite or delete it."""
+
+    def rule(self):
+        return [d for d in self.store.domains if d["domain"] == pb.BLOCK_ALL_REGEX and d.get("type", "deny") == "deny"]
+
+    def add_owner_rule(self, comment="my allow-list-only mode", enabled=True, groups=(0,)):
+        self.api.request("POST", "/api/domains/deny/regex", {"domain": pb.BLOCK_ALL_REGEX, "comment": comment,
+                                                             "groups": list(groups), "enabled": enabled})
+        self.api.request("POST", "/api/domains/allow/exact", {"domain": "school.example", "comment": "allowed", "groups": [0]})
+
+    def test_the_owners_rule_keeps_its_comment_and_groups_and_gains_sinkos(self):
+        self.add_owner_rule()
+        self.ctl.setup(run_gravity=False)
+        rule, = self.rule()
+        self.assertEqual(rule["comment"], "my allow-list-only mode")
+        self.assertTrue(rule["enabled"])
+        self.assertEqual(sorted(rule["groups"]), sorted([0, self.group("pb-offline")["id"], self.group("pb-paused")["id"]]),
+                         "the Default group is still in it: the rule still covers everybody")
+        snapshot = json.dumps(self.store.domains, sort_keys=True)
+        writes = self.store.writes
+        self.ctl.setup(run_gravity=False)
+        self.assertEqual(json.dumps(self.store.domains, sort_keys=True), snapshot)
+        self.assertEqual(self.store.writes, writes, "and a second setup rewrites nothing")
+
+    def test_removing_sinko_leaves_the_owners_rule_with_only_the_owners_groups(self):
+        self.add_owner_rule()
+        self.ctl.setup(run_gravity=False)
+        self.add_kid()
+        self.ctl.remove()
+        rule, = self.rule()
+        self.assertEqual((rule["comment"], rule["groups"], rule["enabled"]), ("my allow-list-only mode", [0], True))
+        self.assertEqual([d["domain"] for d in self.store.domains if d["domain"] == "school.example"], ["school.example"])
+        self.assertEqual(self.store.clients, [])
+        self.assertEqual({g["name"] for g in self.store.groups}, {"Default"})
+
+    def test_an_owners_rule_that_is_switched_off_is_not_switched_on_and_the_doctor_says_so(self):
+        self.add_owner_rule(enabled=False)
+        with self.assertLogs("sinko", level="WARNING") as logs:
+            self.ctl.setup(run_gravity=False)
+        self.assertIn("switched off", logs.records[0].getMessage())
+        rule, = self.rule()
+        self.assertEqual((rule["enabled"], rule["groups"], rule["comment"]), (False, [0], "my allow-list-only mode"))
+        lines = []
+        pb.block_all_check(pb.Report(out=lines.append), self.api.group_map(), self.api.domains())
+        self.assertTrue(lines[0].startswith("  FIX   the ^.*$ rule is switched off"), lines)
+        self.assertIn("It is your own", lines[0])
+
+    def test_a_rule_without_a_comment_is_the_owners_too(self):
+        self.add_owner_rule(comment="")
+        self.ctl.setup(run_gravity=False)
+        self.ctl.remove()
+        rule, = self.rule()
+        self.assertIn(rule["comment"], ("", None))                # (Pi-hole's own idea of "no comment")
+        self.assertEqual(rule["groups"], [0])
+
+    def test_the_rule_the_2x_release_made_is_re_owned_and_removed_with_the_rest(self):
+        self.add_owner_rule(comment=OLD_COMMENT, groups=(0,))
+        self.ctl.setup(run_gravity=False)
+        rule, = self.rule()
+        self.assertEqual(rule["comment"], pb.BLOCK_ALL_COMMENT)
+        self.assertEqual(sorted(rule["groups"]), sorted([self.group("pb-offline")["id"], self.group("pb-paused")["id"]]))
+        self.ctl.remove()
+        self.assertEqual(self.rule(), [])
+
+    def test_a_rule_of_sinkos_own_is_repaired_when_somebody_edited_it(self):
+        self.ctl.setup(run_gravity=False)
+        rule, = self.rule()
+        self.api.request("PUT", "/api/domains/deny/regex/" + pb.Api.q(pb.BLOCK_ALL_REGEX),
+                         {"type": "deny", "kind": "regex", "comment": pb.BLOCK_ALL_COMMENT, "groups": [0], "enabled": False})
+        self.ctl.setup(run_gravity=False)
+        rule, = self.rule()
+        self.assertTrue(rule["enabled"])
+        self.assertEqual(sorted(rule["groups"]), sorted([self.group("pb-offline")["id"], self.group("pb-paused")["id"]]))
+
+    def test_an_allow_rule_of_the_same_pattern_does_not_stop_the_removal(self):
+        self.ctl.setup(run_gravity=False)
+        self.api.request("POST", "/api/domains/allow/regex", {"domain": pb.BLOCK_ALL_REGEX, "comment": "allow everything", "groups": [0]})
+        self.ctl.remove()
+        left = [d for d in self.store.domains if d["domain"] == pb.BLOCK_ALL_REGEX]
+        self.assertEqual([(d["type"], d["comment"]) for d in left], [("allow", "allow everything")])
+        self.assertEqual({g["name"] for g in self.store.groups}, {"Default"}, "the removal ran to the end")
+
+    def test_the_doctor_checks_the_rule_behind_internet_off_and_pause(self):
+        def lines_for():
+            out = []
+            pb.block_all_check(pb.Report(out=out.append), self.api.group_map(), self.api.domains())
+            return out
+        self.ctl.setup(run_gravity=False)
+        self.assertEqual(lines_for(), ["  ok    the rule behind 'internet off' and 'pause' is in place"])
+        self.api.request("DELETE", "/api/domains/deny/regex/" + pb.Api.q(pb.BLOCK_ALL_REGEX))
+        self.assertIn("missing", lines_for()[0])
+        self.api.request("POST", "/api/domains/deny/regex", {"domain": pb.BLOCK_ALL_REGEX, "comment": "mine", "groups": [0]})
+        self.assertIn("does not apply to Sinko's groups", lines_for()[0])
+        self.ctl.setup(run_gravity=False)
+        self.assertTrue(lines_for()[0].startswith("  info  your own ^.*$ rule also serves"), lines_for())
+
+
+class BlockedServiceOfANewerReleaseTests(Base):
+    """After a rollback the older release does not know a service that the newer one added. A blocked one keeps its
+    group (and its list): deleting them would turn the parent's block into nothing, silently, for good."""
+
+    def newer_catalog(self):
+        extra = dict(self.catalog)
+        extra["services"] = self.catalog["services"] + [dict(self.catalog["services"][0], id="newapp", name="New App")]
+        return extra
+
+    def setUp(self):
+        super().setUp()
+        self.newer = pb.Controller(self.api, self.newer_catalog(), "https://lists.example/l")
+        self.newer.setup(run_gravity=False)
+        self.add_kid()
+
+    def block(self, name):
+        self.api.put_group(name, "", True)
+
+    def test_a_blocked_service_the_release_does_not_know_keeps_its_group_list_and_kids(self):
+        self.block("pb-svc-newapp")
+        kid_before = list(self.store.clients[0]["groups"])
+        self.ctl.setup(run_gravity=False)                         # the older release's setup, after `sinko rollback`
+        self.assertTrue(self.group("pb-svc-newapp")["enabled"], "still blocked")
+        self.assertIn("pb:newapp", {l["comment"] for l in self.store.lists}, "its list too: the block holds in the meantime")
+        self.assertEqual(self.store.clients[0]["groups"], kid_before)
+
+    def test_after_the_roll_forward_the_block_is_still_there(self):
+        self.block("pb-svc-newapp")
+        self.ctl.setup(run_gravity=False)
+        self.newer.setup(run_gravity=False)
+        self.assertTrue(self.group("pb-svc-newapp")["enabled"])
+        self.assertEqual(len([l for l in self.store.lists if l["comment"] == "pb:newapp"]), 1)
+        self.assertIn(self.group("pb-svc-newapp")["id"], self.store.clients[0]["groups"])
+
+    def test_a_service_that_is_allowed_and_gone_from_the_catalog_is_still_removed(self):
+        self.ctl.setup(run_gravity=False)
+        self.assertNotIn("pb-svc-newapp", {g["name"] for g in self.store.groups})
+        self.assertNotIn("pb:newapp", {l["comment"] for l in self.store.lists})
+
+    def test_removing_sinko_removes_the_kept_group_too(self):
+        self.block("pb-svc-newapp")
+        self.ctl.setup(run_gravity=False)
+        self.ctl.remove()
+        self.assertEqual({g["name"] for g in self.store.groups}, {"Default"})
+        self.assertEqual(self.store.lists, [])
+
+    def test_the_summary_counts_only_the_services_this_release_knows(self):
+        self.block("pb-svc-newapp")
+        self.ctl.setup(run_gravity=False)
+        groups = self.api.group_map()
+        ids = [g["id"] for g in groups.values()]
+        known = {s["id"] for s in self.catalog["services"]}
+        total = len(known)
+        self.assertIn("%d/%d service groups" % (total, total), pb.group_summary(ids, groups, known))
+        self.assertIn("%d/%d service groups" % (total + 1, total + 1), pb.group_summary(ids, groups))
+
+    def test_the_repair_run_by_the_scheduler_does_not_touch_the_leftovers_of_the_1x_installer(self):
+        self.api.request("POST", "/api/groups", {"name": "Kids", "comment": "Parental-control service blocklists"})
+        self.api.request("POST", "/api/domains/deny/regex", {"domain": ".*", "comment": "legacy", "groups": [0]})
+        before = json.dumps([self.store.groups, self.store.domains], sort_keys=True)
+        self.ctl.setup(run_gravity=False, legacy=False)
+        self.assertIn("Kids", {g["name"] for g in self.store.groups})
+        self.assertIn(".*", {d["domain"] for d in self.store.domains})
+        self.assertEqual(json.dumps([self.store.groups, self.store.domains], sort_keys=True).count("legacy"), before.count("legacy"))
+
+
 class TickTests(Base):
     def setUp(self):
         super().setUp()

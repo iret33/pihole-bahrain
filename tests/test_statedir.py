@@ -193,7 +193,8 @@ class UpdateResultTests(TempState):
     def test_roundtrip(self):
         pb.write_update_result("ok", "3.0.0", "3.1.0", None, 1700000000.5)
         self.assertEqual(pb.read_update_result(),
-                         {"status": "ok", "from": "3.0.0", "to": "3.1.0", "error": None, "at": 1700000000.5})
+                         {"status": "ok", "from": "3.0.0", "to": "3.1.0", "error": None, "at": 1700000000.5,
+                          "rolledBack": None, "transient": False})
         pb.clear_update_result()
         self.assertIsNone(pb.read_update_result())
         pb.clear_update_result()                         # clearing twice is fine

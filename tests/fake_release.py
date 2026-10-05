@@ -168,6 +168,80 @@ def serve():
     return httpd, site
 
 
+class Counter:
+    """A fake of the counter service (telemetry/): POST /v1/ping and POST /v1/forget with the rules of its contract.
+    `known` is what its database holds (ids); `forgotten` the ids it was asked to delete, in order. A test can make it
+    fail: `fail_forget`/`fail_ping` answer HTTP 500 that many times, `forget_body` replaces the answer to a forget."""
+
+    ID_CHARS = set("0123456789abcdef")
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.known = set()
+        self.pings = []                   # ids, in order
+        self.forgotten = []
+        self.requests = []                # (path, headers, body bytes) of everything it was sent
+        self.fail_forget = 0
+        self.fail_ping = 0
+        self.forget_body = None           # bytes: the answer to a forget instead of {"forgotten": true}
+        self.url = None
+
+    def valid_id(self, value):
+        return isinstance(value, str) and len(value) == 32 and set(value) <= self.ID_CHARS
+
+
+def serve_counter():
+    counter = Counter()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def reply(self, status, payload):
+            body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            self.reply(404, {"error": "not found"})
+
+        def do_POST(self):
+            raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            with counter.lock:
+                counter.requests.append((self.path, dict(self.headers), raw))
+                try:
+                    data = json.loads(raw.decode("utf-8"))
+                except ValueError:
+                    return self.reply(400, {"error": "bad json"})
+                if not isinstance(data, dict) or len(raw) > 512 or not counter.valid_id(data.get("id")):
+                    return self.reply(400, {"error": "bad body"})
+                if self.path == "/v1/ping":
+                    if counter.fail_ping:
+                        counter.fail_ping -= 1
+                        return self.reply(500, {"error": "database busy"})
+                    counter.known.add(data["id"])
+                    counter.pings.append(data["id"])
+                    return self.reply(200, {"online": len(counter.known), "total": len(counter.known)})
+                if self.path == "/v1/forget":
+                    if set(data) != {"id"}:
+                        return self.reply(400, {"error": "unexpected fields"})
+                    if counter.fail_forget:
+                        counter.fail_forget -= 1
+                        return self.reply(500, {"error": "database busy"})
+                    counter.known.discard(data["id"])
+                    counter.forgotten.append(data["id"])
+                    return self.reply(200, counter.forget_body if counter.forget_body is not None else {"forgotten": True})
+                return self.reply(404, {"error": "not found"})
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
+    counter.url = "http://127.0.0.1:%d" % httpd.server_port
+    return httpd, counter
+
+
 def serve_pihole():
     """tests/mock_pihole.py's server, started with a short poll interval: its serve() waits up to half a second
     when it is shut down, which adds up over a hundred tests. Same classes, same behaviour."""

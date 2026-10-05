@@ -337,6 +337,354 @@ class PingSchedulingTests(tm.Fixture):
         self.assertNotIn(secret, "\n".join(r.getMessage() for r in logs.records))
 
 
+class CounterFixture(unittest.TestCase):
+    """A state folder and a fake counter (tests/fake_release.py: it keeps what it was told and can be made to fail)."""
+
+    def setUp(self):
+        self.httpd, self.counter = fake_release.serve_counter()
+        self.addCleanup(self.httpd.server_close)
+        self.addCleanup(self.httpd.shutdown)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+        env = mock.patch.dict(os.environ, {"SINKO_STATE_DIR": os.path.join(self.tmp, "state")})
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("SINKO_TELEMETRY_URL", None)
+
+    def state_file(self, name):
+        return os.path.join(self.tmp, "state", name)
+
+    def files(self):
+        try:
+            return sorted(n for n in os.listdir(os.path.join(self.tmp, "state")) if not n.startswith("."))
+        except FileNotFoundError:
+            return []
+
+
+class SendForgetTests(CounterFixture):
+    IDENT = "0123456789abcdef0123456789abcdef"
+
+    def test_it_posts_exactly_the_id_to_v1_forget_and_the_counter_deletes_it(self):
+        self.counter.known.add(self.IDENT)
+        self.assertIs(pb.send_forget(self.counter.url, self.IDENT), True)
+        path, headers, body = self.counter.requests[0]
+        self.assertEqual((path, body), ("/v1/forget", b'{"id":"%s"}' % self.IDENT.encode()))
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(headers["User-Agent"], "sinko/" + pb.VERSION)
+        self.assertNotIn("Cookie", headers)
+        self.assertLessEqual(len(body), 512)
+        self.assertEqual((self.counter.forgotten, self.counter.known), ([self.IDENT], set()))
+
+    def test_an_id_the_counter_never_knew_is_forgotten_just_the_same(self):
+        self.assertIs(pb.send_forget(self.counter.url, self.IDENT), True)
+
+    def test_anything_but_a_confirmation_is_an_error_to_try_again(self):
+        for status, body in ((500, b"{}"), (404, b"{}"), (200, b'{"forgotten": false}'), (200, b"{}"), (200, b"[]"),
+                             (200, b"<html>captive portal</html>"), (200, b'{"forgotten": "yes"}'), (200, b"x" * 9000)):
+            self.counter.forget_body = body if status == 200 else None
+            self.counter.fail_forget = 1 if status == 500 else 0
+            url = self.counter.url + ("/nowhere" if status == 404 else "")
+            with self.assertRaises(pb.TelemetryError, msg=(status, body[:20])):
+                pb.send_forget(url, self.IDENT)
+
+    def test_an_id_that_is_not_32_lowercase_hex_digits_is_never_sent(self):
+        for bad in ("", "x", "0123456789ABCDEF0123456789ABCDEF", "0123456789abcdef0123456789abcde", self.IDENT + "0",
+                    self.IDENT + "\n", None, 5, "../../etc/passwd"):
+            with self.assertRaises(pb.TelemetryError, msg=repr(bad)):
+                pb.send_forget(self.counter.url, bad)
+        self.assertEqual(self.counter.requests, [])
+
+    def test_an_unreachable_counter_is_a_telemetry_error_and_the_id_is_not_in_it(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        with self.assertRaises(pb.TelemetryError) as caught:
+            pb.send_forget(self.counter.url, self.IDENT)
+        self.assertNotIn(self.IDENT, str(caught.exception))
+
+    def test_the_transport_is_the_pings_one_so_a_redirect_to_plain_http_is_refused(self):
+        site_httpd, site = fake_release.serve()
+        self.addCleanup(site_httpd.server_close)
+        self.addCleanup(site_httpd.shutdown)
+        site.routes["/v1/forget"] = (302, b"", {"Location": "http://evil.example/v1/forget"})
+        with self.assertRaises(pb.TelemetryError):
+            pb.send_forget(site.base.replace("/releases", ""), self.IDENT)
+
+
+class ForgetCounterIdTests(CounterFixture):
+    """What the box does to the id and its markers when the counter has to forget it."""
+
+    def sent(self):
+        ident = pb.install_id()
+        pb.note_counter_sent()
+        self.counter.known.add(ident)
+        return ident
+
+    def test_nothing_to_forget_when_there_is_no_id(self):
+        self.assertEqual(pb.forget_counter_id(self.counter.url), ("none", ""))
+        self.assertEqual((self.counter.requests, self.files()), ([], []))
+
+    def test_an_id_that_never_left_the_box_is_deleted_and_nothing_is_sent(self):
+        pb.install_id()                                   # `sinko telemetry payload` makes one without sending it
+        self.assertEqual(pb.forget_counter_id(self.counter.url), ("none", ""))
+        self.assertEqual((self.counter.requests, self.files()), ([], []))
+
+    def test_an_id_that_was_sent_is_forgotten_by_the_counter_and_then_deleted_here(self):
+        ident = self.sent()
+        self.assertEqual(pb.forget_counter_id(self.counter.url), ("forgotten", ""))
+        self.assertEqual((self.counter.forgotten, self.counter.known), ([ident], set()))
+        self.assertEqual(self.files(), [], "the id and both markers are gone")
+        self.assertIsNone(pb.install_id(create=False))
+
+    def test_when_the_counter_cannot_be_reached_the_id_stays_with_a_marker(self):
+        ident = self.sent()
+        self.counter.fail_forget = 1
+        what, detail = pb.forget_counter_id(self.counter.url)
+        self.assertEqual(what, "pending")
+        self.assertIn("HTTP 500", detail)
+        self.assertNotIn(ident, detail)
+        self.assertEqual(self.files(), ["counter-sent", "forget-pending", "install-id"])
+        self.assertTrue(pb.forget_pending())
+        self.assertEqual(pb.install_id(create=False), ident, "the same id: it is what has to be forgotten")
+        self.assertEqual(pb.forget_counter_id(self.counter.url), ("forgotten", ""))
+        self.assertEqual(self.files(), [])
+
+    def test_without_a_counter_address_nobody_can_be_asked_and_the_marker_waits_for_one(self):
+        ident = self.sent()
+        self.assertEqual(pb.forget_counter_id(""), ("no-address", ""))
+        self.assertEqual(self.files(), ["counter-sent", "forget-pending", "install-id"])
+        self.assertEqual(self.counter.requests, [], "nothing is ever sent without an address")
+        self.assertEqual(pb.forget_counter_id(self.counter.url), ("forgotten", ""))
+        self.assertEqual(self.counter.forgotten, [ident])
+
+    def test_a_marker_without_an_id_is_just_cleaned_up(self):
+        pb.set_forget_pending()
+        self.assertEqual(pb.forget_counter_id(self.counter.url), ("none", ""))
+        self.assertEqual(self.files(), [])
+
+    def test_the_forget_request_is_the_only_thing_sent(self):
+        self.sent()
+        pb.forget_counter_id(self.counter.url)
+        self.assertEqual([r[0] for r in self.counter.requests], ["/v1/forget"])
+
+    def test_the_markers_are_private(self):
+        self.sent()
+        self.counter.fail_forget = 1
+        pb.forget_counter_id(self.counter.url)
+        for name in ("install-id", "counter-sent", "forget-pending"):
+            self.assertEqual(stat.S_IMODE(os.stat(self.state_file(name)).st_mode), 0o600, name)
+
+
+class ForgetSchedulingTests(tm.Fixture):
+    """The scheduler makes the counter forget the box when the answer is no, and asks again until it has."""
+    URL = "https://counter.example"
+
+    def setUp(self):
+        super().setUp()
+        with open(self.config_path, "a") as fh:
+            fh.write("SINKO_TELEMETRY_URL=%s\n" % self.URL)
+
+    def answer(self, value):
+        self.set_state(lambda s: s["telemetry"].update(on=value))
+
+    def sent_id(self):
+        ident = pb.install_id()
+        pb.note_counter_sent()
+        return ident
+
+    def files_left(self):
+        try:
+            return sorted(n for n in os.listdir(self.state_dir) if n in ("install-id", "counter-sent", "forget-pending"))
+        except FileNotFoundError:
+            return []
+
+    def test_a_no_after_pings_makes_the_counter_forget_at_once_and_the_id_goes(self):
+        ident = self.sent_id()
+        self.answer(True)
+        self.advance(301)
+        self.settle()
+        self.assertEqual(len(self.ping_calls), 1)
+        self.answer(False)
+        self.advance(15)
+        self.settle()
+        self.assertEqual(self.forget_calls, [(self.URL, ident)])
+        self.assertIsNone(pb.install_id(create=False))
+        self.assertEqual(self.files_left(), [])
+        self.advance(12 * 3600)
+        self.settle()
+        self.assertEqual((len(self.ping_calls), len(self.forget_calls)), (1, 1), "nothing more is ever sent")
+
+    def test_a_no_with_an_id_that_never_left_the_box_sends_nothing_at_all(self):
+        pb.install_id()
+        self.answer(False)
+        self.advance(15)
+        self.settle()
+        self.assertEqual(self.forget_calls, [])
+        self.assertIsNone(pb.install_id(create=False), "but the id is deleted")
+
+    def test_not_decided_is_not_a_no_and_forgets_nothing(self):
+        self.sent_id()
+        self.answer(None)
+        self.advance(7 * 3600)
+        self.settle()
+        self.assertEqual((self.forget_calls, self.ping_calls), ([], []))
+        self.assertIsNotNone(pb.install_id(create=False))
+
+    def test_a_failed_forget_keeps_the_id_and_a_marker_and_is_asked_again_every_ping_interval(self):
+        ident = self.sent_id()
+        self.forget_answer = pb.TelemetryError("the counter could not be reached (timed out)")
+        self.answer(False)
+        with self.assertLogs("sinko", level="WARNING") as logs:
+            self.advance(15)
+            self.settle()
+            self.assertEqual(len(self.forget_calls), 1)
+            self.assertTrue(pb.forget_pending())
+            self.assertEqual(pb.install_id(create=False), ident)
+            self.advance(6 * 3600 - 100)
+            self.settle()
+            self.assertEqual(len(self.forget_calls), 1, "not before the ping interval")
+            self.advance(200)
+            self.settle()
+            self.assertEqual(len(self.forget_calls), 2)
+        self.assertEqual(len(logs.records), 2, "once per attempt")
+        self.assertNotIn(ident, "\n".join(r.getMessage() for r in logs.records))
+        self.forget_answer = True
+        self.advance(7 * 3600)
+        self.settle()
+        self.assertEqual(len(self.forget_calls), 3)
+        self.assertEqual(self.files_left(), [])
+
+    def test_while_a_forget_is_pending_no_ping_goes_out_even_after_a_yes(self):
+        self.sent_id()
+        self.forget_answer = pb.TelemetryError("down")
+        self.answer(False)
+        with self.assertLogs("sinko", level="WARNING"):
+            self.advance(15)
+            self.settle()
+            self.answer(True)
+            self.advance(400)
+            self.settle()
+        self.assertEqual(self.ping_calls, [], "the answer is yes again, but the old id has not been forgotten yet")
+        self.forget_answer = True
+        self.advance(7 * 3600)
+        self.settle()
+        self.advance(15)
+        self.settle()
+        self.assertEqual(len(self.ping_calls), 1, "and when it has, the pings go on")
+
+    def test_a_ping_that_is_on_its_way_lands_before_the_forget_is_asked(self):
+        ident = self.sent_id()
+        self.answer(True)
+        self.advance(301)
+        self.pass_()                                       # the ping was sent; its answer is collected on the next pass
+        self.answer(False)
+        self.forget_answer = True
+        self.pass_()
+        self.pass_()
+        self.assertEqual([c[1] for c in self.forget_calls], [ident])
+        self.assertEqual(len(self.ping_calls), 1)
+
+    def test_without_an_address_the_marker_waits_and_nothing_is_sent(self):
+        self.sent_id()
+        with open(self.config_path, "w") as fh:
+            fh.write(tm.CONFIG)
+        self.answer(False)
+        self.advance(7 * 3600)
+        self.settle()
+        self.assertEqual(self.forget_calls, [])
+        self.assertTrue(pb.forget_pending())
+        with open(self.config_path, "a") as fh:
+            fh.write("SINKO_TELEMETRY_URL=%s\n" % self.URL)
+        self.advance(7 * 3600)
+        self.settle()
+        self.assertEqual(len(self.forget_calls), 1)
+
+    def test_a_no_still_removes_the_community_number(self):
+        self.set_state(lambda s: s.update(community={"online": 7, "at": 1.0}))
+        self.answer(False)
+        self.settle()
+        self.assertIsNone(self.state()["community"])
+
+    def test_the_id_never_reaches_the_log_on_the_forget_path_either(self):
+        ident = self.sent_id()
+        self.forget_answer = pb.TelemetryError("the counter answered HTTP 500")
+        self.answer(False)
+        with self.assertLogs("sinko", level="DEBUG") as logs:
+            self.advance(15)
+            self.settle()
+        self.assertNotIn(ident, "\n".join(r.getMessage() for r in logs.records))
+
+
+class EndToEndCounterTests(tm.Fixture):
+    """The scheduler's real counter code against the fake counter: yes, a few pings, no, and what the counter holds."""
+
+    def setUp(self):
+        super().setUp()
+        self.cs_httpd, self.cs = fake_release.serve_counter()
+        self.addCleanup(self.cs_httpd.server_close)
+        self.addCleanup(self.cs_httpd.shutdown)
+        with open(self.config_path, "a") as fh:
+            fh.write("SINKO_TELEMETRY_URL=%s\n" % self.cs.url)
+        env = mock.patch.dict(os.environ, {"SINKO_DT_MODEL": os.path.join(self.tmp, "none")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.real = pb.Maintenance(self.api, config_path=self.config_path, monotonic=lambda: self.mono,
+                                   job_factory=tm.InlineJob, clock_ok=lambda: True, check=lambda c: None,
+                                   start_runner=lambda: True, power=lambda a: None, default_ip=lambda: None,
+                                   apply_address=lambda *a: None, box_info=lambda c, **k: "unchanged", heal=lambda: None,
+                                   recover=lambda: {"ok": True, "detail": ""}, catalog=lambda: self.catalog,
+                                   jitter=lambda lo, hi: 0, ping=pb.send_ping, forget=pb.send_forget, body=pb.telemetry_body)
+
+    def run_real(self, seconds):
+        self.advance(seconds)
+        self.real.run(self.now)
+        self.real.run(self.now)
+
+    def test_yes_then_no_leaves_nothing_at_the_counter_and_nothing_on_the_box(self):
+        self.set_state(lambda s: s["telemetry"].update(on=True))
+        self.run_real(301)
+        self.assertEqual(len(self.cs.pings), 1)
+        first = self.cs.pings[0]
+        self.assertEqual(self.cs.known, {first})
+        self.assertEqual(self.state()["community"]["online"], 1)
+        self.set_state(lambda s: s["telemetry"].update(on=False))
+        self.run_real(15)
+        self.assertEqual((self.cs.forgotten, self.cs.known), ([first], set()))
+        self.assertIsNone(self.state()["community"])
+        self.assertIsNone(pb.install_id(create=False))
+        self.run_real(24 * 3600)
+        self.assertEqual(len(self.cs.requests), 2, "one ping and one forget, nothing since")
+        self.set_state(lambda s: s["telemetry"].update(on=True))
+        self.run_real(24 * 3600)
+        self.assertEqual(len(self.cs.pings), 2)
+        self.assertNotEqual(self.cs.pings[1], first, "a yes again is a new random number")
+
+    def test_a_counter_that_fails_a_few_times_is_asked_again_until_it_confirms(self):
+        self.set_state(lambda s: s["telemetry"].update(on=True))
+        self.run_real(301)
+        self.cs.fail_forget = 2
+        self.set_state(lambda s: s["telemetry"].update(on=False))
+        with self.assertLogs("sinko", level="WARNING"):
+            self.run_real(15)
+            self.run_real(6 * 3600)
+        self.assertEqual(self.cs.forgotten, [])
+        self.assertIsNotNone(pb.install_id(create=False))
+        self.run_real(6 * 3600)
+        self.assertEqual(len(self.cs.forgotten), 1, "the third try is the first that works")
+        self.assertEqual(self.cs.known, set())
+        self.assertIsNone(pb.install_id(create=False))
+
+    def test_a_ping_that_failed_half_way_still_counts_as_sent(self):
+        self.cs.fail_ping = 1
+        self.set_state(lambda s: s["telemetry"].update(on=True))
+        with self.assertLogs("sinko", level="WARNING"):
+            self.run_real(301)
+        self.assertTrue(pb.counter_sent(), "the request left, whatever came back")
+        self.set_state(lambda s: s["telemetry"].update(on=False))
+        self.run_real(15)
+        self.assertEqual(len(self.cs.forgotten), 1)
+
+
 class CommandTests(unittest.TestCase):
     """`sinko telemetry ...` and the install-time answer that `sinko setup` copies into the state."""
 
@@ -497,6 +845,102 @@ class CommandTests(unittest.TestCase):
         writes = self.store.writes
         self.run_cli("setup", "--no-gravity")
         self.assertEqual(self.store.writes, writes, "and a second setup rewrites nothing")
+
+    def counter(self):
+        httpd, counter = fake_release.serve_counter()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        return counter
+
+    def test_off_makes_the_counter_forget_the_box_and_says_so(self):
+        counter = self.counter()
+        self.setup_pihole()
+        self.conf = {"SINKO_TELEMETRY_URL": counter.url}
+        ident = pb.install_id()
+        pb.note_counter_sent()
+        counter.known.add(ident)
+        code, out, err = self.run_cli("telemetry", "off")
+        self.assertEqual(code, 0)
+        self.assertIs(self.state()["telemetry"]["on"], False)
+        self.assertEqual((counter.forgotten, counter.known), ([ident], set()))
+        self.assertIn("asked to forget this box's number, and did", out)
+        self.assertIsNone(pb.install_id(create=False))
+        self.assertNotIn(ident, out + err)
+
+    def test_off_when_the_counter_cannot_be_reached_says_it_keeps_trying(self):
+        counter = self.counter()
+        self.setup_pihole()
+        self.conf = {"SINKO_TELEMETRY_URL": counter.url}
+        ident = pb.install_id()
+        pb.note_counter_sent()
+        counter.fail_forget = 1
+        code, out, err = self.run_cli("telemetry", "off")
+        self.assertEqual(code, 0, "the answer was recorded")
+        self.assertIs(self.state()["telemetry"]["on"], False)
+        self.assertIn("could not be reached", out)
+        self.assertIn("keeps trying", out)
+        self.assertTrue(pb.forget_pending())
+        self.assertEqual(pb.install_id(create=False), ident)
+        self.assertNotIn(ident, out + err)
+
+    def test_off_for_a_number_that_never_left_the_box_deletes_it_and_sends_nothing(self):
+        counter = self.counter()
+        self.setup_pihole()
+        self.conf = {"SINKO_TELEMETRY_URL": counter.url}
+        pb.install_id()
+        code, out, _ = self.run_cli("telemetry", "off")
+        self.assertEqual(code, 0)
+        self.assertEqual(counter.requests, [])
+        self.assertIn("never left the box", out)
+        self.assertIsNone(pb.install_id(create=False))
+
+    def test_off_without_a_counter_address_says_nothing_could_be_asked(self):
+        self.setup_pihole()
+        pb.install_id()
+        pb.note_counter_sent()
+        code, out, _ = self.run_cli("telemetry", "off")
+        self.assertEqual(code, 0)
+        self.assertIn("No counter address is set up", out)
+        self.assertTrue(pb.forget_pending())
+
+    def test_reset_id_makes_the_counter_forget_the_old_one_and_then_makes_a_new_one(self):
+        counter = self.counter()
+        self.conf = {"SINKO_TELEMETRY_URL": counter.url}
+        old = pb.install_id()
+        pb.note_counter_sent()
+        counter.known.add(old)
+        code, out, err = self.run_cli("telemetry", "reset-id")
+        self.assertEqual(code, 0)
+        new = pb.install_id(create=False)
+        self.assertEqual((counter.forgotten, counter.known), ([old], set()))
+        self.assertNotEqual(new, old)
+        self.assertRegex(new, r"^[0-9a-f]{32}$")
+        self.assertFalse(pb.counter_sent() or pb.forget_pending(), "the new id has not been sent anywhere")
+        self.assertIn("by the counter", out)
+        for secret in (old, new):
+            self.assertNotIn(secret, out + err)
+
+    def test_reset_id_keeps_the_old_id_when_the_counter_cannot_confirm(self):
+        counter = self.counter()
+        self.conf = {"SINKO_TELEMETRY_URL": counter.url}
+        old = pb.install_id()
+        pb.note_counter_sent()
+        counter.fail_forget = 1
+        code, out, err = self.run_cli("telemetry", "reset-id")
+        self.assertEqual(code, 1)
+        self.assertEqual(pb.install_id(create=False), old, "it still has to be forgotten")
+        self.assertTrue(pb.forget_pending())
+        self.assertIn("not replaced", err)
+        self.assertNotIn(old, out + err)
+
+    def test_reset_id_for_an_id_that_was_sent_but_with_no_address_any_more_replaces_it_and_says_so(self):
+        old = pb.install_id()
+        pb.note_counter_sent()
+        code, out, _ = self.run_cli("telemetry", "reset-id")
+        self.assertEqual(code, 0)
+        self.assertNotEqual(pb.install_id(create=False), old)
+        self.assertIn("no counter address is set up", out)
+        self.assertFalse(pb.forget_pending())
 
     def test_setup_makes_the_runtime_folder(self):
         self.run_cli("setup", "--no-gravity")
