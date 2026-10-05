@@ -631,6 +631,16 @@ class UpdateFlowTests(Box):
         self.assertIn("ref=v3.2.0", self.installs()[0])
         self.assertEqual(self.site.count("/api/latest"), 0, "a pin needs no metadata")
 
+    def test_the_version_that_is_put_back_is_told_the_ref_the_box_had_not_the_pin_that_failed(self):
+        self.publish("3.2.0", latest=False, install_ok=False)
+        self.site.add_release("3.0.0")
+        result = self.updater().update(ref="v3.2.0")
+        self.assertEqual((result["status"], result["rolledBack"]), ("failed", True))
+        self.assertEqual([l.rsplit("ref=", 1)[1] for l in self.installs()], ["v3.2.0", "latest"])
+        os.unlink(self.log_path)
+        self.updater(conf=self.site.conf(SINKO_REF="v3.0.0")).update(ref="v3.2.0")
+        self.assertEqual([l.rsplit("ref=", 1)[1] for l in self.installs()], ["v3.2.0", "v3.0.0"], "a pinned box goes back to its pin")
+
     def test_an_older_pin_is_refused_unless_forced(self):
         self.site.add_release("2.9.0")
         result = self.updater().update(ref="v2.9.0")
@@ -1507,6 +1517,114 @@ class CommandTests(Box):
             code, out, _ = self.run_cli("update", "--yes", "--ref", "v3.1.0")
         self.assertEqual(code, 1)
         self.assertNotIn("pinned", out)
+
+    # The fake installer saves the ref it is given in $SINKO_CONFIG_FILE before it can fail, as the real one does (write_settings
+    # runs before the setup, the units and the self-check): so these runs show what is left in the settings.
+    def failing_pin_run(self, config_text, *args, old_installs=True, **build):
+        path = self.config_file(config_text)
+        self.publish("3.1.0", latest=False, install_ok=False, **build)
+        if old_installs:
+            self.site.add_release("3.0.0")
+        with mock.patch.object(pb, "CONFIG_FILE", path), mock.patch.dict(os.environ, {"SINKO_CONFIG_FILE": path}):
+            code, out, err = self.run_cli("update", "--yes", *args)
+        with open(path) as fh:
+            return code, out, err, fh.read()
+
+    def refs_given_to_the_installer(self):
+        return [line.rsplit("ref=", 1)[1] for line in self.installs()]
+
+    def test_a_failed_update_to_a_chosen_release_leaves_the_pin_as_it_was_after_the_rollback_installer_ran(self):
+        code, out, err, config = self.failing_pin_run("SINKO_HOSTNAME=family.lan\nSINKO_REF=latest\n", "--ref", "v3.1.0")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.refs_given_to_the_installer(), ["v3.1.0", "latest"],
+                         "the version that is put back is told the ref the box had, not the one that failed")
+        self.assertEqual(self.installed(), "3.0.0")
+        self.assertIn("SINKO_REF=latest\n", config)
+        self.assertNotIn("v3.1.0", config)
+        self.assertIn("SINKO_HOSTNAME=family.lan\n", config, "nothing else in the file changed")
+        self.assertIn("choice of v3.1.0 was not kept", err)
+        self.assertIn("still follows the newest release", err)
+        self.assertNotIn("pinned", out)
+
+    def test_a_pinned_box_that_fails_to_move_to_another_release_stays_pinned_to_its_own(self):
+        code, out, err, config = self.failing_pin_run("SINKO_REF=v3.0.0\n", "--ref", "v3.1.0")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.refs_given_to_the_installer(), ["v3.1.0", "v3.0.0"])
+        self.assertIn("SINKO_REF=v3.0.0\n", config)
+        self.assertIn("still follows release v3.0.0", err)
+
+    def test_without_a_copy_to_go_back_to_the_settings_are_put_back_by_the_command(self):
+        # The new release's installer wrote its ref and died, and no installer ran after it: only keep_pin can undo that.
+        code, out, err, config = self.failing_pin_run("SINKO_REF=latest\nSINKO_IP=192.168.1.5\n", "--ref", "v3.1.0",
+                                                      old_installs=False)
+        self.assertEqual(code, 1)
+        self.assertEqual(self.refs_given_to_the_installer(), ["v3.1.0"], "no rollback installer ran")
+        self.assertEqual(sorted(config.split()), ["SINKO_IP=192.168.1.5", "SINKO_REF=latest"])
+        self.assertIn("still follows the newest release", err)
+
+    def test_a_rollback_that_fails_too_leaves_the_pin_as_it_was_as_well(self):
+        path = self.config_file("SINKO_REF=latest\n")
+        self.publish("3.1.0", latest=False, install_ok=False)
+        self.site.add_release("3.0.0", install_ok=False)
+        with mock.patch.object(pb, "CONFIG_FILE", path), mock.patch.dict(os.environ, {"SINKO_CONFIG_FILE": path}):
+            code, _, err = self.run_cli("update", "--yes", "--ref", "v3.1.0")
+        self.assertEqual(code, 1)
+        self.assertIn("did not work either", err)
+        with open(path) as fh:
+            self.assertEqual(fh.read().strip(), "SINKO_REF=latest")
+
+    def test_a_missing_ref_line_means_the_newest_release_and_is_put_back_as_such(self):
+        code, out, err, config = self.failing_pin_run("SINKO_HOSTNAME=family.lan\n", "--ref", "v3.1.0", old_installs=False)
+        self.assertEqual(code, 1)
+        self.assertIn("SINKO_REF=latest\n", config)
+        self.assertNotIn("v3.1.0", config)
+
+    def test_a_failure_before_the_installer_changes_nothing_in_the_settings_and_says_what_the_box_follows(self):
+        path = self.config_file("SINKO_REF=latest\n")
+        self.publish("3.1.0", latest=False, sha=("0" * 64 + "  sinko.tar.gz\n").encode())
+        with mock.patch.object(pb, "CONFIG_FILE", path), mock.patch.dict(os.environ, {"SINKO_CONFIG_FILE": path}):
+            code, _, err = self.run_cli("update", "--yes", "--ref", "v3.1.0")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.installs(), [])
+        with open(path) as fh:
+            self.assertEqual(fh.read(), "SINKO_REF=latest\n")
+        self.assertIn("still follows the newest release", err)
+
+    def test_a_failed_update_without_a_ref_says_nothing_about_a_pin(self):
+        path = self.config_file("SINKO_REF=latest\n")
+        self.publish("3.1.0", install_ok=False)
+        self.site.add_release("3.0.0")
+        with mock.patch.object(pb, "CONFIG_FILE", path), mock.patch.dict(os.environ, {"SINKO_CONFIG_FILE": path}):
+            code, _, err = self.run_cli("update", "--yes")
+        self.assertEqual(code, 1)
+        self.assertNotIn("choice of", err)
+        self.assertEqual(self.refs_given_to_the_installer(), ["latest", "latest"])
+
+    def test_a_branch_that_fails_leaves_a_release_pin_alone(self):
+        path = self.config_file("SINKO_REF=v3.0.0\n")
+        with mock.patch.object(pb, "CONFIG_FILE", path), \
+                mock.patch.object(pb.Updater, "update", return_value={"status": "failed", "error": "git could not fetch x"}):
+            code, _, err = self.run_cli("update", "--yes", "--ref", "feature/x")
+        self.assertEqual(code, 1)
+        with open(path) as fh:
+            self.assertEqual(fh.read(), "SINKO_REF=v3.0.0\n")
+        self.assertIn("choice of feature/x was not kept", err)
+        self.assertIn("still follows release v3.0.0", err)
+
+    def test_the_pin_that_cannot_be_put_back_is_said_not_raised(self):
+        missing = os.path.join(self.tmp, "no-such-folder", "config")
+        said = io.StringIO()
+        with contextlib.redirect_stderr(said):
+            pb.keep_pin("latest", "v3.1.0", missing)
+        # (read_config of a missing file says "latest" = nothing to put back, so only the explanation is printed)
+        self.assertIn("still follows the newest release", said.getvalue())
+        path = self.config_file("SINKO_REF=v3.1.0\n")
+        os.chmod(path, 0o444)
+        with mock.patch.object(pb, "write_config_value", side_effect=OSError("read-only file system")):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                pb.keep_pin("latest", "v3.1.0", path)
+        self.assertIn("could not put the setting back to latest", err.getvalue())
 
     def test_a_missing_settings_file_is_said_not_a_traceback(self):
         missing = os.path.join(self.tmp, "no-config")

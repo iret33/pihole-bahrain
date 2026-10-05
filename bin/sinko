@@ -1621,7 +1621,10 @@ class Updater:
         if version != current:
             drop_cached(version)              # a release that failed here is no rollback target
             self.out("%s Going back to %s ..." % (why, current))
-            back_ok, back_why = self._rollback_to(current, ref)
+            # The installer saves the ref it is given as SINKO_REF. The version that is put back gets the ref the box had
+            # BEFORE this run (settings, read at the start), not the one that was asked for and failed: otherwise the
+            # box would stay pinned to a release that does not work here (and never see the fixed one after it).
+            back_ok, back_why = self._rollback_to(current, settings["ref"])
         else:
             back_ok, back_why = False, "it is the version that was just installed"
         # The reason is for whoever helps (and for the log): English, short, and never a command to type. The page
@@ -4847,7 +4850,7 @@ def note_rollback(undone: str, restored: str) -> None:
 
 
 def cmd_update(args) -> int:
-    conf = read_config()
+    conf = read_config(CONFIG_FILE)               # (the name is looked up now: the file that keep_pin and settle_pin write)
     updater = Updater(conf)
     try:
         ref = args.ref or release_settings(conf)["ref"]
@@ -4876,6 +4879,7 @@ def cmd_update(args) -> int:
         else:
             print("Sinko %s is the newest version." % VERSION)
         return 0
+    saved_pin = conf.get("SINKO_REF")             # as the settings file has it now: what a failed run must leave
     asked = not (args.yes or args.from_panel)
     if asked and not sys.stdin.isatty():
         print("sinko: run 'sudo sinko update --yes' to update without being asked.", file=sys.stderr)
@@ -4900,8 +4904,36 @@ def cmd_update(args) -> int:
             settle_pin(args.ref)
         return 0
     print("sinko: the update failed. %s" % result["error"], file=sys.stderr)
+    if args.ref:
+        keep_pin(saved_pin, args.ref)
     print("To see what is wrong with this box: sudo sinko doctor", file=sys.stderr)    # for the person at the keyboard
     return 1
+
+
+def describe_ref(ref: str) -> str:
+    kind = classify_ref(ref)[0]
+    return ("the newest release" if kind == "latest" else "release %s" % ref if kind == "tag"
+            else "the development branch '%s'" % ref)
+
+
+def keep_pin(was, wanted: str, config_path=None) -> None:
+    """A failed `sinko update --ref X` leaves SINKO_REF as it was. Only a successful update saves the choice (settle_pin),
+    but the installer of the release that failed has already written X into the settings by the time it stops, and when the
+    old version could not be put back (or there was no copy of it) nothing writes it again. `was` is what the settings said
+    before the run (None: no such line, which means "latest")."""
+    path = config_path or CONFIG_FILE
+    before = was or "latest"
+    if (read_config(path).get("SINKO_REF") or "latest") != before:
+        try:
+            write_config_value("SINKO_REF", before, path)
+        except (OSError, ValueError) as err:
+            print("sinko: could not put the setting back to %s in %s (%s)" % (before, path, short_text(err, 80)), file=sys.stderr)
+            return
+    try:
+        follows = describe_ref(before)
+    except UpdateError:
+        return
+    print("The update failed, so the choice of %s was not kept: this box still follows %s." % (wanted, follows), file=sys.stderr)
 
 
 def settle_pin(ref: str, config_path=None) -> None:

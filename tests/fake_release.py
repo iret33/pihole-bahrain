@@ -15,6 +15,11 @@ import threading
 INSTALL_SH = """#!/usr/bin/env bash
 set -e
 echo "install $(cat "$SINKO_SRC/VERSION") src=$SINKO_SRC noninteractive=$SINKO_NONINTERACTIVE ref=$SINKO_REF" >> "$FAKE_LOG"
+if [ -n "${{SINKO_CONFIG_FILE:-}}" ]; then
+  # What the real installer does before anything can go wrong later: it saves the ref it was given as SINKO_REF.
+  {{ grep -v '^SINKO_REF=' "$SINKO_CONFIG_FILE" 2>/dev/null || true; echo "SINKO_REF=$SINKO_REF"; }} > "$SINKO_CONFIG_FILE.new"
+  mv "$SINKO_CONFIG_FILE.new" "$SINKO_CONFIG_FILE"
+fi
 {install_fail}
 install -D -m 755 "$SINKO_SRC/bin/sinko" "$SINKO_APP_DIR/bin/sinko"
 install -D -m 644 "$SINKO_SRC/VERSION" "$SINKO_APP_DIR/VERSION"
