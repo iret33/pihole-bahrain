@@ -33,6 +33,8 @@ build_legacy() {
   # What the old "pihole-bahrain update" leaves: a checkout of the new code inside the old folder, run from there.
   mkdir -p "$old/src"
   tar -C "$REPO" --exclude=.git -cf - . | tar -x -C "$old/src"
+  # LEGACY_GIT=1: it is a git checkout, as the old `pihole-bahrain update` leaves it (git clone --depth 1 of master).
+  if [[ -n "${LEGACY_GIT:-}" ]]; then mkdir -p "$old/src/.git"; fi
 }
 
 # run_migration NAME [env args...]: the new installer, started from the old folder, with PB_* variables only.
@@ -71,7 +73,9 @@ lists_before="$(lists_state)"
 # What 2.x left for a box without a terminal: the generated parent password, to be read once (the only record of it).
 echo "Abcd-Efgh-Jklm" >"$ROOT/etc/pihole-bahrain/initial-password"; chmod 600 "$ROOT/etc/pihole-bahrain/initial-password"
 
+echo 500000 >"$WORK/df-free-kb"        # a card with 488 MB free: enough for the move (only a first installation needs 1 GB)
 run_migration migrate PB_REF=release-candidate || { cat "$WORK/migrate.out"; fail "the migration failed"; }
+rm -f "$WORK/df-free-kb"
 out="$(cat "$WORK/migrate.out")"
 grep -q "Found an earlier version (pihole-bahrain)" <<<"$out" || fail "the old installation was not recognised"
 grep -q "Sinko is ready" <<<"$out" || fail "the migration did not finish"
@@ -211,6 +215,33 @@ grep -q "development version" "$WORK/ref-oneliner.out" && fail "the one-liner in
 [[ -f "$ROOT/var/lib/sinko/cache/sinko-$(tr -d '[:space:]' <"$REPO/VERSION").tar.gz" ]] || fail "no rollback copy of the verified release"
 grep -q '^SINKO_REF=latest$' "$ROOT/etc/sinko/config" || fail "SINKO_REF=latest not saved"
 grep -q "^SINKO_RELEASE_BASE=$BASE\$" "$ROOT/etc/sinko/config" || fail "the update source that was given is not saved (every later update would go back to GitHub)"
+VERSION_NOW="$(tr -d '[:space:]' <"$REPO/VERSION")"
+echo "    the old updater's own run (a git checkout of master inside the old folder) installs the verified release, not the checkout"
+fresh_start; LEGACY_GIT=1 legacy_master
+printf '9.9.9\n' >"$ROOT/opt/pihole-bahrain/src/VERSION"        # what the checkout says it is: it must not be what ends up installed
+run_migration from-checkout PB_REF=master SINKO_RELEASE_BASE="$BASE" || { cat "$WORK/from-checkout.out"; fail "the move from the old updater's checkout failed"; }
+grep -q "Downloaded and verified sinko $VERSION_NOW" "$WORK/from-checkout.out" || { cat "$WORK/from-checkout.out"; fail "the release was not downloaded and verified for a box that follows the releases"; }
+grep -q "Installing version $VERSION_NOW from $ROOT/opt/sinko/src" "$WORK/from-checkout.out" || fail "the checkout was installed, not the verified release"
+grep -q "Installing version 9.9.9" "$WORK/from-checkout.out" && fail "the old updater's checkout was installed"
+[[ "$(cat "$ROOT/opt/sinko/VERSION")" == "$VERSION_NOW" && -d "$ROOT/opt/sinko/src" && -f "$ROOT/var/lib/sinko/cache/sinko-$VERSION_NOW.tar.gz" ]] \
+  || fail "no release copy (source folder, rollback tarball) was left behind"
+grep -q "Sinko is ready" "$WORK/from-checkout.out" || fail "the migration did not finish from the verified release"
+[[ ! -e "$ROOT/opt/pihole-bahrain" && -e "$WORK/units/sinko.service.enabled" ]] || fail "the old folder is still there, or the new scheduler is not on"
+grep -q '^SINKO_REF=latest$' "$ROOT/etc/sinko/config" || fail "SINKO_REF=latest was not saved"
+echo "    ... when the release cannot be had, the checkout is installed as before, with a note (a connection that is down must not stop the move)"
+fresh_start; LEGACY_GIT=1 legacy_master
+run_migration checkout-fallback PB_REF=master SINKO_RELEASE_BASE="http://127.0.0.1:1/releases" || { cat "$WORK/checkout-fallback.out"; fail "the move failed when the release could not be had"; }
+grep -q "The verified release could not be had now" "$WORK/checkout-fallback.out" || fail "no note that the checkout was installed instead of the release"
+grep -q "Could not reach" "$WORK/checkout-fallback.out" || fail "the note does not say why the release could not be had"
+grep -q "Installing version $VERSION_NOW from $ROOT/opt/pihole-bahrain/src" "$WORK/checkout-fallback.out" || fail "the checkout was not installed after the release failed"
+grep -q "Sinko is ready" "$WORK/checkout-fallback.out" || fail "the migration did not finish from the checkout"
+[[ ! -e "$ROOT/opt/pihole-bahrain" ]] || fail "the old folder is still there"
+[[ ! -e "$ROOT/opt/sinko/src.tmp" && -z "$(ls -d "$ROOT"/opt/sinko/.download.* 2>/dev/null)" ]] || fail "a failed download left its temporary files"
+echo "    ... a developer's SINKO_REF=master is a choice: the checkout is installed and no release is looked for"
+fresh_start; LEGACY_GIT=1 legacy_master
+run_migration checkout-dev SINKO_REF=master SINKO_RELEASE_BASE="http://127.0.0.1:1/releases" || { cat "$WORK/checkout-dev.out"; fail "the developer's move failed"; }
+grep -q "The verified release could not be had now\|Downloaded and verified" "$WORK/checkout-dev.out" && fail "a release was looked for although the ref is a branch"
+grep -q "Installing version $VERSION_NOW from $ROOT/opt/pihole-bahrain/src" "$WORK/checkout-dev.out" || fail "the developer's checkout was not installed"
 kill "$HTTP_PID" 2>/dev/null || true; HTTP_PID=""
 
 echo "--- a lists folder inside the old program folder is moved to the new one, because the old folder goes"

@@ -13,8 +13,9 @@
 # deleting a file only frees its blocks. Power the unit off right after sealing and do not start it again before you copy
 # the card: starting it uses up the seal.
 #
-# It first checks that the unit has what the customer's first minutes depend on (avahi-daemon so that sinko.local
-# works, an address from the router, the services enabled) and refuses to seal otherwise.
+# It first checks that the unit has what the customer's first minutes and years depend on (avahi-daemon so that sinko.local
+# works, an address from the router, the services enabled, Debian's automatic security updates, a time service, and no
+# account other than root that can log in on the console) and refuses to seal otherwise.
 #
 # Options:
 #   --yes               do not ask for SEAL (for scripts)
@@ -41,6 +42,7 @@ TTY_DEV="${SINKO_TTY:-/dev/tty}"                     # the terminal; SINKO_TTY i
 
 YES=0 DRY=0 KEEP_SSH=0 ZEROFILL=1 SKIP_CHECKS=0 NAME=sinko
 TLS_CERT=""
+ZEROFILE="$R/.sinko-zerofill"                        # the file the zero-fill writes: it fills the whole card while it exists
 
 die() { printf 'seal: %s\n' "$*" >&2; exit 1; }
 # A command that failed without its own message: say where, and that the box is not sealed.
@@ -84,18 +86,95 @@ problem() { PROBLEMS+=("$*"); }
 netplan_has_wired() { grep -qE '^[[:space:]]+(ethernets|bridges|bonds|vlans|tunnels|modems|vrfs|dummy-devices|nm-devices|virtual-ethernets):' "$1"; }
 netplan_has_wifi() { grep -qE '^[[:space:]]+(wifis|access-points):' "$1"; }
 
+# Is the package really installed? (`dpkg -s` also answers yes for one that was removed but not purged.) dpkg's status words are
+# English in every locale; the C locale is asked for anyway.
+# shellcheck disable=SC2016  # ${Status} is dpkg's own field name, not a variable of ours
+pkg_installed() { [[ "$(LC_ALL=C dpkg-query -W -f='${Status}' "$1" 2>/dev/null)" == "install ok installed" ]]; }
+
+# The last APT::Periodic::Unattended-Upgrade setting in apt's configuration, as apt reads it (the files of apt.conf.d in the
+# order of their names, those with no extension or .conf, and the last value wins): prints "<value> <file>", or nothing when
+# no file sets it. The files are read, not asked of apt-config: the fake root of the tests, and a seal that must not depend on
+# a program's idea of the box it runs on. Only the plain form is understood (APT::Periodic::Unattended-Upgrade "1";), which is
+# the one Debian's own package and this installer write.
+apt_periodic_setting() {
+  local f v last=""
+  while IFS= read -r -d '' f; do
+    [[ "${f##*/}" =~ ^[A-Za-z0-9_-]+(\.conf)?$ ]] || continue
+    v="$(sed -n 's/^[[:space:]]*APT::Periodic::Unattended-Upgrade[[:space:]]*"\([^"]*\)".*/\1/p' "$f" | tail -n1)"
+    if [[ -n "$v" ]]; then last="$v $f"; fi
+  done < <(find "$R/etc/apt/apt.conf.d" -maxdepth 1 -type f -print0 2>/dev/null | LC_ALL=C sort -z)
+  printf '%s' "$last"
+}
+
+# Accounts other than root that can log in on the console (a keyboard on the HDMI port, or the serial port): a password hash or
+# an EMPTY password field (Debian's PAM lets an empty password in: that is what `passwd -d` makes, and what Armbian's first-login
+# wizard leaves when no password was typed), not a locked ("!...") or missing ("*...") one, and a shell that is not nologin or
+# false. Read from shadow and passwd of the box (of the fake root in the tests, which `getent` would not see). Root is not meant:
+# its password is locked by the last step.
+loginable_accounts() {
+  local name hash shell
+  [[ -r "$R/etc/shadow" ]] || return 0
+  while IFS=: read -r name hash _; do
+    [[ -n "$name" && "$name" != root ]] || continue
+    [[ "$hash" == '!'* || "$hash" == '*'* ]] && continue
+    shell="$(awk -F: -v n="$name" '$1 == n {print $7; exit}' "$R/etc/passwd" 2>/dev/null || true)"
+    case "$shell" in */nologin|*/false) continue ;; esac
+    printf '%s\n' "$name"
+  done <"$R/etc/shadow"
+}
+
 preflight() {
-  local unit f iface line
+  local unit f iface line value
   for unit in sinko.service sinko-lists.timer pihole-FTL.service; do
     systemctl is-enabled --quiet "$unit" 2>/dev/null \
       || problem "$unit is not enabled: a box made from this unit would start without it (systemctl enable $unit)"
   done
   # The quick-start card's second step is http://<name>.local/: that needs avahi on every box.
   if ! grep -qs '^SINKO_MDNS=0' "$CONF_FILE"; then
-    dpkg -s avahi-daemon >/dev/null 2>&1 \
+    pkg_installed avahi-daemon \
       || problem "avahi-daemon is not installed, so http://$NAME.local/ would not open on any box (run the installer again with internet; it installs it)"
     systemctl is-enabled --quiet avahi-daemon.service 2>/dev/null \
       || problem "avahi-daemon is not enabled (systemctl enable avahi-daemon)"
+  fi
+  # docs/selling.md promises Debian's security updates on every box, and a box nobody can log in to can never be repaired
+  # afterwards. The installer only warns when it could not set them up (no internet), so a unit can reach this point without.
+  # A unit that was set up with SINKO_OS_UPDATES=0 chose not to have them.
+  if ! grep -qs '^SINKO_OS_UPDATES=0' "$CONF_FILE"; then
+    pkg_installed unattended-upgrades \
+      || problem "unattended-upgrades is not installed, so no box would get Debian's security updates (run the installer again with internet; it installs it)"
+    value="$(apt_periodic_setting)"
+    if [[ -z "$value" ]]; then
+      problem "automatic updates are not switched on: no file in /etc/apt/apt.conf.d sets APT::Periodic::Unattended-Upgrade to \"1\" (dpkg-reconfigure -plow unattended-upgrades does it; the installer leaves an unattended-upgrades that is already installed as it is)"
+    elif [[ ! "${value%% *}" =~ ^[1-9][0-9]*$ ]]; then
+      problem "automatic updates are switched off: APT::Periodic::Unattended-Upgrade is \"${value%% *}\" in ${value#* } (set it to \"1\" there, or run dpkg-reconfigure -plow unattended-upgrades; the installer leaves an unattended-upgrades that is already installed as it is)"
+    fi
+    for unit in apt-daily.timer apt-daily-upgrade.timer; do
+      systemctl is-enabled --quiet "$unit" 2>/dev/null \
+        || problem "$unit is not enabled, so Debian's security updates would never run (systemctl enable $unit)"
+    done
+  fi
+  # The board has no battery-backed clock: without a time service every box starts at the time it last saved, bedtime follows it,
+  # and https downloads (updates, lists) can fail on it. The same list as the installer's.
+  for unit in systemd-timesyncd.service chrony.service chronyd.service ntpsec.service ntp.service openntpd.service; do
+    systemctl is-enabled --quiet "$unit" 2>/dev/null && break
+    unit=""
+  done
+  [[ -n "$unit" ]] \
+    || problem "no time service (systemd-timesyncd, chrony, ntp) is switched on: the boxes have no battery-backed clock, so their time would be wrong after every power cut (run the installer again with internet; it installs systemd-timesyncd)"
+  # What every box follows. A unit pinned to a version, or installed from a branch (the developer path), sends out boxes that are
+  # never offered an update: the page offers nothing newer on a pinned box, and nothing at all on one that follows a branch.
+  value="$(sed -n 's/^SINKO_REF=//p' "$CONF_FILE" 2>/dev/null | tail -n1 || true)"
+  value="${value//[\'\"]/}"
+  if [[ -n "$value" && "$value" != latest ]]; then
+    problem "this unit follows '$value' (SINKO_REF in $CONF_FILE), so no box made from it would ever be offered an update: set SINKO_REF=latest there (or run: sudo sinko update --ref latest --force)"
+  fi
+  # The wizard of Armbian's first login makes a user (with sudo) from what the seller types; the seal locks root, not that
+  # account, and a box would let anybody with a keyboard in with the seller's password. Not with --keep-ssh-access (a test unit).
+  if (( ! KEEP_SSH )); then
+    while IFS= read -r f; do
+      [[ -n "$f" ]] || continue
+      problem "the account '$f' can log in on the console of every box (a keyboard on the HDMI port, or the serial port) with the password you gave it, and is probably in the sudo group: delete it with  userdel -r $f  (or lock it with  passwd -l $f), then seal again"
+    done < <(loginable_accounts)
   fi
   # Every box takes the address its router gives it. A unit with a fixed address would send every box to that address.
   iface="$(ip -4 route show default 2>/dev/null | awk '{for (i=1;i<NF;i++) if ($i=="dev") {print $(i+1); exit}}')"
@@ -247,6 +326,11 @@ leftover_secrets() {
 build_plan() {
   local list kids
 
+  # An earlier seal that was cut short (a power cut, a kill) can have left its zero file: it fills the whole card, so that the
+  # box could write nothing (not its database, not the first-start flag), and a card copied in that state would ship so. First.
+  if [[ -e "$ZEROFILE" || -L "$ZEROFILE" ]]; then
+    add_action "Delete $ZEROFILE, left by an earlier seal that did not finish (it fills the whole card)" act_remove_paths "$ZEROFILE"
+  fi
   add_action "Stop the Sinko scheduler and the list refresh (both stay enabled: they start again at the next boot)" act_stop_scheduler
   if grep -qs '^SINKO_TELEMETRY=' "$CONF_FILE"; then
     add_action "Forget the answer to the anonymous-counter question in $CONF_FILE (the customer is asked again)" act_forget_counter_answer
@@ -383,8 +467,38 @@ act_remove_password() {
   die "the parent password, a two-factor secret or an application password could not be removed. Nothing was armed; sealing now would leave your credentials on every box."
 }
 
+# The settings sshd would use, read back from sshd itself (left in SSHD_EFFECTIVE, one "name value" per line, names in lower
+# case); fails with the reason in SSHD_WHY (call it directly, not in a subshell, so that both stay set).
+# By the time this runs the host keys are gone (they have to be: the plan removes them earlier), and
+# `sshd -T` refuses to run without one ("sshd: no hostkeys available -- exiting.", exit status 1, nothing printed): the first
+# version of this read-back therefore reported nothing on every real box, and the seal went on with a warning. So `sshd -G` is
+# asked first: it prints the effective settings without loading host keys (OpenSSH 9.x and newer; Debian 13 has 10.0). An older
+# sshd has no -G (usage error), and `sshd -T -h KEY` is run with a throw-away key then.
+# What this does and does not prove: that the drop-in is in effect for a login that matches no "Match" block, which catches an
+# sshd_config without the Include line, a PasswordAuthentication line above it, or an earlier file in the folder. A "Match User"
+# or "Match Address" block that turns password logins on again would be shown only with connection details (-C), and none are
+# given: it is not looked at (and a box with such a block is not a stock Armbian).
+SSHD_WHY="" SSHD_EFFECTIVE=""
+sshd_effective_settings() {
+  local cfg=() out tmp
+  [[ -z "$R" ]] || cfg=(-f "$R/etc/ssh/sshd_config")
+  if out="$(sshd -G "${cfg[@]}" 2>&1)"; then SSHD_EFFECTIVE="$out"; return 0; fi
+  SSHD_WHY="sshd -G: $(head -n1 <<<"$out")"
+  tmp="$(mktemp -d)" || { SSHD_WHY="no temporary folder"; return 1; }
+  if ssh-keygen -q -t ed25519 -N '' -f "$tmp/key" >/dev/null 2>&1; then
+    if out="$(sshd -T -h "$tmp/key" "${cfg[@]}" 2>&1)"; then rm -rf "$tmp"; SSHD_EFFECTIVE="$out"; return 0; fi
+    SSHD_WHY="$SSHD_WHY; sshd -T: $(head -n1 <<<"$out")"
+  else
+    SSHD_WHY="$SSHD_WHY; no throw-away host key could be made"
+  fi
+  rm -rf "$tmp"
+  return 1
+}
+
 # Last of all. The drop-in is written and read back before the password is locked, so a drop-in that sshd does not use
-# (no Include line) stops the seal with the root password still working.
+# (no Include line, a PasswordAuthentication line above it) stops the seal with the root password still working. When it
+# stops, the drop-in is taken out again: the box has no keys left by now, and a drop-in that does work would lock the seller
+# out of a unit that is not sealed yet.
 act_lock_ssh() {
   local dir="$R/etc/ssh/sshd_config.d" file
   file="$dir/00-sinko-lockdown.conf"                 # 00-: for most options the first value found wins
@@ -398,14 +512,13 @@ act_lock_ssh() {
   chmod 644 "$file.tmp"
   mv "$file.tmp" "$file"
   if command -v sshd >/dev/null; then
-    # It has to be in effect (a sshd_config without the Include line would ignore the drop-in): read it back.
-    local effective sshd_t=(sshd -T)
-    [[ -z "$R" ]] || sshd_t+=(-f "$R/etc/ssh/sshd_config")
-    if effective="$("${sshd_t[@]}" 2>/dev/null)"; then
-      grep -qi '^passwordauthentication no$' <<<"$effective" \
-        || die "SSH password logins are still on: $file is not used by sshd_config (is there no Include of /etc/ssh/sshd_config.d?). The root password was NOT locked; fix this and run seal again."
-    else
-      echo "  warning: sshd could not report its settings; check 'sshd -T | grep -i passwordauthentication' yourself" >&2
+    if ! sshd_effective_settings; then
+      rm -f "$file"
+      die "sshd could not report its settings ($SSHD_WHY), so it is not known whether SSH password logins are off. The drop-in was taken out again. The root password was NOT locked; fix this and run seal again."
+    fi
+    if ! grep -qi '^passwordauthentication no$' <<<"$SSHD_EFFECTIVE"; then
+      rm -f "$file"
+      die "SSH password logins are still on: $file is not used by sshd_config (is there no Include of /etc/ssh/sshd_config.d, or a PasswordAuthentication line above it?). The drop-in was taken out again. The root password was NOT locked; fix this and run seal again."
     fi
   fi
   local pw=(passwd)
@@ -432,14 +545,31 @@ act_hostname() {
 }
 
 # The Allwinner watchdog (sunxi_wdt, the H616/H618 of the Orange Pi Zero 3 included) takes 1 to 16 seconds at most: a larger
-# value is refused by the driver, and systemd then runs without the safety net it was asked for. So both values are
-# 15 seconds: one while the system runs (systemd keeps feeding it), one while it reboots (systemd-shutdown does).
+# value is refused by the driver, and systemd then runs without the safety net it was asked for. So both values are 15 seconds.
+# What systemd does with them (read in its source, src/core/main.c and src/shutdown/shutdown.c, which are the same in systemd
+# 252 of Debian 12 and 257 of Debian 13):
+#   * RuntimeWatchdogSec: while the system runs, PID 1 feeds the watchdog at least every half interval, and a box that hangs
+#     for 15 seconds is reset by the hardware. That is what the setting is for. It also holds in the first phase of a shutdown
+#     or reboot, while PID 1 still runs.
+#   * poweroff and halt (the page's "Shut down"): PID 1 closes the watchdog AND DISARMS it (WDIOS_DISABLECARD and the magic
+#     close) before it hands over to systemd-shutdown, and tells that program that there is no watchdog (WATCHDOG_USEC=0): only
+#     reboot and kexec carry a watchdog time over. So the watchdog cannot turn a shut down into a restart, however the board's
+#     power-off ends. This relies on the driver letting it be stopped: sunxi_wdt does, unless the kernel was built with
+#     CONFIG_WATCHDOG_NOWAYOUT, which only the board can show (docs/hardware-test-checklist.md: "Shut down stays off").
+#   * reboot: RebootWatchdogSec is the safety net of the reboot itself. The watchdog stays armed with that time through
+#     systemd-shutdown, which feeds it only at the start of each unmount pass: not during its first sync (it waits as long as the
+#     amount of unwritten data keeps shrinking) and not while it ends stray processes. A stall of more than 15 seconds there
+#     resets the box in the middle of the shutdown; the file system is recovered from its journal at the next start. That is
+#     the price of a net that also catches a reboot that hangs, and 15 seconds is all this driver allows (RebootWatchdogSec=off
+#     would take away both the price and the net).
+# "ShutdownWatchdogSec" is an obsolete name of RebootWatchdogSec, not another setting: it does not apply to poweroff either.
 act_watchdog() {
   local dir="$R/etc/systemd/system.conf.d"
   mkdir -p "$dir"
   {
     echo "# Written by Sinko's tools/seal.sh: systemd keeps the hardware watchdog fed; a hung box restarts itself."
     echo "# 15 seconds: the Allwinner watchdog accepts 16 at most (a longer time is refused and the watchdog would be off)."
+    echo "# A shut down (poweroff) disarms the watchdog first; only a reboot keeps it armed (RebootWatchdogSec), see tools/seal.sh."
     echo "[Manager]"
     echo "RuntimeWatchdogSec=15"
     echo "RebootWatchdogSec=15"
@@ -506,17 +636,25 @@ act_clean_logs() {
 }
 
 act_zerofill() {
-  local file="$R/.sinko-zerofill"
-  trap 'rm -f "$file"' EXIT
+  local file="$ZEROFILE" out rc=0
+  trap 'rm -f "$file"' EXIT                          # (a power cut skips it: the next seal and the first start delete the file)
   # sync first: the file system does not hand out the blocks that were freed a moment ago (by the deletions above) until
   # the journal has committed that, so without it the zeros would be written around exactly the data they are meant to hide.
   sync
-  # dd ends with "No space left on device" on purpose: that is how the free space gets filled.
-  dd if=/dev/zero of="$file" bs=1M conv=fsync 2>/dev/null || true
+  # dd ends with "No space left on device" on purpose: that is how the free space gets filled. Any other end (an input/output
+  # error of a worn card, a file system that went read-only, a kill) leaves the free space unwritten and what was deleted
+  # readable in the image: that is a failure, and the seal must not go on to lock the box and say "Sealed". The message is
+  # read in the C locale.
+  out="$(LC_ALL=C dd if=/dev/zero of="$file" bs=1M conv=fsync 2>&1 >/dev/null)" || rc=$?
   sync
   rm -f "$file"
   sync
   trap - EXIT
+  if [[ "$out" != *"No space left on device"* ]]; then
+    local why="dd ended with status $rc and said nothing"
+    if [[ -n "$out" ]]; then why="dd said: $(head -n1 <<<"$out")"; fi
+    die "overwriting the free space did not work ($why): what was deleted can still be read from the card. The zero file was removed again. Fix the problem (a worn card, a read-only file system) and run the seal again."
+  fi
   echo "  done"
 }
 
@@ -539,6 +677,12 @@ verify_core() {
   PROBLEMS=()
   local f
   [[ -f "$STATE_DIR/firstboot" ]] || problem "the first-start flag is missing"
+  [[ ! -e "$ZEROFILE" && ! -L "$ZEROFILE" ]] || problem "the zero file $ZEROFILE is still there: it fills the whole card"
+  # (not with --keep-ssh-access, a test unit). Run here too, and not only before the plan, so that --skip-checks cannot get
+  # a console login with the seller's password into the image; the root password is not locked yet and the seller can fix it.
+  if (( ! KEEP_SSH )) && [[ -n "$(loginable_accounts)" ]]; then
+    problem "an account other than root can still log in on the console: $(loginable_accounts | head -n1)"
+  fi
   systemctl is-enabled --quiet sinko-firstboot.service 2>/dev/null || problem "the first-start service is not enabled"
   compgen -G "$R/etc/ssh/ssh_host_*" >/dev/null && problem "SSH host keys are still there"
   [[ ! -s "$R/etc/machine-id" ]] || problem "the machine id is not empty"

@@ -83,6 +83,21 @@ run_firstboot again || fail "a second run failed"
 grep -q "nothing to do" "$WORK/again.out" || fail "the second run did not say there was nothing to do"
 [[ "$(world_digest)" == "$after_first" ]] || fail "the second run changed something"
 
+echo "--- a zero file left by a seal that was cut short is removed first (it fills the whole card: nothing could be written)"
+make_box
+echo junk >"$ROOT/.sinko-zerofill"
+run_firstboot zero || { cat "$WORK/zero.out"; fail "the first start failed with a leftover zero file"; }
+[[ ! -e "$ROOT/.sinko-zerofill" ]] || fail "the leftover zero file is still there"
+grep -q "removed the leftover zero file of an interrupted seal" "$WORK/zero.out" || fail "the first start does not say that it removed the zero file"
+[[ ! -e "$ROOT/var/lib/sinko/firstboot" ]] || fail "the first start did not finish after removing the zero file"
+echo "    ... before anything else, so also when the network is not up yet and the start ends early"
+make_box
+touch "$WORK/net-down"
+echo junk >"$ROOT/.sinko-zerofill"
+run_firstboot zero2 || { cat "$WORK/zero2.out"; fail "the first start failed without a network and with a leftover zero file"; }
+[[ ! -e "$ROOT/.sinko-zerofill" ]] || fail "the zero file was left because the network was not up"
+rm -f "$WORK/net-down"
+
 echo "--- no network yet: everything local is done, the flag stays, the exit is clean, nothing is done twice"
 make_box
 touch "$WORK/net-down"

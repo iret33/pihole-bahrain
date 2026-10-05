@@ -70,11 +70,32 @@ case "$*" in
   *"addr show dev eth0"*) echo "2: eth0    inet $addr/24 brd 192.168.1.255 scope global ${dyn}eth0" ;;
 esac
 EOF
-  # dpkg -s PKG answers from a list the apt-get stub extends.
+  # dpkg -s PKG answers from a list the apt-get stub extends. Like the real dpkg it answers 0 for a package that was removed
+  # but not purged (state "deinstall ok config-files", listed in $WORK/dpkg-configfiles): that is what makes `dpkg -s` a wrong
+  # test for "is it installed", and the installer must not use it.
   cat >"$STUBS/dpkg" <<'EOF'
 #!/usr/bin/env bash
 [[ "$1" == -s ]] || exit 0
-grep -qxF "$2" "$WORK/dpkg-installed" 2>/dev/null
+grep -qxF "$2" "$WORK/dpkg-installed" 2>/dev/null || grep -qxF "$2" "$WORK/dpkg-configfiles" 2>/dev/null
+EOF
+  # dpkg-query -W -f='${Status}' PKG prints the package's state (the field is English in every locale), and exits 1 with a
+  # message for a package dpkg has never heard of, like the real one.
+  cat >"$STUBS/dpkg-query" <<'EOF'
+#!/usr/bin/env bash
+format=""; pkg=""
+for a in "$@"; do
+  case "$a" in
+    -W|--show) ;;
+    -f=*) format="${a#-f=}" ;;
+    --showformat=*) format="${a#--showformat=}" ;;
+    -*) ;;
+    *) pkg="$a" ;;
+  esac
+done
+if grep -qxF "$pkg" "$WORK/dpkg-installed" 2>/dev/null; then status="install ok installed"
+elif grep -qxF "$pkg" "$WORK/dpkg-configfiles" 2>/dev/null; then status="deinstall ok config-files"
+else echo "dpkg-query: no packages found matching $pkg" >&2; exit 1; fi
+printf '%s' "${format//\$\{Status\}/$status}"
 EOF
   cat >"$STUBS/apt-get" <<'EOF'
 #!/usr/bin/env bash
@@ -85,21 +106,26 @@ if [[ -e "$WORK/apt-fail" ]]; then echo "E: apt is not available (stub)" >&2; ex
 if [[ " $* " == *" update "* && -e "$WORK/apt-update-fail" ]]; then echo "E: Failed to fetch (stub)" >&2; exit 100; fi
 if [[ " $* " == *" install "* ]]; then
   for a in "$@"; do
-    case "$a" in -*|install) ;; *) echo "$a" >>"$WORK/dpkg-installed" ;; esac
+    case "$a" in -*|install) ;; *) echo "$a" >>"$WORK/dpkg-installed"; sed -i "/^$a\$/d" "$WORK/dpkg-configfiles" 2>/dev/null || true ;; esac
   done
 fi
 exit 0
 EOF
-  # apt-cache policy PKG: every package has a candidate, unless $WORK/apt-nocandidate says the sources have none.
+  # apt-cache policy PKG: every package has a candidate, unless $WORK/apt-nocandidate says the sources have none. Like the
+  # real apt-cache it prints its labels in the language of the user, so anything that parses them must ask for the C locale
+  # (LC_ALL=C): without it this stub speaks German ("Installationskandidat", "(keine)"), as apt does on a box whose owner
+  # chose such a locale (the Arabic, French and Spanish labels are different words just the same).
   cat >"$STUBS/apt-cache" <<'EOF'
 #!/usr/bin/env bash
 echo "apt-cache $*" >>"$WORK/calls.log"
 [[ "$1" == policy ]] || exit 0
 shift
+cand="Candidate"; none="(none)"
+if [[ "${LC_ALL:-}" != C && "${LC_ALL:-}" != POSIX ]]; then cand="Installationskandidat"; none="(keine)"; fi
 for p in "$@"; do
   echo "$p:"
-  echo "  Installed: (none)"
-  if [[ -e "$WORK/apt-nocandidate" ]]; then echo "  Candidate: (none)"; else echo "  Candidate: 1.0-1"; fi
+  echo "  Installiert: $none"
+  if [[ -e "$WORK/apt-nocandidate" ]]; then echo "  $cand: $none"; else echo "  $cand: 1.0-1"; fi
 done
 EOF
   # python3: the installer asks which version it runs on; $WORK/py-old makes the answer 3.8. Everything else is the real one.
@@ -115,11 +141,12 @@ echo "systemctl $*" >>"$WORK/calls.log"
 # Every program the installer starts must find the parent password out of its environment (see test_install.sh).
 [[ -z "${SINKO_PASSWORD+x}${PB_PASSWORD+x}" ]] || echo "systemctl $*" >>"$WORK/password-in-env"
 mkdir -p "$WORK/units"
-cmd=""; units=(); now=0; props=(); skip=0
+cmd=""; units=(); now=0; props=(); skip=0; quiet=0
 for a in "$@"; do
   if (( skip )); then props+=("$a"); skip=0; continue; fi
   case "$a" in
     --now) now=1 ;;
+    -q|--quiet) quiet=1 ;;
     -p) skip=1 ;;
     -*) ;;
     *) if [[ -z "$cmd" ]]; then cmd="$a"; else units+=("$a"); fi ;;
@@ -127,8 +154,8 @@ for a in "$@"; do
 done
 norm() { case "$1" in *.*) echo "$1" ;; *) echo "$1.service" ;; esac; }
 case "$cmd" in
-  is-active)  u="$(norm "${units[0]}")"; if [[ -e "$WORK/units/$u.active" ]]; then echo active; exit 0; else echo inactive; exit 3; fi ;;
-  is-enabled) u="$(norm "${units[0]}")"; if [[ -e "$WORK/units/$u.enabled" ]]; then echo enabled; exit 0; else echo disabled; exit 1; fi ;;
+  is-active)  u="$(norm "${units[0]}")"; if [[ -e "$WORK/units/$u.active" ]]; then (( quiet )) || echo active; exit 0; else (( quiet )) || echo inactive; exit 3; fi ;;
+  is-enabled) u="$(norm "${units[0]}")"; if [[ -e "$WORK/units/$u.enabled" ]]; then (( quiet )) || echo enabled; exit 0; else (( quiet )) || echo disabled; exit 1; fi ;;
   # show -p ActiveState -p ActiveEnterTimestampMonotonic -p MainPID -p NRestarts UNIT: what the program's scheduler check
   # reads. A scheduler that was started is healthy: up for a long time, no restarts, and it has finished passes (the stub
   # writes the heartbeat the real scheduler would have written, with the version of the installed release).
@@ -294,36 +321,111 @@ EOF
 #!/usr/bin/env bash
 echo "passwd $*" >>"$WORK/calls.log"
 EOF
-  # ssh-keygen -A -f PREFIX creates the host keys that are missing, like the real one.
+  # ssh-keygen -A -f PREFIX creates the host keys that are missing, like the real one; ssh-keygen -q -t TYPE -N '' -f FILE
+  # makes one key (the seal's read-back of sshd's settings uses a throw-away key).
   cat >"$STUBS/ssh-keygen" <<'EOF'
 #!/usr/bin/env bash
 echo "ssh-keygen $*" >>"$WORK/calls.log"
 [[ -e "$WORK/keygen-fail" ]] && exit 1
-[[ "$1" == -A ]] || exit 0
+if [[ "$1" != -A ]]; then
+  out=""
+  while (( $# )); do case "$1" in -f) out="$2"; shift ;; esac; shift; done
+  if [[ -n "$out" ]]; then ( umask 077; echo "throw-away private key $RANDOM$RANDOM" >"$out" ); echo "throw-away public key" >"$out.pub"; fi
+  exit 0
+fi
 prefix=""; [[ "$2" == -f ]] && prefix="$3"
 mkdir -p "$prefix/etc/ssh"
 for t in rsa ecdsa ed25519; do
   [[ -e "$prefix/etc/ssh/ssh_host_${t}_key" ]] || { echo "new private key $RANDOM$RANDOM" >"$prefix/etc/ssh/ssh_host_${t}_key"; echo "new public key" >"$prefix/etc/ssh/ssh_host_${t}_key.pub"; }
 done
 EOF
-  # sshd -T prints the effective settings: here, whatever the lock-down drop-in says.
+  # sshd, as OpenSSH behaves where it matters to the seal: -G prints the effective settings without needing host keys (it
+  # does not exist before OpenSSH 9.x: $WORK/sshd-no-G makes it fail like an old one); -T needs a host key ("no hostkeys
+  # available -- exiting", exit 1, nothing printed) unless -h names one. The settings come from the configuration file
+  # (-f, else the fake root's): the first value of an option wins, and an "Include" line is replaced by the files of that
+  # folder, in name order, at the place where it stands. $WORK/sshd-open: password logins are on whatever the files say.
   cat >"$STUBS/sshd" <<'EOF'
+#!/usr/bin/env python3
+import glob, os, sys
+work, root = os.environ["WORK"], os.environ["ROOT"]
+with open(work + "/calls.log", "a") as log:
+    log.write("sshd %s\n" % " ".join(sys.argv[1:]))
+args, mode, cfg, hostkey = sys.argv[1:], None, root + "/etc/ssh/sshd_config", None
+i = 0
+while i < len(args):
+    a = args[i]
+    if a in ("-G", "-T", "-t"):
+        mode = a
+    elif a == "-f":
+        cfg = args[i + 1]; i += 1
+    elif a == "-h":
+        hostkey = args[i + 1]; i += 1
+    i += 1
+if mode == "-t":
+    sys.exit(0)
+if mode == "-G" and os.path.exists(work + "/sshd-no-G"):
+    sys.stderr.write("sshd: unknown option -- G\nusage: sshd [-46DdeiqTtV] [-C connection_spec] [-c host_cert_file]\n")
+    sys.exit(255)
+if mode == "-T" and hostkey is None and not glob.glob(root + "/etc/ssh/ssh_host_*_key"):
+    sys.stderr.write("sshd: no hostkeys available -- exiting.\n")
+    sys.exit(1)
+if mode == "-T" and hostkey is not None and (not os.path.exists(hostkey) or os.path.exists(work + "/sshd-no-T-h")):
+    sys.stderr.write("sshd: Could not load host key: %s\n" % hostkey)      # ($WORK/sshd-no-T-h: this sshd cannot be made to report either)
+    sys.exit(1)
+settings = {}
+def read(path):
+    try:
+        lines = open(path).read().splitlines()
+    except OSError:
+        return
+    for line in lines:
+        words = line.split()
+        if len(words) < 2 or words[0].startswith("#"):
+            continue
+        key = words[0].lower()
+        if key == "include":
+            for pattern in words[1:]:
+                if not pattern.startswith("/"):
+                    pattern = os.path.join(os.path.dirname(cfg), pattern)
+                if pattern.startswith("/etc/"):
+                    pattern = root + pattern
+                for f in sorted(glob.glob(pattern)):
+                    read(f)
+        else:
+            settings.setdefault(key, " ".join(words[1:]).lower())
+read(cfg)
+if os.path.exists(work + "/sshd-open"):
+    settings["passwordauthentication"] = "yes"
+settings.setdefault("passwordauthentication", "yes")
+if mode in ("-G", "-T"):
+    for key in sorted(settings):
+        print("%s %s" % (key, settings[key]))
+EOF
+  # df: the real one, except that $WORK/df-free-kb (a number) is what it reports as available (the 4th column), so a test can
+  # have a card with 500 MB or 150 MB free.
+  cat >"$STUBS/df" <<EOF
 #!/usr/bin/env bash
-echo "sshd $*" >>"$WORK/calls.log"
-case "$1" in
-  -t) exit 0 ;;
-  -T) if [[ ! -e "$WORK/sshd-open" ]] && grep -qsi '^PasswordAuthentication no' "$ROOT"/etc/ssh/sshd_config.d/*.conf; then echo "passwordauthentication no"; else echo "passwordauthentication yes"; fi ;;
-esac
+if [[ -e "\$WORK/df-free-kb" ]]; then
+  "$(command -v df)" "\$@" | awk -v n="\$(cat "\$WORK/df-free-kb")" 'NR==2 {\$4=n} {print}'
+else
+  exec "$(command -v df)" "\$@"
+fi
 EOF
   cat >"$STUBS/journalctl" <<'EOF'
 #!/usr/bin/env bash
 echo "journalctl $*" >>"$WORK/calls.log"
 EOF
-  # dd if=/dev/zero of=FILE: writes a little and "runs out of space", as dd does on a full disk.
+  # dd if=/dev/zero of=FILE: writes a little and "runs out of space", as dd does on a full disk (the way the free space gets
+  # filled). Switches: $WORK/dd-io-error (a worn card: "Input/output error"), $WORK/dd-readonly ("Read-only file system"),
+  # $WORK/dd-killed (ended by a signal: no message, status 137), $WORK/dd-no-end (writes everything: no message, status 0).
   cat >"$STUBS/dd" <<'EOF'
 #!/usr/bin/env bash
 echo "dd $*" >>"$WORK/calls.log"
 for a in "$@"; do case "$a" in of=*) head -c 4096 /dev/zero >"${a#of=}"; ;; esac; done
+if [[ -e "$WORK/dd-io-error" ]]; then echo "dd: error writing '/.sinko-zerofill': Input/output error" >&2; exit 1; fi
+if [[ -e "$WORK/dd-readonly" ]]; then echo "dd: failed to open '/.sinko-zerofill': Read-only file system" >&2; exit 1; fi
+if [[ -e "$WORK/dd-killed" ]]; then exit 137; fi
+if [[ -e "$WORK/dd-no-end" ]]; then exit 0; fi
 echo "dd: error writing: No space left on device" >&2
 exit 1
 EOF
@@ -433,7 +535,8 @@ fresh_start() {
     "$WORK/pihole-g-block" "$WORK/pihole-g-fail" "$WORK/pihole-g-started" "$WORK/pihole-g-pid" "$WORK/apt-update-fail" "$WORK/apt-nocandidate" \
     "$WORK/py-old" "$WORK/password-in-env" "$WORK/curl.log" "$WORK/ftl-makes-cert" "$WORK/ftl-cert-fail" \
     "$WORK/ip-static" "$WORK/ftl-stop-fails" "$WORK/credential-stuck" "$WORK/sched-crashloop" "$WORK/sched-starting" "$WORK/sched-age" \
-    "$WORK/run" "$WORK/setpassword-needs-stdin"
+    "$WORK/run" "$WORK/setpassword-needs-stdin" "$WORK/df-free-kb" "$WORK/dpkg-configfiles" "$WORK/sshd-no-G" "$WORK/sshd-no-T-h" \
+    "$WORK/dd-io-error" "$WORK/dd-readonly" "$WORK/dd-killed" "$WORK/dd-no-end"
   mkdir -p "$ROOT/etc/pihole" "$ROOT/etc/ssh" "$ROOT/var/www/html" "$ROOT/var/log" "$WORK/units"
   touch "$ROOT/etc/pihole/pihole.toml" "$WORK/units/pihole-FTL.service.active" "$WORK/units/pihole-FTL.service.enabled"
   : >"$WORK/calls.log"

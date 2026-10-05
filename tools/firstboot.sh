@@ -40,6 +40,12 @@ if [[ ! -f "$FLAG" ]]; then
   log "nothing to do: this box has already been set up"
   exit 0
 fi
+# The seal's zero file. A seal that was cut short (a power cut during the zero-fill) leaves it, and it fills the whole card: this
+# box could then write nothing (not its keys, not the flag, not Pi-hole's database). It goes first, before anything is written.
+if [[ -e "$R/.sinko-zerofill" || -L "$R/.sinko-zerofill" ]]; then
+  rm -f "$R/.sinko-zerofill" || fail "cannot remove the leftover zero file $R/.sinko-zerofill (it fills the card)"
+  log "removed the leftover zero file of an interrupted seal (it filled the card)"
+fi
 [[ -x "$BIN" ]] || fail "Sinko is not installed ($BIN is missing)"
 
 # ------------------------------------------------------------------ what the flag says

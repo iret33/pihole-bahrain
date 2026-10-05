@@ -37,6 +37,10 @@ make_golden() {
   SINKO_TELEMETRY=1 bash "$REPO/install.sh" >"$WORK/golden-install.out" 2>&1 || { cat "$WORK/golden-install.out"; fail "the golden unit could not be installed"; }
   seed_pihole_objects "$NEW_LISTS"
   printf 'Include /etc/ssh/sshd_config.d/*.conf\nPermitRootLogin yes\nPasswordAuthentication yes\n' >"$ROOT/etc/ssh/sshd_config"
+  # The accounts of a Debian box: root with the seller's password, and system accounts that cannot log in (no password: "*" or "!").
+  printf 'root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\nsystemd-network:x:998:998:systemd Network Management:/:/usr/sbin/nologin\n' >"$ROOT/etc/passwd"
+  printf 'root:$6$seller$rootrootrootroot:19000:0:99999:7:::\ndaemon:*:19000:0:99999:7:::\nsystemd-network:!*:19000::::::\n' >"$ROOT/etc/shadow"
+  chmod 640 "$ROOT/etc/shadow"
   local t
   for t in rsa ecdsa ed25519; do
     echo "golden private key $t" >"$ROOT/etc/ssh/ssh_host_${t}_key"; echo "golden public key $t" >"$ROOT/etc/ssh/ssh_host_${t}_key.pub"
@@ -211,6 +215,15 @@ for key in RuntimeWatchdogSec RebootWatchdogSec; do
   secs="$(sed -n "s/^$key=\([0-9]*\)$/\1/p" "$ROOT/etc/systemd/system.conf.d/90-sinko-watchdog.conf")"
     if [[ ! "$secs" =~ ^[0-9]+$ ]] || (( secs < 1 || secs > 16 )); then fail "$key is '$secs': the Allwinner watchdog accepts 1 to 16 seconds (a minute-based value is refused)"; fi
 done
+# What the comments say must be what systemd does (read in its source: src/core/main.c hands only reboot and kexec a watchdog
+# time, poweroff and halt get 0 and PID 1 disarms the watchdog first): the old text said that systemd-shutdown feeds it and the
+# review took it to stay armed for a shut down too. The text is part of the product, so it is pinned.
+grep -q 'A shut down (poweroff) disarms the watchdog first' "$ROOT/etc/systemd/system.conf.d/90-sinko-watchdog.conf" || fail "the drop-in does not say that a shut down disarms the watchdog"
+for said in "poweroff and halt" "AND DISARMS it" "WATCHDOG_USEC=0" "reboot and kexec carry a watchdog time over" "RebootWatchdogSec is the safety net of the reboot itself" \
+            "CONFIG_WATCHDOG_NOWAYOUT" "obsolete name of RebootWatchdogSec"; do
+  grep -qF -- "$said" "$REPO/tools/seal.sh" || fail "the watchdog comment in tools/seal.sh no longer says: $said"
+done
+grep -q 'systemd-shutdown does' "$REPO/tools/seal.sh" && fail "tools/seal.sh again says that systemd-shutdown feeds the watchdog for every verb (it does not disarm or feed it for a poweroff)"
 [[ "$(cat "$ROOT/var/lib/sinko/firstboot")" == "hostname=sinko" && "$(stat -c %a "$ROOT/var/lib/sinko/firstboot")" == 600 ]] || fail "the first-start flag is wrong"
 [[ -e "$WORK/units/sinko-firstboot.service.enabled" ]] || fail "the first-start service is not enabled"
 echo "    what is unique or private is gone; what is needed stays"
@@ -254,6 +267,9 @@ sync_before="$(head -n "$((dd_line - 1))" "$WORK/calls.log" | grep -c '^sync$' |
 (( sync_before >= 1 )) || fail "no sync before the zeros: blocks freed a moment ago cannot be overwritten, so the deleted data would stay"
 tail -n +"$((dd_line + 1))" "$WORK/calls.log" | grep -q '^sync$' || fail "no sync after the zeros"
 [[ ! -e "$ROOT/.sinko-zerofill" ]] || fail "the zero file was left behind"
+echo "    SSH's settings were read back with sshd -G (the host keys are gone by then, and sshd -T would print nothing without one)"
+grep -q "^sshd -G -f $ROOT/etc/ssh/sshd_config" "$WORK/calls.log" || { grep '^sshd' "$WORK/calls.log" || true; fail "the read-back did not use sshd -G"; }
+grep -q '^sshd -T' "$WORK/calls.log" && fail "sshd -T was run on a box whose host keys are gone: it prints nothing there"
 echo "    the root password is locked last: nothing that changes the system comes after it"
 last_change="$(grep -E '^((passwd|systemctl|journalctl|dd|apt-get|ssh-keygen|hostnamectl) .*|sync)$' "$WORK/calls.log" | tail -n1)"
 [[ "$last_change" == "passwd -R $ROOT -l root" ]] || fail "the last change is '$last_change', not the lock of the root password"
@@ -314,6 +330,28 @@ if bash "$SEAL" --yes >"$WORK/open.out" 2>&1; then fail "sealed although SSH pas
 grep -q "SSH password logins are still on" "$WORK/open.out" || { cat "$WORK/open.out"; fail "no message about SSH"; }
 grep -q "The root password was NOT locked" "$WORK/open.out" || fail "the message does not say that the root password was not locked"
 grep -q "^passwd" "$WORK/calls.log" && fail "the root password was locked although SSH password logins stay on"
+[[ ! -e "$ROOT/etc/ssh/sshd_config.d/00-sinko-lockdown.conf" ]] || fail "the drop-in was left in place after the seal stopped (the box has no keys by now: it would lock the seller out of an unsealed unit)"
+echo "--- the read-back is real: it works without host keys (they are gone by then), falls back for an sshd without -G, and stops the seal when sshd cannot report"
+make_golden
+touch "$WORK/sshd-no-G"
+bash "$SEAL" --yes >"$WORK/oldssh.out" 2>&1 || { cat "$WORK/oldssh.out"; fail "an sshd without -G (before OpenSSH 9.x) stopped the seal"; }
+grep -q '^sshd -T -h ' "$WORK/calls.log" || fail "the old sshd was not asked with a throw-away host key"
+grep -q '^ssh-keygen -q -t ed25519 -N' "$WORK/calls.log" || fail "no throw-away host key was made for the old sshd"
+grep -q "^passwd -R $ROOT -l root" "$WORK/calls.log" || fail "root was not locked after a good read-back (old sshd)"
+make_golden
+touch "$WORK/sshd-no-G" "$WORK/sshd-no-T-h"
+if bash "$SEAL" --yes >"$WORK/nossh.out" 2>&1; then fail "sealed although sshd could not say what it would do"; fi
+grep -q "sshd could not report its settings" "$WORK/nossh.out" || { cat "$WORK/nossh.out"; fail "no message that the read-back failed"; }
+grep -q "The root password was NOT locked" "$WORK/nossh.out" || fail "the message does not say that the root password was not locked"
+grep -q "^passwd" "$WORK/calls.log" && fail "the root password was locked although the read-back failed"
+[[ ! -e "$ROOT/etc/ssh/sshd_config.d/00-sinko-lockdown.conf" ]] || fail "the drop-in was left in place after a failed read-back"
+echo "    a PasswordAuthentication line above the Include makes the drop-in useless: the preflight sees the Include, the read-back sees the setting"
+make_golden
+printf 'PasswordAuthentication yes\nInclude /etc/ssh/sshd_config.d/*.conf\n' >"$ROOT/etc/ssh/sshd_config"
+if bash "$SEAL" --yes >"$WORK/above.out" 2>&1; then fail "sealed although a line above the Include keeps password logins on"; fi
+grep -q "SSH password logins are still on" "$WORK/above.out" || { cat "$WORK/above.out"; fail "no message about the line above the Include"; }
+grep -q "^passwd" "$WORK/calls.log" && fail "the root password was locked although password logins stay on"
+[[ ! -e "$ROOT/etc/ssh/sshd_config.d/00-sinko-lockdown.conf" ]] || fail "the useless drop-in was left in place"
 echo "--- a failure after the first-start service is armed but before the lock-down leaves the seller able to log in and run seal again"
 make_golden
 touch "$WORK/ftl-stop-fails"
@@ -375,7 +413,118 @@ printf 'network:\n  version: 2\n  ethernets:\n    eth0:\n      dhcp4: true\n  wi
 world_before="$(world_digest)"
 check_refused "50-mixed.yaml has Wi-Fi and wired settings in one file" "a netplan file with Wi-Fi and wired settings"
 rm "$ROOT/etc/netplan/50-mixed.yaml"
+world_before="$(world_digest)"
+echo "    Debian's security updates are part of what a box must have (docs/selling.md promises them, and nobody can log in later to fix it)"
+ua_file="$ROOT/etc/apt/apt.conf.d/52sinko-unattended-upgrades"
+[[ -f "$ua_file" ]] || fail "test setup: the installer wrote no security-update settings into the golden unit"
+sed -i '/^unattended-upgrades$/d' "$WORK/dpkg-installed"
+check_refused "unattended-upgrades is not installed" "no unattended-upgrades"
+printf 'unattended-upgrades\n' >"$WORK/dpkg-configfiles"
+check_refused "unattended-upgrades is not installed" "unattended-upgrades removed but not purged (apt remove)"
+: >"$WORK/dpkg-configfiles"; printf 'unattended-upgrades\n' >>"$WORK/dpkg-installed"
+for timer in apt-daily.timer apt-daily-upgrade.timer; do
+  mv "$WORK/units/$timer.enabled" "$WORK/unit.bak"
+  check_refused "$timer is not enabled" "$timer not enabled"
+  mv "$WORK/unit.bak" "$WORK/units/$timer.enabled"
+done
+cp "$ua_file" "$WORK/ua.keep"
+printf 'APT::Periodic::Unattended-Upgrade "0";\n' >"$ROOT/etc/apt/apt.conf.d/99zz-off"
+world_before="$(world_digest)"
+check_refused 'automatic updates are switched off: APT::Periodic::Unattended-Upgrade is "0" in .*99zz-off' "a later file switches the updates off"
+grep 'switched off' "$WORK/pre.out" | grep -q "run the installer again" && fail "the remedy for switched-off updates points at the installer, which leaves an installed unattended-upgrades alone (it would loop): it must name the file"
+rm "$ROOT/etc/apt/apt.conf.d/99zz-off"
+echo "    ... a pre-installed unattended-upgrades (the installer leaves it as it is) passes when the box's own file switches it on, and is refused when nothing does"
+rm "$ua_file"
+world_before="$(world_digest)"
+check_refused "automatic updates are not switched on" "no file switches the updates on"
+grep -q "dpkg-reconfigure -plow unattended-upgrades" "$WORK/pre.out" || fail "the message does not say how to switch them on"
+printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n' >"$ROOT/etc/apt/apt.conf.d/20auto-upgrades"
+bash "$SEAL" --dry-run >/dev/null 2>&1 || fail "a unit with the distribution's own automatic-updates setting was refused"
+rm "$ROOT/etc/apt/apt.conf.d/20auto-upgrades"
+echo "    ... and a unit that was set up without them (SINKO_OS_UPDATES=0) is not asked for them"
+cp "$ROOT/etc/sinko/config" "$WORK/config.keep"; echo "SINKO_OS_UPDATES=0" >>"$ROOT/etc/sinko/config"
+sed -i '/^unattended-upgrades$/d' "$WORK/dpkg-installed"; mv "$WORK/units/apt-daily.timer.enabled" "$WORK/unit.bak"
+bash "$SEAL" --dry-run >/dev/null 2>&1 || fail "a unit with SINKO_OS_UPDATES=0 was refused for lacking automatic updates"
+mv "$WORK/unit.bak" "$WORK/units/apt-daily.timer.enabled"; printf 'unattended-upgrades\n' >>"$WORK/dpkg-installed"; cp "$WORK/config.keep" "$ROOT/etc/sinko/config"
+cp "$WORK/ua.keep" "$ua_file"
+world_before="$(world_digest)"
+echo "    the box has no battery-backed clock: a time service must be switched on (any of them)"
+mv "$WORK/units/systemd-timesyncd.service.enabled" "$WORK/unit.bak"
+check_refused "no time service" "no time service"
+touch "$WORK/units/chrony.service.enabled"
+bash "$SEAL" --dry-run >/dev/null 2>&1 || fail "a unit whose clock is kept by chrony was refused"
+rm "$WORK/units/chrony.service.enabled"; mv "$WORK/unit.bak" "$WORK/units/systemd-timesyncd.service.enabled"
+echo "    every box must follow the releases: a unit pinned to a version or installed from a branch would ship boxes that are never offered an update"
+cp "$ROOT/etc/sinko/config" "$WORK/config.keep"
+for pin in v3.0.0 master; do
+  sed -i '/^SINKO_REF=/d' "$ROOT/etc/sinko/config"; echo "SINKO_REF=$pin" >>"$ROOT/etc/sinko/config"
+  world_before="$(world_digest)"
+  check_refused "follows '$pin'" "SINKO_REF=$pin"
+done
+grep -q "SINKO_REF=latest" "$WORK/pre.out" || fail "the message does not say what to set it to"
+sed -i '/^SINKO_REF=/d' "$ROOT/etc/sinko/config"
+bash "$SEAL" --dry-run >/dev/null 2>&1 || fail "a unit with no saved SINKO_REF (follows the releases) was refused"
+cp "$WORK/config.keep" "$ROOT/etc/sinko/config"
+grep -q '^SINKO_REF=latest$' "$ROOT/etc/sinko/config" || fail "test setup: the golden unit does not follow the releases"
+world_before="$(world_digest)"
+echo "    no account other than root may be able to log in on the console (the seal locks root, not the seller's own user)"
+cp "$ROOT/etc/passwd" "$WORK/passwd.keep"; cp "$ROOT/etc/shadow" "$WORK/shadow.keep"
+printf 'seller:x:1000:1000:Seller,,,:/home/seller:/bin/bash\n' >>"$ROOT/etc/passwd"
+printf 'seller:$y$j9T$salt$hash:19000:0:99999:7:::\n' >>"$ROOT/etc/shadow"
+world_before="$(world_digest)"
+check_refused "the account 'seller' can log in on the console" "an extra user with a password"
+grep -q "userdel -r seller" "$WORK/pre.out" || fail "the message does not say how to delete the account"
+sed -i 's/^seller:[^:]*:/seller::/' "$ROOT/etc/shadow"
+world_before="$(world_digest)"
+check_refused "the account 'seller' can log in on the console" "an extra user with an EMPTY password (passwd -d: Debian lets that in)"
+printf 'other:x:1001:1001::/home/other:/bin/bash\n' >>"$ROOT/etc/passwd"; printf 'other:$6$s$h:19000::::::\n' >>"$ROOT/etc/shadow"
+world_before="$(world_digest)"
+check_refused "the account 'other' can log in on the console" "two extra users are both listed"
+grep -q "the account 'seller'" "$WORK/pre.out" || fail "not every account is listed"
+bash "$SEAL" --dry-run --keep-ssh-access >/dev/null 2>&1 || fail "a test unit with --keep-ssh-access was refused for an extra user"
+cp "$WORK/passwd.keep" "$ROOT/etc/passwd"; cp "$WORK/shadow.keep" "$ROOT/etc/shadow"
+echo "    ... but a locked account, a system account and an account whose shell is nologin pass"
+printf 'seller:x:1000:1000:Seller,,,:/home/seller:/bin/bash\nsvc:x:1002:1002::/var/lib/svc:/usr/sbin/nologin\nmail:x:8:8:mail:/var/mail:/bin/false\n' >>"$ROOT/etc/passwd"
+printf 'seller:!$y$j9T$salt$hash:19000:0:99999:7:::\nsvc:$6$s$h:19000::::::\nmail:$6$s$h:19000::::::\n' >>"$ROOT/etc/shadow"
+bash "$SEAL" --dry-run >"$WORK/locked.out" 2>&1 || { cat "$WORK/locked.out"; fail "locked or non-login accounts were refused"; }
+cp "$WORK/passwd.keep" "$ROOT/etc/passwd"; cp "$WORK/shadow.keep" "$ROOT/etc/shadow"
+world_before="$(world_digest)"
 bash "$SEAL" --dry-run >/dev/null 2>&1 || fail "a ready unit was refused after the problems were fixed"
+
+echo "--- --skip-checks cannot put a console login into the image: the last check before the lock-down stops it, with root still unlocked"
+make_golden
+printf 'seller:x:1000:1000:Seller,,,:/home/seller:/bin/bash\n' >>"$ROOT/etc/passwd"
+printf 'seller:$y$j9T$salt$hash:19000:0:99999:7:::\n' >>"$ROOT/etc/shadow"
+if bash "$SEAL" --yes --skip-checks >"$WORK/skipacct.out" 2>&1; then fail "sealed with --skip-checks although an account can log in on the console"; fi
+grep -q "an account other than root can still log in on the console: seller" "$WORK/skipacct.out" || { cat "$WORK/skipacct.out"; fail "the last check did not name the account"; }
+grep -q "^passwd" "$WORK/calls.log" && fail "root was locked although the seal stopped (the seller could no longer fix it)"
+echo "    after the account is deleted the same command completes the seal"
+sed -i '/^seller:/d' "$ROOT/etc/passwd" "$ROOT/etc/shadow"
+bash "$SEAL" --yes --skip-checks >"$WORK/skipacct2.out" 2>&1 || { cat "$WORK/skipacct2.out"; fail "the seal did not complete after the account was deleted"; }
+grep -q "^passwd -R $ROOT -l root" "$WORK/calls.log" || fail "root was not locked by the completed seal"
+
+echo "--- the zero-fill: an earlier seal's leftover zero file goes first, and a dd that did not fill the free space fails the seal"
+make_golden
+echo junk >"$ROOT/.sinko-zerofill"
+bash "$SEAL" --dry-run >"$WORK/zf-dry.out" 2>&1 || { cat "$WORK/zf-dry.out"; fail "the dry run with a leftover zero file failed"; }
+grep -q "Delete $ROOT/.sinko-zerofill, left by an earlier seal that did not finish" "$WORK/zf-dry.out" || fail "the plan does not mention the leftover zero file"
+[[ -e "$ROOT/.sinko-zerofill" ]] || fail "the dry run deleted the leftover zero file"
+bash "$SEAL" --yes >"$WORK/zf.out" 2>&1 || { cat "$WORK/zf.out"; fail "sealing with a leftover zero file failed"; }
+[[ ! -e "$ROOT/.sinko-zerofill" ]] || fail "the leftover zero file is still there"
+[[ "$(plan_lines "$WORK/zf.out" | head -n1)" == *"Delete $ROOT/.sinko-zerofill"* ]] || fail "the leftover zero file is not the first thing that is done (a full card breaks everything after it)"
+for sw in dd-io-error dd-readonly dd-killed dd-no-end; do
+  make_golden
+  touch "$WORK/$sw"
+  if bash "$SEAL" --yes >"$WORK/zf-$sw.out" 2>&1; then cat "$WORK/zf-$sw.out"; fail "sealed although the free space was not overwritten ($sw)"; fi
+  grep -q "overwriting the free space did not work" "$WORK/zf-$sw.out" || { cat "$WORK/zf-$sw.out"; fail "no message that the free space was not overwritten ($sw)"; }
+  grep -q "Sealed. Power the box off now" "$WORK/zf-$sw.out" && fail "the seal said it was done after a failed zero-fill ($sw)"
+  [[ ! -e "$ROOT/.sinko-zerofill" ]] || fail "the zero file was left behind ($sw): it fills the card"
+  grep -q "^passwd" "$WORK/calls.log" && fail "root was locked after a failed zero-fill ($sw)"
+  rm -f "$WORK/$sw"
+done
+grep -q "Input/output error" "$WORK/zf-dd-io-error.out" || fail "the message does not say what dd said"
+echo "    ... and the seal that follows completes"
+bash "$SEAL" --yes >"$WORK/zf-again.out" 2>&1 || { cat "$WORK/zf-again.out"; fail "the seal did not complete after the failed zero-fill was fixed"; }
 
 echo "--- Pi-hole's HTTPS key: the file its settings name (and the public copies beside it) go; an odd location stops the seal"
 make_golden

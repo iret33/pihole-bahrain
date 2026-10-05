@@ -17,6 +17,14 @@ EOF
 export SINKO_OS_RELEASE="$WORK/os-release"
 echo kidsbox >"$ROOT/etc/hostname"
 
+# A copy of the working tree to install from (SINKO_SRC), for the tests that need a release that differs from it.
+src_copy() {  # name: prints the folder
+  local d="$WORK/src-$1"
+  rm -rf "$d"; mkdir -p "$d"
+  git -C "$REPO" ls-files -z --cached --others --exclude-standard | tar -C "$REPO" --null -T - -cf - | tar -x -C "$d"
+  printf '%s' "$d"
+}
+
 # Pretend an old 1.x page is installed
 mkdir -p "$ROOT/var/www/html/parental"
 echo '<script src="/parental/app.js"></script>' >"$ROOT/var/www/html/index.html"
@@ -68,6 +76,56 @@ EOF
 )"
 [[ "$lists" == "20 https://raw.githubusercontent.com/iret33/sinko/master/lists/"* ]] || fail "lists: $lists"
 
+echo "--- the start page is stamped with the release's version (a phone must never mix the new page with the old scripts it still holds)"
+VER="$(tr -d '[:space:]' <"$REPO/VERSION")"
+page="$ROOT/var/www/html/index.html"
+grep -q '@VERSION@' "$page" && fail "the installed start page still has the @VERSION@ marker"
+[[ "$(stat -c %a "$page")" == 644 && -z "$(find "$ROOT/var/www/html" -maxdepth 1 -name '*.sinko-new')" ]] || fail "the start page has the wrong mode, or a temporary file was left"
+check_asset_urls() {  # page version: every script and the stylesheet of /pb/ names the version, style.css and pb-core.js among them
+  python3 - "$1" "$2" <<'PYEOF'
+import re, sys
+html, ver = open(sys.argv[1], encoding="utf-8").read(), sys.argv[2]
+urls = re.findall(r'<script[^>]*\ssrc="(/pb/[^"]+)"', html) + re.findall(r'<link[^>]*rel="stylesheet"[^>]*\shref="(/pb/[^"]+)"', html)
+assert urls, "the page loads nothing from /pb/"
+for must in ("/pb/style.css", "/pb/pb-core.js"):
+    assert any(u.startswith(must) for u in urls), "%s is not loaded by the page: %s" % (must, urls)
+bad = [u for u in urls if not u.endswith("?v=" + ver)]
+assert not bad, "addresses without ?v=%s: %s" % (ver, bad)
+PYEOF
+}
+if grep -q '@VERSION@' "$REPO/web/index.html"; then
+  check_asset_urls "$page" "$VER" || fail "an asset address of the installed page does not carry the version"
+  echo "    the real page: every script and the stylesheet carry ?v=$VER"
+else
+  # The page's own change (web/index.html says /pb/style.css?v=@VERSION@ and so on) is made by the page engineer: until it is
+  # in this tree only the installer's side can be shown, on a page that has the markers (below).
+  echo "    NOTE: web/index.html has no @VERSION@ marker in this tree, so the real page's addresses cannot be checked here; the installer's side is checked on a page that has them"
+fi
+STAMP="$(src_copy stamp)"
+cat >"$STAMP/web/index.html" <<'EOF'
+<!DOCTYPE html><html><head><meta name="generator" content="sinko"><meta name="sinko-version" content="@VERSION@">
+<link rel="stylesheet" href="/pb/style.css?v=@VERSION@">
+<script src="/pb/pb-core.js?v=@VERSION@" defer></script>
+<script src="/pb/app.js?v=@VERSION@" defer></script></head><body>@VERSION@ and @VERSION@</body></html>
+EOF
+printf '7.8.9\n' >"$STAMP/VERSION"
+sed -i 's/^VERSION = "[^"]*"/VERSION = "7.8.9"/' "$STAMP/bin/sinko"
+SINKO_SRC="$STAMP" bash "$STAMP/install.sh" >"$WORK/stamp.out" 2>&1 || { cat "$WORK/stamp.out"; fail "installing a release whose page has the version markers failed"; }
+grep -q '@VERSION@' "$page" && fail "the markers were not replaced"
+check_asset_urls "$page" 7.8.9 || fail "the stamped page does not carry the version in its asset addresses"
+grep -q '<meta name="sinko-version" content="7.8.9">' "$page" || fail "the version meta tag was not stamped"
+grep -q '7.8.9 and 7.8.9</body>' "$page" || fail "every marker on the page must be replaced, not only the first"
+[[ "$(cat "$ROOT/var/www/html/pb/version.txt")" == 7.8.9 && "$(stat -c %a "$page")" == 644 && -z "$(find "$ROOT/var/www/html" -maxdepth 1 -name '*.sinko-new')" ]] || fail "the stamped page is not installed cleanly"
+echo "    a VERSION that is not a version number (it goes into the page's addresses) stops the installer before anything is changed"
+BADV="$(src_copy badversion)"
+printf '3.0.0;touch /tmp/x\n' >"$BADV/VERSION"
+program_before="$(sha256sum "$ROOT/opt/sinko/bin/sinko")"
+if SINKO_SRC="$BADV" bash "$BADV/install.sh" >"$WORK/badver.out" 2>&1; then fail "a VERSION with a semicolon in it was accepted"; fi
+grep -q "does not hold a version number" "$WORK/badver.out" || { cat "$WORK/badver.out"; fail "no message about the VERSION file"; }
+[[ "$(sha256sum "$ROOT/opt/sinko/bin/sinko")" == "$program_before" ]] || fail "files were changed although the VERSION file is unusable"
+bash "$REPO/install.sh" >"$WORK/stamp2.out" 2>&1 || { cat "$WORK/stamp2.out"; fail "putting the real release back failed"; }
+[[ "$(cat "$ROOT/var/www/html/pb/version.txt")" == "$VER" ]] || fail "the real release was not put back"
+
 "$ROOT/usr/local/bin/sinko" status | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["version"] and d["devices"] == []' || fail "status output is not the expected JSON"
 "$ROOT/usr/local/bin/sinko" use-mac --dry-run | grep -q "Nothing to convert" || fail "use-mac did not run"
 # diagnose and watch through the real CLI; the stubbed pihole-FTL has no sqlite shell, so the databases are "unreadable"
@@ -97,6 +155,10 @@ grep -q '^APT::Periodic::Unattended-Upgrade "1";$' "$ua" || fail "periodic upgra
 grep -q '^SINKO_MDNS=1$' "$ROOT/etc/sinko/config" || fail "SINKO_MDNS is not saved"
 grep -q '^SINKO_OS_UPDATES=1$' "$ROOT/etc/sinko/config" || fail "SINKO_OS_UPDATES is not saved"
 [[ "$(grep -c 'apt-get install .*avahi-daemon' "$WORK/calls.log")" == 1 ]] || fail "avahi-daemon installed more than once"
+echo "    a box without any time service gets one (it has no battery-backed clock)"
+grep -q 'apt-get install .*systemd-timesyncd' "$WORK/calls.log" || fail "no time service was installed on a box that had none"
+[[ -e "$WORK/units/systemd-timesyncd.service.enabled" && -e "$WORK/units/systemd-timesyncd.service.active" ]] || fail "systemd-timesyncd was not enabled and started"
+grep -q "systemd-timesyncd is on" "$WORK/install.out" || fail "no message about the time service"
 
 echo "--- re-run (update) keeps settings, hostname change replaces host entry"
 SINKO_HOSTNAME=kids.home bash "$REPO/install.sh" >"$WORK/install2.out" 2>&1 || { cat "$WORK/install2.out"; fail "second run failed"; }
@@ -325,7 +387,20 @@ grep -q 'pihole setpassword Fallback-Pass-2024' "$WORK/calls.log" || fail "Pi-ho
 grep -q "Pi-hole's API did not take the password" "$WORK/pw6.out" || fail "the fallback is silent"
 grep -qF "Fallback-Pass-2024" "$LOG" "$WORK/pw6.out" && fail "the password reached the log or the output (fallback)"
 mock_auth true
+echo "    a Pi-hole that already has a password does not take one through the API (FTL refuses a command-line session): Pi-hole's own command is used, and it says so"
+mock_set_password "Old-Password-2024"
+: >"$WORK/calls.log"
+SINKO_PASSWORD="New-Password-2024" bash "$REPO/install.sh" >"$WORK/pw7.out" 2>&1 || { cat "$WORK/pw7.out"; fail "install with a given password on a Pi-hole that has one failed"; }
+grep -q 'pihole setpassword New-Password-2024' "$WORK/calls.log" || { cat "$WORK/calls.log"; fail "Pi-hole's own command was not used for a Pi-hole that already has a password"; }
+grep -q "it only does while Pi-hole has none" "$WORK/pw7.out" || fail "the note does not say why Pi-hole's own command is used"
+mock_password_works "Old-Password-2024" || fail "the password was changed through the API by a session that is not allowed to (the stub of pihole setpassword changes nothing)"
+grep -qF "New-Password-2024" "$LOG" "$WORK/pw7.out" && fail "the password reached the log or the output (existing password)"
 mock_set_password test                          # the password the rest of this test file signs in with
+echo "    the header of install.sh says exactly this (the documents repeat it)"
+head -n 45 "$REPO/install.sh" >"$WORK/header.txt"
+for said in "has no password yet" "already has a password" "pihole setpassword" "in that program's arguments"; do
+  grep -q "$said" "$WORK/header.txt" || fail "the header does not say which Pi-hole gets the password through the API and which one through the command line ('$said' is missing)"
+done
 
 echo "--- the counter question: asked once, only when somebody can answer, nothing saved when nobody was asked"
 conf="$ROOT/etc/sinko/config"
@@ -349,10 +424,32 @@ SINKO_TELEMETRY=0 bash "$REPO/install.sh" >"$WORK/t5.out" 2>&1 || fail "run with
 grep -q '^SINKO_TELEMETRY=0$' "$conf" || fail "SINKO_TELEMETRY=0 did not replace the answer"
 if SINKO_TELEMETRY=maybe bash "$REPO/install.sh" >"$WORK/t6.out" 2>&1; then fail "SINKO_TELEMETRY=maybe accepted"; fi
 grep -q "SINKO_TELEMETRY must be 1" "$WORK/t6.out" || fail "no message for a bad SINKO_TELEMETRY"
+echo "    interactive, but this build has no counter address (config, environment and the built-in default are all empty): not asked, nothing said, nothing saved"
+forget_answer; sed -i '/^SINKO_TELEMETRY_URL=/d' "$conf"
+NOCOUNTER="$(src_copy nocounter)"
+sed -i 's|^TELEMETRY_URL = .*|TELEMETRY_URL = ""|' "$NOCOUNTER/bin/sinko"
+grep -q '^TELEMETRY_URL = ""' "$NOCOUNTER/bin/sinko" || fail "test setup: the built-in counter address constant was not found in bin/sinko (the installer reads it through the program)"
+echo y >"$WORK/answer"
+env -u SINKO_NONINTERACTIVE SINKO_SRC="$NOCOUNTER" SINKO_TTY="$WORK/answer" bash "$NOCOUNTER/install.sh" >"$WORK/t6a.out" 2>&1 || { cat "$WORK/t6a.out"; fail "interactive run without a counter address failed"; }
+grep -q "Count this box\|Anonymous counter\|will be counted" "$WORK/t6a.out" && fail "the counter question was asked (or the counter mentioned) although no counter address is set up"
+grep -q '^SINKO_TELEMETRY=' "$conf" && fail "an answer was saved although nobody was asked"
+echo "    ... the built-in address of the release counts (what releasing.md puts into bin/sinko), and so does one that was saved"
+BUILTIN="$(src_copy builtin)"
+sed -i 's|^TELEMETRY_URL = .*|TELEMETRY_URL = "https://counter.example.org"|' "$BUILTIN/bin/sinko"
+env -u SINKO_NONINTERACTIVE SINKO_SRC="$BUILTIN" SINKO_TTY="$WORK/answer" bash "$BUILTIN/install.sh" >"$WORK/t6b.out" 2>&1 || { cat "$WORK/t6b.out"; fail "interactive run with a built-in counter address failed"; }
+grep -q "Count this box in the anonymous number of Sinko boxes online? \[y/N\]" "$WORK/t6b.out" || fail "the question was not asked although the release has a counter address built in"
+grep -q '^SINKO_TELEMETRY=1$' "$conf" || fail "the answer was not saved"
+grep -q '^SINKO_TELEMETRY_URL=' "$conf" && fail "the built-in address was copied into the settings (it must keep following the release)"
+echo "    ... but a built-in address the program would never use (not https) is no address"
+forget_answer
+sed -i 's|^TELEMETRY_URL = .*|TELEMETRY_URL = "http://counter.example.org"|' "$BUILTIN/bin/sinko"
+env -u SINKO_NONINTERACTIVE SINKO_SRC="$BUILTIN" SINKO_TTY="$WORK/answer" bash "$BUILTIN/install.sh" >"$WORK/t6c.out" 2>&1 || fail "interactive run with an unusable built-in address failed"
+grep -q "Count this box" "$WORK/t6c.out" && fail "asked although the built-in address is not one the program would send to"
+grep -q '^SINKO_TELEMETRY=' "$conf" && fail "an answer was saved although nobody was asked"
 echo "    interactive: asked with a description and a pointer to docs/privacy.md; default is no"
 forget_answer
 echo y >"$WORK/answer"
-env -u SINKO_NONINTERACTIVE SINKO_TTY="$WORK/answer" bash "$REPO/install.sh" >"$WORK/t7.out" 2>&1 || { cat "$WORK/t7.out"; fail "interactive run failed"; }
+env -u SINKO_NONINTERACTIVE SINKO_TELEMETRY_URL=https://counter.example.org SINKO_TTY="$WORK/answer" bash "$REPO/install.sh" >"$WORK/t7.out" 2>&1 || { cat "$WORK/t7.out"; fail "interactive run failed"; }
 grep -q "Count this box in the anonymous number of Sinko boxes online? \[y/N\]" "$WORK/t7.out" || fail "the question was not asked"
 grep -q "docs/privacy.md" "$WORK/t7.out" || fail "no pointer to docs/privacy.md"
 grep -q '^SINKO_TELEMETRY=1$' "$conf" || fail "the answer yes was not saved"
@@ -432,6 +529,75 @@ grep -qF 'origin=Ubuntu,codename=${distro_codename}-security,label=Ubuntu' "$ua"
 grep -q 'origin=Debian' "$ua" && fail "Debian origins on Ubuntu"
 grep -q 'http://kidsbox.local/' "$WORK/e6.out" || fail "avahi was installed again but the .local name is not shown"
 
+echo "--- a box whose owner chose another language still gets its packages (apt prints its labels in that language)"
+for lang in de_DE.UTF-8 ar_BH.UTF-8; do
+  sed -i '/^avahi-daemon$/d; /^unattended-upgrades$/d; /^git$/d' "$WORK/dpkg-installed"
+  rm -f "$ua"; : >"$WORK/calls.log"
+  LANG="$lang" LANGUAGE="${lang%%_*}" bash "$REPO/install.sh" >"$WORK/loc.out" 2>&1 || { cat "$WORK/loc.out"; fail "install failed under the locale $lang"; }
+  grep -q 'apt-get install .* git$' "$WORK/calls.log" || fail "$lang: a missing git was not installed (the candidate was not found)"
+  grep -q 'apt-get install .*avahi-daemon' "$WORK/calls.log" || fail "$lang: avahi-daemon was not installed"
+  grep -q 'apt-get install .*unattended-upgrades' "$WORK/calls.log" || fail "$lang: unattended-upgrades was not installed"
+  grep -q "Could not install" "$WORK/loc.out" && fail "$lang: 'Could not install' although apt has the packages"
+  [[ -f "$ua" ]] || fail "$lang: no security-update settings were written"
+done
+echo "    ... and apt really is asked in the C locale, not in the user's"
+grep -q '^apt-cache policy' "$WORK/calls.log" || fail "test setup: apt-cache was not asked"
+
+echo "--- a package that was removed but not purged ('apt remove') is installed again, not taken for installed"
+sed -i '/^avahi-daemon$/d; /^unattended-upgrades$/d; /^curl$/d' "$WORK/dpkg-installed"
+printf '%s\n' avahi-daemon unattended-upgrades curl >"$WORK/dpkg-configfiles"
+dpkg -s avahi-daemon >/dev/null 2>&1 || fail "test setup: dpkg -s must answer 0 for a package whose configuration files are left (the real one does)"
+[[ "$(dpkg-query -W -f='${Status}' avahi-daemon)" == "deinstall ok config-files" ]] || fail "test setup: the stub does not report the state"
+rm -f "$ua"; : >"$WORK/calls.log"
+bash "$REPO/install.sh" >"$WORK/cf.out" 2>&1 || { cat "$WORK/cf.out"; fail "install with packages in the config-files state failed"; }
+grep -q 'apt-get install .* curl$' "$WORK/calls.log" || fail "curl (removed, configuration kept) was taken for installed"
+grep -q 'apt-get install .*avahi-daemon' "$WORK/calls.log" || fail "avahi-daemon (removed, configuration kept) was taken for installed: the box would have no .local name for good"
+grep -q 'apt-get install .*unattended-upgrades' "$WORK/calls.log" || fail "unattended-upgrades (removed, configuration kept) was taken for installed: no security updates for good"
+grep -q "avahi-daemon is already installed\|Automatic updates are already set up" "$WORK/cf.out" && fail "'already installed' for packages that were removed"
+[[ -f "$ua" && ! -s "$WORK/dpkg-configfiles" ]] || fail "the packages were not brought back"
+
+echo "--- free disk space: 1 GB for a first installation, 200 MB for an update or a rollback; a refusal exits with 75 and changes nothing"
+program_before="$(sha256sum "$ROOT/opt/sinko/bin/sinko")"
+echo "    an update on a card with 488 MB free works (it only replaces a few MB, and the rollback that follows a failure must work too)"
+echo 500000 >"$WORK/df-free-kb"
+bash "$REPO/install.sh" >"$WORK/disk1.out" 2>&1 || { cat "$WORK/disk1.out"; fail "an update with 488 MB free was refused"; }
+grep -q "Disk space: 488 MB free" "$WORK/disk1.out" || fail "the free space is not shown"
+echo "    ... but not with 146 MB"
+echo 150000 >"$WORK/df-free-kb"
+rc=0; bash "$REPO/install.sh" >"$WORK/disk2.out" 2>&1 || rc=$?
+[[ "$rc" == 75 ]] || { cat "$WORK/disk2.out"; fail "the refusal for lack of disk space exited with $rc, not 75 (the update engine tells it apart by that)"; }
+grep -q "At least 200 MB of free disk space is needed to update Sinko, and this device has 146 MB" "$WORK/disk2.out" || fail "no clear message for the update"
+grep -q "Nothing was changed" "$WORK/disk2.out" || fail "the message does not say that nothing was changed"
+[[ "$(sha256sum "$ROOT/opt/sinko/bin/sinko")" == "$program_before" ]] || fail "files were changed although the disk space was refused"
+echo "    a first installation (no scheduler unit yet) needs 1 GB: 488 MB are refused, and 1.4 GB are enough"
+rm -f "$ROOT/etc/systemd/system/sinko.service"
+echo 500000 >"$WORK/df-free-kb"
+rc=0; bash "$REPO/install.sh" >"$WORK/disk3.out" 2>&1 || rc=$?
+[[ "$rc" == 75 ]] || { cat "$WORK/disk3.out"; fail "a first installation with 488 MB free exited with $rc, not 75"; }
+grep -q "At least 1 GB of free disk space is needed to install Pi-hole and Sinko, and this device has 488 MB" "$WORK/disk3.out" || fail "no clear message for the first installation"
+[[ ! -e "$ROOT/etc/systemd/system/sinko.service" ]] || fail "a refused first installation changed the box"
+echo 1500000 >"$WORK/df-free-kb"
+bash "$REPO/install.sh" >"$WORK/disk4.out" 2>&1 || { cat "$WORK/disk4.out"; fail "a first installation with 1.4 GB free was refused"; }
+rm -f "$WORK/df-free-kb"
+
+echo "--- the clock: a time service that is there is left alone; one that is installed but switched off is not replaced; with none, one is installed"
+rm -f "$WORK"/units/systemd-timesyncd.service.*; sed -i '/^systemd-timesyncd$/d' "$WORK/dpkg-installed"
+touch "$WORK/units/chrony.service.enabled"; : >"$WORK/calls.log"
+bash "$REPO/install.sh" >"$WORK/clock1.out" 2>&1 || { cat "$WORK/clock1.out"; fail "install next to a working chrony failed"; }
+grep -q 'apt-get install .*systemd-timesyncd\|^systemctl enable .*systemd-timesyncd' "$WORK/calls.log" && fail "systemd-timesyncd was installed next to a working chrony (it would remove it)"
+grep -q "kept right by chrony" "$WORK/clock1.out" || fail "no note that chrony keeps the clock"
+rm -f "$WORK/units/chrony.service.enabled"; echo chrony >>"$WORK/dpkg-installed"; : >"$WORK/calls.log"
+bash "$REPO/install.sh" >"$WORK/clock2.out" 2>&1 || { cat "$WORK/clock2.out"; fail "install with chrony installed but off failed"; }
+grep -q 'apt-get install .*systemd-timesyncd\|^systemctl enable .*systemd-timesyncd' "$WORK/calls.log" && fail "systemd-timesyncd was installed although chrony is installed (the two exclude each other)"
+grep -q "chrony is installed but not switched on" "$WORK/clock2.out" || fail "no hint that chrony is off"
+sed -i '/^chrony$/d' "$WORK/dpkg-installed"
+touch "$WORK/apt-fail"
+bash "$REPO/install.sh" >"$WORK/clock3.out" 2>&1 || { cat "$WORK/clock3.out"; fail "a time service that cannot be installed broke the installation"; }
+rm -f "$WORK/apt-fail"
+grep -q "Could not install systemd-timesyncd" "$WORK/clock3.out" || fail "no warning that no time service could be installed"
+bash "$REPO/install.sh" >"$WORK/clock4.out" 2>&1 || fail "the run that installs the time service failed"
+[[ -e "$WORK/units/systemd-timesyncd.service.enabled" ]] || fail "systemd-timesyncd was not switched on when nothing else keeps the clock"
+
 echo "--- uninstall"
 # Things a running box has: runtime data, the first-start unit, the shortcut an earlier migration left, a start page of the user's own.
 printf '%s\n' 0123456789abcdef0123456789abcdef >"$ROOT/var/lib/sinko/install-id"
@@ -445,6 +611,7 @@ grep -q "Nothing changed" "$WORK/un0.out" || fail "no confirmation that nothing 
 [[ -x "$ROOT/opt/sinko/bin/sinko" && -d "$ROOT/var/lib/sinko" ]] || fail "uninstall removed files although the answer was no"
 : >"$WORK/calls.log"
 bash "$ROOT/opt/sinko/uninstall.sh" >"$WORK/un.out" 2>&1 || { cat "$WORK/un.out"; fail "uninstall failed"; }
+grep -q '^pihole -g' "$WORK/calls.log" || fail "uninstall did not refresh Pi-hole's block lists (through the gravity lock)"
 [[ ! -e "$ROOT/opt/sinko" && ! -e "$ROOT/var/www/html/pb" && ! -e "$ROOT/etc/sinko" ]] || fail "files left behind"
 [[ ! -e "$ROOT/var/lib/sinko" ]] || fail "the runtime data folder (install-id, update results, first-start flag) was left behind"
 [[ ! -e "$ROOT/etc/systemd/system/sinko-firstboot.service" && ! -e "$ROOT/etc/systemd/system/sinko.service" && ! -e "$ROOT/etc/systemd/system/sinko-lists.timer" ]] || fail "a unit file was left behind"
