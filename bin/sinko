@@ -2,7 +2,8 @@
 """sinko — parental controls on top of Pi-hole v6.
 
 Commands
-  setup        Create/refresh the Pi-hole groups, lists and rules this add-on uses.
+  setup        Create/refresh the Pi-hole groups, lists and rules this add-on uses (and run 'pihole -g': one run at a
+               time, so it waits up to 30 minutes for a run that is already going).
   configure    Apply the Pi-hole settings the add-on needs (web root, local name).
   run          Background scheduler (timers, bedtime, updates, requests from the page). Run by systemd.
   status       Print the current state.
@@ -10,8 +11,9 @@ Commands
   diagnose     Read-only report on why a service is still reachable after it was blocked.
   watch        Follow the DNS log to see whether a device's queries reach the box.
   update       Update to the newest release (--check, --yes, --ref REF, --force); rolls back by itself if it fails.
-               --ref pins the box to that release or branch; --ref latest follows the newest release again.
-  rollback     Go back to the previous version stored on this box.
+               --ref pins the box to that release or branch once the update has worked (a failed update leaves the
+               choice as it was); --ref latest follows the newest release again. Needs more than 200 MB free.
+  rollback     Go back to the previous version stored on this box (also needs more than 200 MB free).
   selfcheck    Check that the installation works (run after every update): Pi-hole objects, the scheduler (up for a
                while and finishing its passes), every file of the page.
   telemetry    The optional anonymous counter: on, off (and the counter forgets this box), status, payload (what
@@ -19,7 +21,8 @@ Commands
   box-info     Print what the page may know about this box (/pb/box.json); --write puts it in the page folder.
                The scheduler refreshes that file every five minutes: the page reads it as the scheduler's heartbeat.
   use-mac      Re-register children that were added by IP address under their MAC address.
-  remove       Delete everything this add-on created inside Pi-hole.
+  remove       Delete everything this add-on created inside Pi-hole. A device that also has a group of yours stays
+               (without this add-on's groups); one that was registered only for this add-on goes.
 
 How it works
   Every service (YouTube, TikTok, ...) has its own Pi-hole group "pb-svc-<id>"
@@ -5063,7 +5066,8 @@ def main(argv=None) -> int:
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("setup", help="create/refresh Pi-hole objects")
-    p.add_argument("--no-gravity", action="store_true", help="skip 'pihole -g'")
+    p.add_argument("--no-gravity", action="store_true", help="skip 'pihole -g' (which otherwise runs one at a time: "
+                   "it waits up to 30 minutes for a run that is already going)")
     p.set_defaults(fn=cmd_setup)
     p = sub.add_parser("configure", help="apply required Pi-hole settings")
     p.add_argument("--hostname", default=None, help="local name for the parent page, e.g. family.lan")
@@ -5075,12 +5079,17 @@ def main(argv=None) -> int:
     p.add_argument("--check", action="store_true", help="only say whether a newer version exists")
     p.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     p.add_argument("--ref", default=None, help="latest, a release such as v3.1.0, or a branch (default from the settings). "
-                   "Giving one pins the box to it: updates from the page and at night follow it. "
+                   "Giving one pins the box to it once the update has worked: updates from the page and at night follow it "
+                   "(if the update fails, the box keeps following what it followed before). "
                    "--ref latest follows the newest release again")
-    p.add_argument("--force", action="store_true", help="install even if that version is not newer")
+    p.add_argument("--force", action="store_true", help="install even if that version is not newer (an update needs "
+                   "more than 200 MB of free space either way)")
     p.add_argument("--from-panel", action="store_true", help=argparse.SUPPRESS)      # started by the scheduler
     p.set_defaults(fn=cmd_update)
-    sub.add_parser("rollback", help="go back to the previous version stored on this box").set_defaults(fn=cmd_rollback)
+    sub.add_parser("rollback", help="go back to the previous version stored on this box (needs more than 200 MB free)",
+                   description="Go back to the previous version stored on this box. Needs more than 200 MB of free space "
+                   "(nothing is changed without it)."
+                   ).set_defaults(fn=cmd_rollback)
     p = sub.add_parser("selfcheck", help="check that the installation works (used after every update; the scheduler must have run for 20 seconds)")
     p.add_argument("--wait", type=float, default=0, help="keep trying for this many seconds while services start")
     p.set_defaults(fn=cmd_selfcheck)
@@ -5107,7 +5116,11 @@ def main(argv=None) -> int:
     p.add_argument("--write", action="store_true", help="write it into the page folder instead of printing it")
     p.set_defaults(fn=cmd_box_info)
     sub.add_parser("doctor", help="check the installation").set_defaults(fn=cmd_doctor)
-    sub.add_parser("remove", help="delete this add-on's Pi-hole objects").set_defaults(fn=cmd_remove)
+    sub.add_parser("remove", help="delete this add-on's Pi-hole objects (a device that also has a group of yours stays, "
+                   "without this add-on's groups)",
+                   description="Delete the groups, lists and rules this add-on made in Pi-hole, and the devices that were "
+                   "registered only for it. A device that also has a group of yours stays, without this add-on's groups."
+                   ).set_defaults(fn=cmd_remove)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(levelname)s %(message)s", stream=sys.stderr)

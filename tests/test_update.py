@@ -1627,6 +1627,26 @@ class CommandTests(Box):
                 pb.keep_pin("latest", "v3.1.0", path)
         self.assertIn("could not put the setting back to latest", err.getvalue())
 
+    def help_of(self, *args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as stop:
+            pb.main(list(args) + ["--help"])
+        self.assertEqual(stop.exception.code, 0)
+        return " ".join(out.getvalue().split())
+
+    def test_the_help_texts_say_what_the_commands_do_about_space_pins_and_devices(self):
+        update = self.help_of("update")
+        self.assertIn("pins the box to it once the update has worked", update)
+        self.assertIn("if the update fails, the box keeps following what it followed before", update)
+        self.assertIn("200 MB", update)
+        self.assertIn("200 MB", self.help_of("rollback"))
+        self.assertIn("device that also has a group of yours stays", self.help_of("remove"))
+        self.assertIn("one at a time", self.help_of("setup"))
+        doc = pb.__doc__
+        for sentence in ("a failed update leaves the choice as it was", "more than 200 MB free", "one run at a time",
+                         "A device that also has a group of yours stays"):
+            self.assertIn(sentence, " ".join(doc.split()), sentence)
+
     def test_a_missing_settings_file_is_said_not_a_traceback(self):
         missing = os.path.join(self.tmp, "no-config")
         self.publish("3.0.0")
