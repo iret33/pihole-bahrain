@@ -1441,6 +1441,90 @@ class BoxInfoJobTests(Fixture):
         self.settle()
         self.assertEqual(len(self.boxinfo_calls), 1, "once, then back to the five minutes")
 
+    def test_a_clock_that_is_set_makes_the_file_fresh_at_once_and_not_at_the_next_five_minutes(self):
+        # No internet when the box started: its clock was the last saved one and was believed after ten minutes. Days
+        # later the time server answers and the clock jumps. box.json holds the old time until the next write, and the page
+        # (which compares it with the box's clock) would call the scheduler dead and tell the parent to unplug the box.
+        self.advance(11)
+        self.settle()
+        self.assertEqual(self.calls(), [{"force": False}])
+        self.advance(40)
+        self.settle()
+        self.assertEqual(len(self.boxinfo_calls), 1, "time passing as it should: nothing to do before five minutes")
+        self.now += dt.timedelta(days=3)                    # the clock is set; the monotonic clock did not move
+        self.pass_()
+        self.assertEqual(self.calls(), [{"force": False}, {"force": True}], "written in the pass that saw the step")
+        self.advance(15)
+        self.settle()
+        self.assertEqual(len(self.boxinfo_calls), 2, "and then back to every five minutes")
+        self.advance(300)
+        self.settle()
+        self.assertEqual(len(self.boxinfo_calls), 3)
+
+    def test_a_clock_that_is_set_back_is_noticed_too(self):
+        self.advance(11)
+        self.settle()
+        self.now -= dt.timedelta(hours=2)
+        self.pass_()
+        self.assertEqual(self.calls()[-1], {"force": True})
+
+    def test_a_clock_that_is_a_little_off_is_not_a_step(self):
+        self.advance(11)
+        self.settle()
+        for drift in (5, -5, 20, -20):
+            self.now += dt.timedelta(seconds=drift)         # what slewing by a time server does, and a slow pass
+            self.pass_()
+        self.assertEqual(len(self.boxinfo_calls), 1)
+
+    def test_a_step_during_an_update_is_remembered_until_the_file_may_be_written_again(self):
+        self.advance(11)
+        self.settle()
+        self.set_state(lambda s: s["update"].update(status="running", at=self.now.timestamp()))
+        self.now += dt.timedelta(seconds=120)               # (a step; small enough that the runner is not yet called gone)
+        self.settle()
+        self.assertEqual(len(self.boxinfo_calls), 1, "the installer is swapping the folder the file lives in")
+        self.set_state(lambda s: s["update"].update(status="ok", at=self.now.timestamp()))
+        self.advance(15)
+        self.settle()
+        self.assertEqual(self.calls()[-1], {"force": True})
+        self.assertEqual(len(self.boxinfo_calls), 2)
+
+    def test_a_step_while_the_tick_fails_waits_for_a_pass_that_works(self):
+        self.advance(11)
+        self.settle()
+        self.m.tick_ok = False
+        self.now += dt.timedelta(days=1)
+        self.settle()
+        self.assertEqual(len(self.boxinfo_calls), 1)
+        self.m.tick_ok = True
+        self.advance(15)
+        self.settle()
+        self.assertEqual(self.calls()[-1], {"force": True})
+
+    def test_the_file_on_disk_carries_the_new_time_in_the_pass_that_saw_the_step(self):
+        os.makedirs(os.path.join(self.webroot, "pb"))
+        path = os.path.join(self.webroot, "pb", "box.json")
+
+        def write(conf, force=False):
+            return REAL_WRITE_BOX_INFO(conf, ip=None, force=force, root=self.webroot, when=self.now.timestamp(), mdns=False)
+        m = pb.Maintenance(self.api, config_path=self.config_path, monotonic=lambda: self.mono, job_factory=InlineJob,
+                           clock_ok=lambda: True, box_info=write, catalog=lambda: self.catalog, check=lambda c: None,
+                           default_ip=lambda: "192.168.1.5")
+        self.advance(11)
+        m.run(self.now)
+        m.run(self.now)
+        with open(path) as fh:
+            before = json.load(fh)["at"]
+        self.assertEqual(before, int(self.now.timestamp()))
+        self.advance(60)
+        m.run(self.now)
+        self.now += dt.timedelta(days=2)
+        m.run(self.now)
+        m.run(self.now)
+        with open(path) as fh:
+            after = json.load(fh)["at"]
+        self.assertEqual(after, int(self.now.timestamp()), "the file is not hours or days behind the box's clock")
+
     def test_a_failure_to_write_is_logged_now_and_then_never_reaches_the_tick_and_is_retried_in_a_minute(self):
         self.boxinfo_error = OSError(30, "Read-only file system")
         self.advance(11)

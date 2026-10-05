@@ -2895,6 +2895,7 @@ class Maintenance:
     PING_RETRY = 1800
     BOXINFO_FIRST = 10                # box.json: first write soon after start, then every five minutes
     BOXINFO_EVERY = 300
+    CLOCK_STEP = 30                   # seconds: the box's clock moved this much more (or less) than time passed: it was set
     HEAL_CHECK_EVERY = 300            # looking for missing lists (missing groups are seen on every pass)
     HEAL_STREAK = 3                   # passes in a row that must see something missing (FTL may be rebuilding gravity)
     HEAL_EVERY = 3600                 # at most one repair an hour
@@ -2932,6 +2933,8 @@ class Maintenance:
         self._lists_missing = []
         self._catalog = None
         self._was_trusted = None          # whether the clock was believed on the pass before (None: no pass yet)
+        self._last_pass = None            # (the box's clock, the monotonic clock) at the previous pass: a step shows as a difference
+        self._clock_stepped = False       # the clock was set since box.json was last written
         self._check_forced = False
         self._force_check = False
         self._jobs = {}
@@ -2950,6 +2953,7 @@ class Maintenance:
         """One pass of every side job. Never raises. Returns what it did, as text."""
         self._actions = []
         epoch = now.timestamp()
+        self._note_clock_step(epoch)
         self._state = None
         steps = (("jobs", self._collect), ("reconcile", self._reconcile), ("check", self._check),
                  ("update", self._update), ("power", self._power), ("address", self._address),
@@ -2972,6 +2976,16 @@ class Maintenance:
         for line in self._actions:
             log.info(line)
         return self._actions
+
+    def _note_clock_step(self, epoch: float) -> None:
+        """Remember that the box's clock was set (by the time server, after a start with the last saved time): between two
+        passes it moved by another amount than the monotonic clock, which only ever counts real time. box.json carries the
+        box's clock and the page reads it as the scheduler's pulse; see _boxinfo."""
+        mono = self.mono()
+        last, self._last_pass = self._last_pass, (epoch, mono)
+        if last is not None and abs((epoch - last[0]) - (mono - last[1])) > self.CLOCK_STEP:
+            self._clock_stepped = True
+            log.debug("the box's clock was set (it moved %d s while %d s passed)", epoch - last[0], mono - last[1])
 
     def _complain(self, name: str, err) -> None:
         """Log a failure of a side job at most once every 30 minutes per job (a network that is down would otherwise
@@ -3326,19 +3340,24 @@ class Maintenance:
         """Refresh /pb/box.json every five minutes, in a job of its own (it asks the web server's settings, systemd and
         the routing table: nothing the tick should wait for). Only while the rules are being applied (the file says
         "the scheduler works"), not while an update runs (the installer swaps the folder the file lives in), and
-        straight away once the clock is believed (the time in the file has to match it). A failure to write is logged
-        now and then and never reaches the tick."""
+        straight away once the clock is believed (the time in the file has to match it), and straight away when the clock
+        was set later on (a box that started on its last saved time and believed it after ten minutes without a time
+        server writes that time; when the internet comes back and the clock jumps, the file would be hours or days
+        behind for up to five minutes, and the page would call the scheduler dead and tell the parent to unplug a healthy
+        box). A failure to write is logged now and then and never reaches the tick."""
         trusted = bool(self.clock_ok())
         became_trusted, self._was_trusted = trusted and self._was_trusted is False, trusted
         if not self.tick_ok or not trusted:
             return
         if self._cur()["update"]["status"] == "running" or RunLock.is_held():
             return
-        if not became_trusted and self.mono() < self._next_boxinfo:
+        now_please = became_trusted or self._clock_stepped
+        if not now_please and self.mono() < self._next_boxinfo:
             return
         conf = self.conf()
-        if self._spawn("boxinfo", lambda: self.box_info(conf, force=became_trusted), self._boxinfo_done):
+        if self._spawn("boxinfo", lambda: self.box_info(conf, force=now_please), self._boxinfo_done):
             self._next_boxinfo = self.mono() + self.BOXINFO_EVERY
+            self._clock_stepped = False
 
     def _boxinfo_done(self, outcome, epoch) -> None:
         if outcome[0] == "error":
