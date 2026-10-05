@@ -3,10 +3,12 @@ address watch, reconciling the update result. Pi-hole is the in-memory mock; eve
 systemd, reboot, pihole-FTL) is a fake that records what it was asked, so no test can reboot or update this machine."""
 import datetime as dt
 import contextlib
+import fcntl
 import importlib.machinery
 import importlib.util
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -1368,6 +1370,25 @@ class RunnerStartTests(unittest.TestCase):
             self.assertTrue(pb.start_update_runner())
         popen.assert_not_called()
 
+    def test_the_repair_runs_as_a_unit_of_its_own_too_and_falls_back_to_its_own_log(self):
+        with mock.patch.object(pb.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run, \
+                mock.patch.object(pb.subprocess, "Popen") as popen:
+            self.assertTrue(pb.start_repair_runner())
+        popen.assert_not_called()
+        cmd = run.call_args[0][0]
+        self.assertEqual(cmd[cmd.index("--unit") + 1], "sinko-repair", "not the update's unit: both can be told apart and neither blocks the other's name")
+        self.assertIn("--description=Sinko repair", cmd)
+        self.assertEqual(cmd[-1:], ["repair"])
+        with mock.patch.object(pb.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "no bus")), \
+                mock.patch.object(pb, "unit_active", return_value=False) as active, \
+                mock.patch.object(pb.subprocess, "Popen") as popen, self.assertLogs("sinko", level="WARNING") as logs:
+            self.assertTrue(pb.start_repair_runner())
+        active.assert_called_with("sinko-repair")
+        self.assertEqual(popen.call_args[0][0][-1:], ["repair"])
+        self.assertIn("could not start the repair", logs.records[0].getMessage())
+        self.assertTrue(os.path.exists(pb.state_path("repair.log")))
+        self.assertFalse(os.path.exists(pb.state_path("update.log")))
+
     def test_power_commands(self):
         with mock.patch.object(pb.subprocess, "run") as run:
             pb.run_power("reboot")
@@ -1857,7 +1878,7 @@ class TickDoesNotWaitTests(Fixture):
         class FakeMaintenance:
             api = None
 
-            def __init__(self, clock_ok=None):
+            def __init__(self, clock_ok=None, **kw):
                 pass
 
             def run(self, now):
@@ -1895,7 +1916,7 @@ class TickDoesNotWaitTests(Fixture):
         class FakeMaintenance:
             api = None
 
-            def __init__(self, clock_ok=None):
+            def __init__(self, clock_ok=None, **kw):
                 pass
 
             def run(self, now):
@@ -2002,6 +2023,231 @@ class EverythingFailsTests(Fixture):
         self.assertEqual(self.state()["power"], {"request": None, "action": None})
         self.assertEqual(self.power_calls, [], "the power request came while the update was starting: dropped")
         self.assertEqual(self.rules(), json.dumps([g for g in self.store.groups if g["name"] != "pb-state"], sort_keys=True))
+
+
+class PageRepairTests(Fixture):
+    """An update cut off between the program and the page leaves a box of two versions that nothing else puts right:
+    after ten minutes of that, with nothing running and Sinko not removed on purpose, the scheduler starts `sinko repair`
+    (the installer, from the copy on the box), at most once an hour, and the note of the last try survives its restart."""
+
+    def setUp(self):
+        super().setUp()
+        self.shown = "2.9.0"                                    # the page of the version before
+        self.repairs = []
+        self.repair_result = True
+        self.app = os.path.join(self.tmp, "app")
+        os.makedirs(os.path.join(self.app, "src"))
+        self.put_source(pb.VERSION)
+        patch = mock.patch.object(pb, "APP_DIR", self.app)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.arm(self.m)
+
+    def put_source(self, version):
+        with open(os.path.join(self.app, "src", "VERSION"), "w") as fh:
+            fh.write(version + "\n")
+
+    def start_repair(self):
+        self.repairs.append(self.now)
+        self.seen_note = os.path.exists(pb.state_path("repair.json"))
+        if isinstance(self.repair_result, Exception):
+            raise self.repair_result
+        return self.repair_result
+
+    def arm(self, m):
+        m.page_version = lambda: self.shown
+        m.start_repair = self.start_repair
+        return m
+
+    def watch(self, minutes, m=None):
+        """Time passes, a minute at a time (the page's version is looked at once a minute), passes of the scheduler between."""
+        for _ in range(int(minutes)):
+            self.advance(60)
+            if m is None:
+                self.settle()
+            else:
+                m.run(self.now)
+                m.run(self.now)
+
+    def test_nothing_happens_while_the_versions_agree(self):
+        self.shown = pb.VERSION
+        self.watch(120)
+        self.assertEqual(self.repairs, [])
+        self.assertFalse(os.path.exists(pb.state_path("repair.json")))
+
+    def test_ten_minutes_of_two_versions_start_one_repair_and_nine_do_not(self):
+        self.watch(8)
+        self.assertEqual(self.repairs, [])
+        with self.assertLogs("sinko", level="WARNING") as logs:
+            self.watch(5)
+        self.assertEqual(len(self.repairs), 1)
+        self.assertIn("(2.9.0) and the program (%s) have been of different versions" % pb.VERSION, logs.records[0].getMessage())
+        self.assertIn("at most once an hour", logs.records[0].getMessage())
+        self.assertTrue(self.seen_note, "the note that it was tried is on disk before the repair starts: it restarts this scheduler")
+
+    def test_a_page_that_is_right_again_starts_the_ten_minutes_over(self):
+        self.watch(8)
+        self.shown = pb.VERSION
+        self.watch(2)
+        self.shown = "2.9.0"
+        self.watch(8)
+        self.assertEqual(self.repairs, [], "eight and eight is not ten in a row")
+        with self.assertLogs("sinko", level="WARNING"):
+            self.watch(4)
+        self.assertEqual(len(self.repairs), 1)
+
+    def test_a_page_without_a_version_file_counts_as_a_different_version(self):
+        self.shown = None
+        with self.assertLogs("sinko", level="WARNING") as logs:
+            self.watch(13)
+        self.assertEqual(len(self.repairs), 1)
+        self.assertIn("no version", logs.records[0].getMessage())
+
+    def test_not_while_an_update_or_an_installation_runs_and_the_ten_minutes_start_when_it_is_over(self):
+        holder = pb.RunLock()
+        self.assertTrue(holder.acquire())
+        self.watch(15)                                           # (an update's runner holds this lock for as long as it lives)
+        holder.release()
+        self.assertEqual(self.repairs, [])
+        install = pb.open_lock_file("install.lock")              # the installer, started by hand
+        fcntl.flock(install, fcntl.LOCK_EX)
+        self.watch(15)
+        self.assertEqual(self.repairs, [])
+        os.close(install)
+        self.watch(9)
+        self.assertEqual(self.repairs, [], "the ten minutes begin when it is over, not when it began")
+        with self.assertLogs("sinko", level="WARNING"):
+            self.watch(3)
+        self.assertEqual(len(self.repairs), 1)
+
+    def test_not_while_the_state_says_an_update_is_running(self):
+        for _ in range(15):
+            self.set_state(lambda s: s["update"].update(status="running", at=self.now.timestamp(), to="3.1.0"))
+            self.watch(1)
+        self.assertEqual(self.repairs, [])
+
+    def test_not_after_sinko_was_removed_on_purpose(self):
+        pb.ensure_state_dir()
+        pb.atomic_write(pb.removed_flag(), "1\n")
+        self.watch(120)
+        self.assertEqual(self.repairs, [])
+
+    def test_not_without_a_copy_of_this_very_version_to_install_from(self):
+        self.put_source("2.9.0")
+        self.watch(30)
+        self.assertEqual(self.repairs, [], "the copy is another version's")
+        shutil.rmtree(os.path.join(self.app, "src"))
+        self.watch(30)
+        self.assertEqual(self.repairs, [], "no copy at all")
+        os.makedirs(os.path.join(self.app, "src"))
+        self.put_source(pb.VERSION)
+        with self.assertLogs("sinko", level="WARNING"):
+            self.watch(2)
+        self.assertEqual(len(self.repairs), 1, "and as soon as there is one")
+
+    def test_not_on_a_clock_that_is_not_believed(self):
+        self.clock_trusted = False
+        self.watch(30)
+        self.assertEqual(self.repairs, [])
+        self.clock_trusted = True
+        with self.assertLogs("sinko", level="WARNING"):
+            self.watch(1)
+        self.assertEqual(len(self.repairs), 1)
+
+    def test_at_most_once_an_hour_whatever_restarts_in_between(self):
+        with self.assertLogs("sinko", level="WARNING"):
+            self.watch(12)
+        self.assertEqual(len(self.repairs), 1)
+        # The repair restarted the scheduler: a new process, with no memory but the note on disk. The page is still wrong.
+        fresh = self.arm(pb.Maintenance(self.api, config_path=self.config_path, monotonic=lambda: self.mono, job_factory=InlineJob,
+                                        clock_ok=lambda: self.clock_trusted, check=lambda c: None, default_ip=lambda: self.ip,
+                                        box_info=self.fake_box_info, catalog=lambda: self.catalog))
+        self.watch(40, fresh)
+        self.assertEqual(len(self.repairs), 1, "not within the hour (the old process started it 52 minutes ago)")
+        with self.assertLogs("sinko", level="WARNING"):
+            self.watch(20, fresh)
+        self.assertEqual(len(self.repairs), 2, "and again once the hour is over")
+
+    def test_a_note_from_the_future_does_not_block_for_ever(self):
+        pb.ensure_state_dir()
+        pb.atomic_write(pb.state_path("repair.json"), json.dumps({"at": self.now.timestamp() + 10 * 86400}))
+        with self.assertLogs("sinko", level="WARNING"):
+            self.watch(13)
+        self.assertEqual(len(self.repairs), 1)
+        for junk in ("garbage", "[]", '{"at": "x"}', '{"at": 1' + "0" * 400 + "}"):
+            pb.atomic_write(pb.state_path("repair.json"), junk)
+            self.assertTrue(pb.repair_due(self.now.timestamp()), junk)
+
+    def test_a_failing_look_is_logged_once_and_never_stops_anything(self):
+        def broken():
+            raise OSError("the card is read-only")
+        self.m.page_version = broken
+        with self.assertLogs("sinko", level="WARNING") as logs:
+            self.watch(20)
+        self.assertEqual(len([r for r in logs.records if "version of the page" in r.getMessage()]), 1)
+        self.assertEqual(self.repairs, [])
+
+    def test_a_repair_that_cannot_be_started_is_logged_and_the_hour_still_counts(self):
+        self.repair_result = RuntimeError("no systemd")
+        with self.assertLogs("sinko", level="WARNING") as logs:
+            self.watch(13)
+        self.assertEqual(len(self.repairs), 1)
+        self.assertTrue([r for r in logs.records if "repair: no systemd" in r.getMessage()], [r.getMessage() for r in logs.records])
+        self.assertFalse(pb.repair_due(self.now.timestamp()), "so that a failing start is not tried every minute")
+
+    def test_a_runner_that_says_it_did_not_start_is_logged_too(self):
+        self.repair_result = False
+        with self.assertLogs("sinko", level="WARNING") as logs:
+            self.watch(13)
+        self.assertEqual(len(self.repairs), 1)
+        self.assertTrue([r for r in logs.records if "it could not be started" in r.getMessage()])
+
+    def test_the_repair_is_off_unless_the_scheduler_gave_it_both_hands(self):
+        for missing in ("page_version", "start_repair"):
+            m = pb.Maintenance(self.api, config_path=self.config_path, monotonic=lambda: self.mono, job_factory=InlineJob,
+                               clock_ok=lambda: self.clock_trusted, check=lambda c: None, default_ip=lambda: self.ip,
+                               box_info=self.fake_box_info, catalog=lambda: self.catalog)
+            self.arm(m)
+            setattr(m, missing, None)
+            self.watch(30, m)
+        self.assertEqual(self.repairs, [])
+        self.assertEqual(pb.Maintenance(self.api).page_version, None)
+        self.assertEqual(pb.Maintenance(self.api).start_repair, None)
+
+    def test_the_scheduler_builds_its_maintenance_with_the_real_ones(self):
+        built = {}
+
+        class Spy:
+            def __init__(self, **kw):
+                built.update(kw)
+        with mock.patch.object(pb, "Maintenance", Spy):
+            pb.Scheduler()
+        self.assertEqual(built["start_repair"], pb.start_repair_runner)
+        self.assertEqual(built["page_version"].__self__.__class__, pb.PageWatch)
+
+    def test_the_look_at_the_page_asks_pihole_for_the_web_root_once(self):
+        os.makedirs(os.path.join(self.webroot, "pb"))
+        with open(os.path.join(self.webroot, "pb", "version.txt"), "w") as fh:
+            fh.write("3.0.0\n")
+        with mock.patch.dict(os.environ):
+            os.environ.pop("SINKO_WEBROOT")
+            with mock.patch.object(pb, "ftl_config", return_value=self.webroot) as asked:
+                watch = pb.PageWatch()
+                self.assertEqual((watch.version(), watch.version(), watch.version()), ("3.0.0",) * 3)
+                self.assertEqual(asked.call_count, 1)
+            with mock.patch.object(pb, "ftl_config", side_effect=OSError("no pihole-FTL")) as asked, \
+                    mock.patch.object(pb, "page_version", return_value="3.0.0") as read:
+                watch = pb.PageWatch()
+                with mock.patch.object(pb.os.path, "isdir", return_value=False), self.assertRaises(OSError) as caught:
+                    watch.version()
+                self.assertIn("cannot be asked of Pi-hole", str(caught.exception), "not 'there is no page': nothing is known")
+                read.assert_not_called()
+                with mock.patch.object(pb.os.path, "isdir", return_value=True):
+                    self.assertEqual(watch.version(), "3.0.0")
+                self.assertEqual(asked.call_count, 2, "an answer that did not come is asked for again")
+                self.assertEqual(read.call_args[0][0], "/var/www/html", "and meanwhile the usual place is looked at, if the page is there")
+        self.assertEqual(pb.page_version(self.webroot), "3.0.0")
+        self.assertIsNone(pb.page_version(os.path.join(self.webroot, "nowhere")))
 
 
 class ClockGuardTests(unittest.TestCase):
@@ -2250,7 +2496,7 @@ class ClockHoldTests(Fixture):
         class FakeMaintenance:
             api = None
 
-            def __init__(self, clock_ok=None):
+            def __init__(self, clock_ok=None, **kw):
                 seen["maintenance"] = clock_ok
 
             def run(self, now):

@@ -14,6 +14,9 @@ Commands
                --ref pins the box to that release or branch once the update has worked (a failed update leaves the
                choice as it was); --ref latest follows the newest release again. Needs more than 200 MB free.
   rollback     Go back to the previous version stored on this box (also needs more than 200 MB free).
+  repair       Install this version again from the copy on the box when the page and the program are of different
+               versions (an update was cut short). Nothing is downloaded. The scheduler runs it by itself after ten
+               minutes of such a state, at most once an hour.
   selfcheck    Check that the installation works (run after every update): Pi-hole objects, the scheduler (up for a
                while and finishing its passes), every file of the page.
   telemetry    The optional anonymous counter: on, off (and the counter forgets this box), status, payload (what
@@ -1956,6 +1959,39 @@ def installed_source_web():
     return path if os.path.isdir(path) else None
 
 
+def page_version(root=None):
+    """The version the installed page says it is (pb/version.txt in the web root), or None when it says none."""
+    try:
+        with open(os.path.join(root or webroot(), "pb", "version.txt"), encoding="utf-8") as fh:
+            return fh.read(64).strip() or None
+    except (OSError, ValueError):
+        return None
+
+
+class PageWatch:
+    """What the scheduler asks, once a minute, about the installed page: its version. The web root comes from Pi-hole's
+    settings (a subprocess), so it is asked once and kept. When Pi-hole cannot say, the usual place is looked at if the
+    page is there, and otherwise nothing is known (an error, not "no page"): a box must not be reinstalled because a
+    question was not answered."""
+
+    DEFAULT_ROOT = "/var/www/html"
+
+    def __init__(self):
+        self._root = None
+
+    def version(self):
+        root = self._root or os.environ.get("SINKO_WEBROOT")
+        if not root:
+            value, err = ftl_try("webserver.paths.webroot")
+            if value and err is None:
+                self._root = root = value
+            elif os.path.isdir(os.path.join(self.DEFAULT_ROOT, "pb")):
+                root = self.DEFAULT_ROOT
+            else:
+                raise OSError("the web root cannot be asked of Pi-hole just now (%s)" % short_text(err or "no answer", 60))
+        return page_version(root)
+
+
 def selfcheck_round(catalog: dict, scheduler=None) -> list:
     """[(ok, text)], one per check. `scheduler` replaces the check of the scheduler service (the scheduler itself,
     which has just been started and checks itself, cannot be asked whether it is running)."""
@@ -2003,11 +2039,7 @@ def selfcheck_round(catalog: dict, scheduler=None) -> list:
     root = webroot()
     problems = page_file_problems(root, installed_source_web())
     add(not problems, "page files installed in %s%s" % (root, " (missing: %s)" % ", ".join(problems[:3]) if problems else ""))
-    try:
-        with open(os.path.join(root, "pb", "version.txt"), encoding="utf-8") as fh:
-            shown = fh.read().strip()
-    except OSError:
-        shown = None
+    shown = page_version(root)
     add(shown == VERSION, "page and program are the same version (page: %s, program: %s)" % (shown or "none", VERSION))
     return results
 
@@ -2611,14 +2643,24 @@ def refresh_box_info(**kw) -> None:
 
 
 def start_update_runner() -> bool:
-    """Start `sinko update --yes --from-panel` so that it outlives the restart of this service, which the installer
-    causes: as its own transient systemd unit, and if systemd refuses, as a detached process."""
-    argv = [sys.executable, os.path.abspath(__file__), "update", "--yes", "--from-panel"]
+    """Start `sinko update --yes --from-panel` (see start_runner)."""
+    return start_runner("sinko-update", "Sinko update", ["update", "--yes", "--from-panel"], "update.log", "the update")
+
+
+def start_repair_runner() -> bool:
+    """Start `sinko repair` (see start_runner)."""
+    return start_runner("sinko-repair", "Sinko repair", ["repair"], "repair.log", "the repair")
+
+
+def start_runner(unit: str, description: str, args: list, log_name: str, what: str) -> bool:
+    """Start `sinko <args>` so that it outlives the restart of this service, which the installer causes: as its own
+    transient systemd unit, and if systemd refuses, as a detached process."""
+    argv = [sys.executable, os.path.abspath(__file__)] + args
     # systemd-run does not pass the environment on. Forward the SINKO_* settings (test hooks, overrides), but never
     # anything that could be a secret: the command line of a unit is visible to every user and is logged.
     setenv = ["--setenv=%s=%s" % (k, v) for k, v in sorted(os.environ.items())
               if k.startswith("SINKO_") and not re.search(r"PASS|SECRET|TOKEN|KEY", k)]
-    cmd = ["systemd-run", "--unit", "sinko-update", "--collect", "--quiet", "--description=Sinko update"] + setenv + ["--"] + argv
+    cmd = ["systemd-run", "--unit", unit, "--collect", "--quiet", "--description=" + description] + setenv + ["--"] + argv
     try:
         done = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
         if done.returncode == 0:
@@ -2626,11 +2668,11 @@ def start_update_runner() -> bool:
         why = done.stderr.strip()
     except (OSError, subprocess.SubprocessError) as err:
         why = str(err)
-    if unit_active("sinko-update"):
+    if unit_active(unit):
         return True                           # a runner from an earlier attempt is still going; it owns the result
-    log.warning("systemd-run could not start the update (%s); starting it directly", short_text(why, 100))
+    log.warning("systemd-run could not start %s (%s); starting it directly", what, short_text(why, 100))
     ensure_state_dir()
-    fd = os.open(state_path("update.log"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = os.open(state_path(log_name), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         # A detached process stays in this service's control group, so a restart of the service may still end it;
         # the scheduler then marks the update as not finished. systemd-run is the dependable way.
@@ -2639,6 +2681,40 @@ def start_update_runner() -> bool:
         os.close(fd)
     threading.Thread(target=proc.wait, daemon=True).start()          # reaps it when it ends
     return True
+
+
+REPAIR_FILE = "repair.json"
+REPAIR_EVERY = 3600                         # at most one repair an hour, whatever restarts in between
+
+
+def repair_due(epoch: float) -> bool:
+    """No repair was started within the last hour (the note is in the state folder: the installer restarts the scheduler,
+    and a new process must not forget that it has just tried)."""
+    raw = read_json_file(state_path(REPAIR_FILE))
+    at = raw.get("at") if isinstance(raw, dict) else None
+    return not _is_number(at) or not 0 <= epoch - at < REPAIR_EVERY
+
+
+def note_repair(epoch: float) -> None:
+    ensure_state_dir()
+    atomic_write(state_path(REPAIR_FILE), json.dumps({"at": epoch}))
+
+
+def install_lock_held() -> bool:
+    """Is the installer running (it holds install.lock for as long as it runs)?"""
+    try:
+        fd = open_lock_file("install.lock")
+    except OSError:
+        return False                         # a lock that cannot even be opened is not held by an installer
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)                         # (closing also drops the lock just taken)
+    return False
 
 
 def run_power(action: str) -> None:
@@ -2902,10 +2978,13 @@ class Maintenance:
     HEAL_CHECK_EVERY = 300            # looking for missing lists (missing groups are seen on every pass)
     HEAL_STREAK = 3                   # passes in a row that must see something missing (FTL may be rebuilding gravity)
     HEAL_EVERY = 3600                 # at most one repair an hour
+    PAGE_LOOK_EVERY = 60              # the page's version file is read this often (it needs pihole-FTL's settings: a job)
+    REPAIR_AFTER = 600                # the page and the program must have been of different versions this long (seconds)
 
     def __init__(self, api=None, config_path=None, monotonic=time.monotonic, job_factory=BackgroundJob, clock_ok=None,
                  check=None, start_runner=None, power=None, default_ip=None, apply_address=None, ping=None, body=None,
-                 jitter=None, box_info=None, forget=None, heal=None, recover=None, catalog=None):
+                 jitter=None, box_info=None, forget=None, heal=None, recover=None, catalog=None, page_version=None,
+                 start_repair=None):
         self.api = api
         self.config_path = config_path or CONFIG_FILE
         self.mono = monotonic
@@ -2924,6 +3003,10 @@ class Maintenance:
         self.heal = heal or run_self_heal
         self.recover = recover or recover_check
         self.catalog = catalog or load_catalog_safely
+        # The repair of a half-finished update (see _page) is off unless both are given: the scheduler gives the real ones,
+        # and a test that does not mean to start an installer cannot do it by accident.
+        self.page_version = page_version
+        self.start_repair = start_repair
         started = monotonic()
         self._next_check = started + self.CHECK_FIRST
         self._next_address = started + self.ADDRESS_FIRST
@@ -2932,6 +3015,8 @@ class Maintenance:
         self._next_boxinfo = started + self.BOXINFO_FIRST
         self._next_heal_check = started
         self._next_heal = started
+        self._next_page_look = started
+        self._mismatch_since = None       # when the page and the program were first seen to be of different versions
         self._heal_streak = 0
         self._lists_missing = []
         self._catalog = None
@@ -2960,7 +3045,8 @@ class Maintenance:
         self._state = None
         steps = (("jobs", self._collect), ("reconcile", self._reconcile), ("check", self._check),
                  ("update", self._update), ("power", self._power), ("address", self._address),
-                 ("box.json", self._boxinfo), ("telemetry", self._telemetry), ("self-repair", self._heal))
+                 ("box.json", self._boxinfo), ("telemetry", self._telemetry), ("self-repair", self._heal),
+                 ("page", self._page))
         try:
             self._cur()
         except LookupError:
@@ -3452,6 +3538,62 @@ class Maintenance:
             if self._gate_allows("heal-start"):
                 log.warning("Pi-hole lacks %s: setting Sinko up again (at most once an hour)", what)
 
+    # ----- the page and the program are of one version -----
+    def _page(self, now, epoch) -> None:
+        """An update that is cut off (the power goes) between the replacing of the program and the replacing of the page
+        leaves a box with a new program and the old page, or the other way round after a rollback. The box still filters
+        and keeps bedtime, but nothing else puts it right: the update says "already the newest version" (the program has
+        it), the check of the box says the versions differ, and a box nobody can log in to cannot be told to install
+        again. So: when the page and the program have been of different versions for ten minutes, with no update or
+        installation running and the box not removed on purpose, `sinko repair` installs this version again from the
+        copy on the box (nothing is downloaded), as a unit of its own because the installer restarts this scheduler. At
+        most once an hour, and the note of the last try is kept on disk, because the restart forgets everything here."""
+        if self.page_version is None or self.start_repair is None:
+            return
+        if self._repair_blocked():
+            self._mismatch_since = None
+            return
+        if self.mono() < self._next_page_look:
+            return
+        self._next_page_look = self.mono() + self.PAGE_LOOK_EVERY
+        self._spawn("page", self.page_version, self._page_seen)
+
+    @staticmethod
+    def _repair_blocked() -> bool:
+        return os.path.exists(state_path("removed")) or install_lock_held()
+
+    def _page_seen(self, outcome, epoch) -> None:
+        status, shown = outcome
+        if status == "error":
+            self._complain("version of the page", shown)
+            return
+        now = self.mono()
+        if shown == VERSION:
+            self._mismatch_since = None
+            return
+        if self._mismatch_since is None:
+            self._mismatch_since = now
+            return
+        if (now - self._mismatch_since < self.REPAIR_AFTER or not self.clock_ok() or self._repair_blocked()
+                or self._update_going() or read_version_file(os.path.join(APP_DIR, "src")) != VERSION
+                or not repair_due(epoch)):
+            return
+        log.warning("the page (%s) and the program (%s) have been of different versions for %d minutes (an update was "
+                    "probably cut short): installing this version again from the copy on the box (at most once an hour)",
+                    short_text(shown or "no version", 20), VERSION, (now - self._mismatch_since) // 60)
+        note_repair(epoch)
+        self._mismatch_since = None
+        self._actions.append("page and program differ: repairing")
+        if not self._spawn("repair", self.start_repair, self._repair_started):
+            self._repair_started(("ok", False), epoch)
+
+    def _repair_started(self, outcome, epoch) -> None:
+        status, value = outcome
+        if status == "error":
+            self._complain("repair", value)
+        elif not value:
+            self._complain("repair", "it could not be started")
+
     def _update_going(self) -> bool:
         """An update is being installed (the installer sets everything up itself, and may be in the middle of it)."""
         try:
@@ -3716,7 +3858,8 @@ class Scheduler:
 
     def __init__(self, clock=None, maintenance=None, gate=None, repair=None, monotonic=time.monotonic):
         self.clock = clock or ClockGuard()
-        self.maintenance = maintenance if maintenance is not None else Maintenance(clock_ok=self.clock.trusted)
+        self.maintenance = maintenance if maintenance is not None else Maintenance(
+            clock_ok=self.clock.trusted, page_version=PageWatch().version, start_repair=start_repair_runner)
         self.gate = gate or LogGate()
         self.repair = repair or repair_catalog_files
         self.mono = monotonic
@@ -5017,6 +5160,76 @@ def cmd_rollback(args) -> int:
     return 0
 
 
+def note_repaired() -> None:
+    """The update that was cut short has been finished by the repair, and the shared state still says it failed (the
+    scheduler wrote that when it found the box in two versions): say that it worked. Never raises."""
+    def mark(state):
+        up = state["update"]
+        if up["status"] == "failed" and up["to"] == VERSION:
+            up.update(status="ok", error=None, rolledBack=None, at=time.time())
+        if up["latest"] and not is_newer(up["latest"], VERSION):
+            up["latest"] = up["notes"] = None
+    try:
+        api = Api()
+        api.login()
+        try:
+            patch_state(api, mark)
+        finally:
+            drop_session(api)
+    except TRANSPORT_ERRORS as err:
+        log.warning("could not record the repair in the shared state: %s", short_text(err, 100))
+
+
+def cmd_repair(args) -> int:
+    """`sinko repair`: the page and the program are of different versions (an update was cut short): install this version
+    again from the copy of it on the box, /opt/sinko/src. Nothing is downloaded, so it works without the internet. The
+    scheduler starts it by itself, as a unit of its own, after ten minutes of such a state."""
+    conf = read_config(CONFIG_FILE)
+    try:
+        lock = Updater._take_lock()                 # the update's lock: no update, rollback or repair runs at the same time
+    except UpdateError as err:
+        print("sinko: %s" % err, file=sys.stderr)
+        return 1
+    try:
+        if os.path.exists(removed_flag()):
+            print("sinko: Sinko was removed from this box on purpose, so nothing is repaired. To set it up again: sudo sinko setup",
+                  file=sys.stderr)
+            return 1
+        src = os.path.join(APP_DIR, "src")
+        have = read_version_file(src)
+        if have != VERSION:
+            print("sinko: there is no copy of version %s on this box to install again (%s holds %s)."
+                  % (VERSION, src, have or "no version"), file=sys.stderr)
+            return 1
+        shown = page_version()
+        if shown == VERSION:
+            print("The page and the program are both version %s: nothing to repair." % VERSION)
+            return 0
+        try:
+            Updater._require_free_space()
+            ref = release_settings(conf)["ref"]
+        except UpdateError as err:
+            print("sinko: %s" % err, file=sys.stderr)
+            return 1
+        print("The page is %s and the program is %s. Installing %s again from %s ..." % (shown or "missing", VERSION, VERSION, src))
+        sync_disks()
+        code = run_installer(src, ref)
+        if code != 0:
+            print("sinko: the installer stopped with an error (exit status %s)." % code, file=sys.stderr)
+            return 1
+        sync_disks()
+        ok, detail = run_installed_selfcheck()
+        if not ok:
+            print("sinko: it was installed again, but the box does not pass its own check (%s)." % (detail or "no reason given"),
+                  file=sys.stderr)
+            return 1
+        note_repaired()
+        print("Sinko %s is installed again, and the page and the program agree." % VERSION)
+        return 0
+    finally:
+        lock.release()
+
+
 def cmd_selfcheck(args) -> int:
     return run_selfcheck(args.wait)
 
@@ -5090,6 +5303,9 @@ def main(argv=None) -> int:
                    description="Go back to the previous version stored on this box. Needs more than 200 MB of free space "
                    "(nothing is changed without it)."
                    ).set_defaults(fn=cmd_rollback)
+    sub.add_parser("repair", help="install this version again from the copy on the box when the page and the program are of "
+                   "different versions (an update was cut short; the scheduler does it by itself after ten minutes)"
+                   ).set_defaults(fn=cmd_repair)
     p = sub.add_parser("selfcheck", help="check that the installation works (used after every update; the scheduler must have run for 20 seconds)")
     p.add_argument("--wait", type=float, default=0, help="keep trying for this many seconds while services start")
     p.set_defaults(fn=cmd_selfcheck)

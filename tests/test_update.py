@@ -1721,6 +1721,200 @@ class CommandTests(Box):
         self.assertEqual(self.installed(), "2.9.0")
 
 
+class RepairCommandTests(Box):
+    """`sinko repair`: the page and the program are of different versions (an update was cut short), so this version is
+    installed again from the copy of it on the box. Nothing is downloaded, so it works without the internet. The
+    installer and the self-check are fakes that record what they were asked."""
+
+    def setUp(self):
+        super().setUp()
+        self.www = os.path.join(self.tmp, "www")
+        os.makedirs(os.path.join(self.www, "pb"))
+        self.put_page("2.9.0")
+        src = os.path.join(self.app, "src")
+        os.makedirs(src)
+        with open(os.path.join(src, "VERSION"), "w") as fh:
+            fh.write(pb.VERSION + "\n")
+        env = mock.patch.dict(os.environ, {"SINKO_WEBROOT": self.www})
+        env.start()
+        self.addCleanup(env.stop)
+        self.installer_calls = []
+        self.installer_code = 0
+        self.installer_fixes_the_page = True
+        self.check_calls = []
+        self.check_answer = (True, "")
+        self.noted = []
+        for patch in (mock.patch.object(pb, "run_installer", self.fake_installer),
+                      mock.patch.object(pb, "run_installed_selfcheck", self.fake_check),
+                      mock.patch.object(pb, "note_repaired", lambda: self.noted.append(1))):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def put_page(self, version):
+        with open(os.path.join(self.www, "pb", "version.txt"), "w") as fh:
+            fh.write(version + "\n")
+
+    def fake_installer(self, src, ref):
+        self.installer_calls.append((src, ref, pb.RunLock.is_held()))
+        if self.installer_fixes_the_page and self.installer_code == 0:
+            self.put_page(pb.VERSION)
+        return self.installer_code
+
+    def fake_check(self, wait=pb.SELFCHECK_WAIT):
+        self.check_calls.append(wait)
+        return self.check_answer
+
+    def repair(self):
+        return CommandTests.run_cli(self, "repair")
+
+    def test_it_installs_this_version_again_from_the_copy_on_the_box_and_says_so(self):
+        code, out, err = self.repair()
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(self.installer_calls, [(os.path.join(self.app, "src"), "latest", True)],
+                         "from /opt/sinko/src, with the ref the box follows, while the update's lock is held")
+        self.assertEqual(self.check_calls, [pb.SELFCHECK_WAIT], "and the installed program was checked")
+        self.assertEqual(self.noted, [1], "and the state's failed update was marked as finished")
+        self.assertIn("The page is 2.9.0 and the program is %s" % pb.VERSION, out)
+        self.assertIn("installed again, and the page and the program agree", out)
+        self.assertEqual(self.site.count("sinko.tar.gz"), 0, "nothing was downloaded")
+        self.assertFalse(pb.RunLock.is_held(), "the lock was let go")
+
+    def test_a_page_without_a_version_file_is_repaired_too(self):
+        os.unlink(os.path.join(self.www, "pb", "version.txt"))
+        code, out, _ = self.repair()
+        self.assertEqual(code, 0)
+        self.assertIn("The page is missing", out)
+        self.assertEqual(len(self.installer_calls), 1)
+
+    def test_the_ref_of_the_settings_is_kept(self):
+        path = os.path.join(self.tmp, "config")
+        with open(path, "w") as fh:
+            fh.write("SINKO_REF=v3.0.0\n")
+        with mock.patch.object(pb, "CONFIG_FILE", path):
+            self.assertEqual(self.repair()[0], 0)
+        self.assertEqual(self.installer_calls[0][1], "v3.0.0", "a pinned box stays pinned")
+
+    def test_when_the_versions_agree_there_is_nothing_to_repair_and_nothing_is_installed(self):
+        self.put_page(pb.VERSION)
+        code, out, _ = self.repair()
+        self.assertEqual(code, 0)
+        self.assertIn("nothing to repair", out)
+        self.assertEqual((self.installer_calls, self.check_calls, self.noted), ([], [], []))
+
+    def test_without_a_copy_of_this_version_it_says_so_and_changes_nothing(self):
+        with open(os.path.join(self.app, "src", "VERSION"), "w") as fh:
+            fh.write("2.9.0\n")
+        code, _, err = self.repair()
+        self.assertEqual(code, 1)
+        self.assertIn("no copy of version %s on this box" % pb.VERSION, err)
+        self.assertIn("holds 2.9.0", err)
+        shutil.rmtree(os.path.join(self.app, "src"))
+        code, _, err = self.repair()
+        self.assertEqual(code, 1)
+        self.assertIn("holds no version", err)
+        self.assertEqual(self.installer_calls, [])
+
+    def test_after_sinko_was_removed_on_purpose_it_does_nothing(self):
+        pb.ensure_state_dir()
+        pb.atomic_write(pb.removed_flag(), "1\n")
+        code, _, err = self.repair()
+        self.assertEqual(code, 1)
+        self.assertIn("removed from this box on purpose", err)
+        self.assertEqual(self.installer_calls, [])
+
+    def test_never_at_the_same_time_as_an_update_a_rollback_or_another_repair(self):
+        holder = pb.RunLock()
+        self.assertTrue(holder.acquire())
+        self.addCleanup(holder.release)
+        code, _, err = self.repair()
+        self.assertEqual(code, 1)
+        self.assertIn("Another update is already running", err)
+        self.assertEqual(self.installer_calls, [])
+
+    def test_without_room_for_the_installer_it_does_not_start_it(self):
+        with mock.patch.object(pb.shutil, "disk_usage", return_value=mock.Mock(free=150 * MB)):
+            code, _, err = self.repair()
+        self.assertEqual(code, 1)
+        self.assertIn("not enough free space", err)
+        self.assertEqual(self.installer_calls, [])
+
+    def test_an_installer_that_fails_is_reported_and_the_box_is_not_called_repaired(self):
+        self.installer_code = 1
+        code, _, err = self.repair()
+        self.assertEqual(code, 1)
+        self.assertIn("installer stopped with an error (exit status 1)", err)
+        self.assertEqual((self.check_calls, self.noted), ([], []))
+        self.assertFalse(pb.RunLock.is_held())
+
+    def test_an_installation_that_does_not_pass_its_check_is_reported_and_not_marked_as_finished(self):
+        self.check_answer = (False, "the scheduler service is not running")
+        code, _, err = self.repair()
+        self.assertEqual(code, 1)
+        self.assertIn("does not pass its own check (the scheduler service is not running)", err)
+        self.assertEqual(self.noted, [])
+
+    def test_settings_that_cannot_be_used_are_said(self):
+        with mock.patch.dict(os.environ, {"SINKO_REPO_SLUG": "not a slug"}):
+            code, _, err = self.repair()
+        self.assertEqual(code, 1)
+        self.assertIn("not a GitHub name", err)
+        self.assertEqual(self.installer_calls, [])
+
+
+class RepairNoteTests(unittest.TestCase):
+    """After the repair the shared state must not go on saying that the update failed."""
+
+    def setUp(self):
+        self.httpd, self.store = fake_release.serve_pihole()
+        self.addCleanup(self.httpd.server_close)
+        self.addCleanup(self.httpd.shutdown)
+        self.api = pb.Api("http://127.0.0.1:%d" % self.httpd.server_port, password=mock_pihole.PASSWORD)
+        self.api.login()
+        pb.Controller(self.api, pb.load_catalog(LISTS), "https://lists.example/l").setup(run_gravity=False)
+        env = mock.patch.dict(os.environ, {"SINKO_API_URL": "http://127.0.0.1:%d" % self.httpd.server_port})
+        env.start()
+        self.addCleanup(env.stop)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with open(os.path.join(tmp.name, "pw"), "w") as fh:
+            fh.write(mock_pihole.PASSWORD)
+        patch = mock.patch.object(pb, "CLI_PW_FILE", os.path.join(tmp.name, "pw"))
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def state(self):
+        return pb.parse_state(next(g for g in self.store.groups if g["name"] == "pb-state")["comment"])
+
+    def put(self, **update):
+        state = self.state()
+        state["update"].update(update)
+        pb.Controller(self.api, pb.load_catalog(LISTS)).write_state(state)
+
+    def test_the_failed_update_to_this_version_is_marked_as_finished(self):
+        self.put(status="failed", to=pb.VERSION, error="The update did not finish, and the box does not pass its own check",
+                 rolledBack=False, latest=pb.VERSION, notes="https://github.com/iret33/sinko/releases/tag/v" + pb.VERSION)
+        pb.note_repaired()
+        u = self.state()["update"]
+        self.assertEqual((u["status"], u["error"], u["rolledBack"], u["latest"], u["notes"]), ("ok", None, None, None, None))
+        self.assertGreater(u["at"], time.time() - 60)
+
+    def test_anything_else_in_the_state_is_left_alone(self):
+        self.put(status="failed", to="3.9.9", error="x", rolledBack=True, auto=True)
+        before = self.state()
+        pb.note_repaired()
+        self.assertEqual(self.state(), before, "a failure of another release is not this repair's to clear")
+        self.put(status="ok", to=pb.VERSION, at=5, auto=True)
+        writes = self.store.writes
+        pb.note_repaired()
+        self.assertEqual(self.store.writes, writes, "nothing to change, nothing written")
+
+    def test_pihole_not_answering_is_logged_not_raised(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        with self.assertLogs("sinko", level="WARNING"):
+            pb.note_repaired()
+
+
 class RollbackNoteTests(unittest.TestCase):
     """After a rollback by hand the box must not install the same release again the next night."""
 

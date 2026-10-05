@@ -137,7 +137,7 @@ class SeatLeakTests(LoopFixture):
         with mock.patch.object(pb.signal, "signal", lambda sig, handler: stop.update(handler=handler)), \
                 mock.patch.object(pb.time, "sleep", fake_sleep), \
                 mock.patch.object(pb.Controller, "tick", side_effect=TypeError("boom")), \
-                mock.patch.object(pb, "Maintenance", lambda clock_ok=None: self.m), \
+                mock.patch.object(pb, "Maintenance", lambda clock_ok=None, **kw: self.m), \
                 mock.patch.object(pb, "ClockGuard", lambda: guard), \
                 self.assertLogs("sinko", level="INFO") as logs:
             self.assertEqual(pb.cmd_run(None), 0)
