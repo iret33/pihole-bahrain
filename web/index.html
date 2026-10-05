@@ -21,6 +21,7 @@
 <body>
 
 <svg width="0" height="0" class="sprite" aria-hidden="true">
+  <symbol id="i-sinko" viewBox="0 0 24 24"><path d="M11.41 8.8A0.86 0.86 0 0 1 12.59 8.8L18.58 14.33A0.86 0.86 0 0 1 18.86 14.97L18.86 21.19A0.86 0.86 0 0 1 17.99 22.06L13.5 22.06V19.81a1.5 1.5 0 0 0 -3 0V22.06L6.01 22.06A0.86 0.86 0 0 1 5.14 21.19L5.14 14.97A0.86 0.86 0 0 1 5.42 14.33z" fill="currentColor"/><path d="M9.52 6.86A3.57 3.57 0 0 1 14.48 6.86M7.88 4.17A6.69 6.69 0 0 1 16.12 4.17" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
   <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11.5 12 5l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5h-5v5H5a1 1 0 0 1-1-1z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
   <symbol id="i-moon" viewBox="0 0 24 24"><path d="M19.5 14.6A7.5 7.5 0 0 1 9.4 4.5a7.5 7.5 0 1 0 10.1 10.1z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
   <symbol id="i-book" viewBox="0 0 24 24"><path d="M5 5.5A1.5 1.5 0 0 1 6.5 4H19v14H6.5A1.5 1.5 0 0 0 5 19.5zm0 14A1.5 1.5 0 0 0 6.5 21H19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
@@ -47,7 +48,7 @@
 
 <main id="login" class="login" hidden>
   <form id="loginForm" class="login-card" novalidate>
-    <span class="brand-mark"><svg><use href="#i-home"/></svg></span>
+    <span class="brand-mark"><svg aria-hidden="true"><use href="#i-sinko"/></svg></span>
     <div class="login-title">
       <h1 data-i18n="appName">Sinko</h1>
       <p class="tagline" data-i18n="tagline">Family internet</p>
@@ -71,7 +72,7 @@
 <!-- First run: the box has Sinko but no password yet. Choosing one is the first thing a parent does. -->
 <main id="claim" class="login" hidden>
   <form id="claimForm" class="login-card" novalidate>
-    <span class="brand-mark"><svg><use href="#i-home"/></svg></span>
+    <span class="brand-mark"><svg aria-hidden="true"><use href="#i-sinko"/></svg></span>
     <div class="login-title">
       <h1 data-i18n="claimTitle">Welcome to Sinko</h1>
       <p class="tagline" data-i18n="tagline">Family internet</p>
@@ -94,7 +95,7 @@
 
 <div id="app" class="app" hidden>
   <header class="topbar">
-    <div class="brand"><span class="brand-mark"><svg><use href="#i-home"/></svg></span><span data-i18n="appName">Sinko</span></div>
+    <div class="brand"><span class="brand-mark"><svg aria-hidden="true"><use href="#i-sinko"/></svg></span><span data-i18n="appName">Sinko</span></div>
     <div class="topbar-actions">
       <button type="button" class="link topbar-box" data-act="box"><svg aria-hidden="true"><use href="#i-box"/></svg><span data-i18n="boxButton">My box</span></button>
       <button type="button" class="link lang-toggle" data-act="lang">العربية</button>

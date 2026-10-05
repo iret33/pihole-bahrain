@@ -213,9 +213,78 @@ class BoxCopy(Copy, unittest.TestCase):
             self.assertIn("children", s["en"][key])
             self.assertIn("الأطفال", s["ar"][key])
 
-    def test_failure_text_says_the_previous_version_is_back(self):
-        self.assertIn("previous version is back", self.table()["en"]["boxFailedBack"])
-        self.assertIn("النسخة السابقة", self.table()["ar"]["boxFailedBack"])
+    def test_failure_text_says_the_previous_version_is_back_only_where_the_box_said_so(self):
+        s = self.table()
+        # boxFailedBack is shown for update.rolledBack === true only; the Arabic says "version" the way the rest of the sheet does (الإصدار).
+        self.assertIn("previous version is back", s["en"]["boxFailedBack"])
+        self.assertIn("الإصدار السابق", s["ar"]["boxFailedBack"])
+        for key in ("boxFailedNotBack", "boxFailedUnknown"):
+            self.assertNotIn("previous version is back", s["en"][key], key + " must not claim a recovery")
+            self.assertNotIn("عاد الإصدار", s["ar"][key], key)
+            self.assertIn("unplug the box, plug it back in", s["en"][key].lower(), key)
+            self.assertIn("ask whoever set up the box", s["en"][key], key)
+            self.assertIn("افصل الصندوق", s["ar"][key], key)
+            self.assertIn("من أعدّ الصندوق", s["ar"][key], key)
+
+    def test_the_technical_reason_is_never_part_of_the_parents_sentence(self):
+        s = self.table()
+        self.assertNotIn("boxFailedReason", s["en"], "update.error is English and technical: it goes in the collapsed details, not into a sentence")
+        for lang in ("en", "ar"):
+            for key, text in s[lang].items():
+                if key.startswith("boxFailed"):
+                    self.assertNotIn("{e}", text, "%s/%s prints the reason" % (lang, key))
+        self.assertEqual(s["en"]["boxDetailsTitle"], "Details for whoever helps you")
+
+    def test_nothing_said_while_an_update_runs_tells_a_parent_to_unplug_anything(self):
+        s = self.table()
+        for key in ("boxPowerWaitUpdate", "boxPowerDropped", "boxRunningNote", "boxStalled"):
+            self.assertNotRegex(s["en"][key], r"(?i)unplug|plug it back", key)
+            self.assertNotIn("افصل", s["ar"][key], key)
+        self.assertIn("plugged in", s["en"]["boxRunningNote"])
+        self.assertIn("update", s["en"]["boxPowerWaitUpdate"].lower())
+        self.assertIn("never switched off in the middle", s["en"]["boxPowerWaitUpdate"])
+
+    def test_switching_the_counter_off_says_the_box_asks_the_service_to_forget_it(self):
+        s = self.table()
+        for key in ("boxCounterForget", "boxCounterOffToast"):
+            self.assertRegex(s["en"][key], r"(?i)asks? the counter service to forget", key)
+            self.assertIn("خدمة العدّاد أن تنسى", s["ar"][key], key)
+        first = pbstrings.first_strings()
+        self.assertRegex(first["en"]["setupCounterText"], r"(?i)ask(s)? the counter service to forget")
+        self.assertIn("تنسى", first["ar"]["setupCounterText"])
+
+    def test_the_counter_card_says_what_the_counter_keeps_the_way_the_privacy_page_does(self):
+        s = self.table()
+        self.assertIn("first and last heard", s["en"]["boxCounterKept"])
+        self.assertIn("أول رسالة وآخر رسالة", s["ar"]["boxCounterKept"])
+        self.assertIn("the addresses of your devices", s["en"]["boxCounterNot"])
+        self.assertIn("عناوين أجهزتك", s["ar"]["boxCounterNot"])
+        self.assertIn("country", pbstrings.first_strings()["en"]["setupCounterText"])
+
+    def test_the_time_zone_notes_are_honest_and_offer_no_fix_the_page_cannot_give(self):
+        s = self.table()
+        for lang in ("en", "ar"):
+            for key in ("boxClockZoneKnown", "boxClockZoneUtc", "boxClockZoneDiffers"):
+                self.assertNotRegex(s[lang][key], r"(?i)timedatectl|sudo|systemctl", key)
+        self.assertIn("{z}", s["en"]["boxClockZoneKnown"])
+        self.assertIn("UTC", s["en"]["boxClockZoneUtc"])
+        self.assertIn("UTC", s["ar"]["boxClockZoneUtc"])
+        self.assertNotRegex(s["en"]["boxClockZoneUtc"], r"(?i)ask whoever|change the time zone|set the time zone")
+
+    def test_the_address_rows_say_what_each_is_for(self):
+        en = self.table()["en"]
+        self.assertEqual(en["boxNetIp"], "Address for your router")
+        self.assertEqual(len({en["boxNetIp"], en["boxNetName"], en["boxNetLocal"]}), 3)
+        self.assertNotIn("Easy name", en.values())
+
+    def test_the_arabic_sheet_calls_a_version_a_version_and_a_backup_a_backup(self):
+        ar = self.table()["ar"]
+        for key, text in ar.items():
+            self.assertNotIn("النسخة محدّثة", text, key)
+            self.assertNotIn("النسخة السابقة", text, key)
+            self.assertNotIn("تم تنزيل النسخة.", text, key)
+        self.assertIn("الاحتياطية", ar["boxBackupDone"])
+        self.assertNotEqual(ar["boxAboutTitle"], "حول")
 
 
 class NoCommandsForParents(unittest.TestCase):
@@ -228,6 +297,18 @@ class NoCommandsForParents(unittest.TestCase):
                 text = s[lang][key]
                 self.assertNotRegex(text, r"(?i)\b(sudo|systemctl|run:|ssh|terminal)\b", "%s/%s asks for a command" % (lang, key))
                 self.assertNotIn("sinko ", text.lower().replace("سينكو", ""), "%s/%s names a command" % (lang, key))
+
+    def test_the_router_help_never_puts_a_name_where_a_number_is_needed(self):
+        s = pbstrings.app_strings()
+        for lang in ("en", "ar"):
+            self.assertIn("{ip}", s[lang]["helpBody"])
+            no_number = s[lang]["helpBodyNoIp"]
+            self.assertNotIn("{ip}", no_number)
+            self.assertNotRegex(no_number, r"(?i)\.local\b|\.lan\b|family\.|sinko\.", "%s: no host name in the router sentence" % lang)
+            self.assertIn("192.168.1.50", no_number, "%s: an example of what a number address looks like" % lang)
+        self.assertIn("number address", s["en"]["helpBodyNoIp"])
+        self.assertIn("العنوان الرقمي", s["ar"]["helpBodyNoIp"])
+        self.assertEqual(sorted(s["en"]), sorted(s["ar"]))
 
     def test_the_remedy_for_a_stuck_box_is_unplugging_it(self):
         s = pbstrings.app_strings()

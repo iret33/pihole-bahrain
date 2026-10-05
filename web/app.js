@@ -40,7 +40,9 @@
       from: 'Off at', until: 'On at', nights: 'Nights', saveBedtime: 'Save bedtime', bedtimeSaved: 'Bedtime saved',
       pickNight: 'Pick at least one night.', sameTimes: 'Off and on times must be different.',
       advanced: 'Advanced settings', helpTitle: 'Setup help',
-      helpBody: 'For the rules to work, your router must send all devices to this box for DNS. In the router settings, set the DNS server to {ip} and reserve that address for the box. Then turn Wi\u2011Fi off and on again on each child\u2019s device.', close: 'Close', cancel: 'Cancel', start: 'Start', add: 'Add',
+      helpBody: 'For the rules to work, your router must send all devices to this box for DNS. In the router settings, set the DNS server to {ip} and reserve that address for the box. Then turn Wi\u2011Fi off and on again on each child\u2019s device.',
+      // When the page does not know the box's number address (no /pb/box.json, and the page was opened by a name): never a name in its place.
+      helpBodyNoIp: 'For the rules to work, your router must send all devices to this box for DNS. In the router settings, set the DNS server to the box\u2019s number address (four numbers with dots, such as 192.168.1.50) and reserve that address for the box. You can find the number in your router\u2019s list of connected devices: look for the box. Then turn Wi\u2011Fi off and on again on each child\u2019s device.', close: 'Close', cancel: 'Cancel', start: 'Start', add: 'Add',
       customMinutes: 'Or enter minutes', addHint: 'Pick your child\u2019s phone, tablet or console. Devices appear here after they have used the internet at home.',
       manual: 'Enter address by hand', addrLabel: 'MAC or IP address', nameLabel: 'Name',
       macTip: 'Tip: on the child\u2019s device, turn off \u201cPrivate Wi\u2011Fi address\u201d for your home network so it keeps the same address.',
@@ -93,7 +95,8 @@
       from: 'الإيقاف الساعة', until: 'التشغيل الساعة', nights: 'الليالي', saveBedtime: 'حفظ وقت النوم', bedtimeSaved: 'تم حفظ وقت النوم',
       pickNight: 'اختر ليلة واحدة على الأقل.', sameTimes: 'يجب أن يختلف وقت الإيقاف عن وقت التشغيل.',
       advanced: 'إعدادات متقدمة', helpTitle: 'مساعدة في الإعداد',
-      helpBody: 'لكي تعمل القواعد، يجب أن يوجّه جهاز الراوتر كل الأجهزة إلى صندوق العائلة لخدمة DNS. في إعدادات الراوتر، اجعل خادم DNS هو {ip} واحجز هذا العنوان للصندوق. ثم أطفئ Wi‑Fi وشغّله مجددًا على جهاز كل طفل.', close: 'إغلاق', cancel: 'إلغاء', start: 'ابدأ', add: 'إضافة',
+      helpBody: 'لكي تعمل القواعد، يجب أن يوجّه جهاز الراوتر كل الأجهزة إلى صندوق العائلة لخدمة DNS. في إعدادات الراوتر، اجعل خادم DNS هو {ip} واحجز هذا العنوان للصندوق. ثم أطفئ Wi‑Fi وشغّله مجددًا على جهاز كل طفل.',
+      helpBodyNoIp: 'لكي تعمل القواعد، يجب أن يوجّه جهاز الراوتر كل الأجهزة إلى صندوق العائلة لخدمة DNS. في إعدادات الراوتر، اجعل خادم DNS هو العنوان الرقمي للصندوق (أربعة أرقام تفصل بينها نقاط، مثل 192.168.1.50) واحجز هذا العنوان للصندوق. تجد الرقم في قائمة الأجهزة المتصلة في الراوتر: ابحث عن الصندوق. ثم أطفئ Wi‑Fi وشغّله مجددًا على جهاز كل طفل.', close: 'إغلاق', cancel: 'إلغاء', start: 'ابدأ', add: 'إضافة',
       customMinutes: 'أو أدخل عدد الدقائق', addHint: 'اختر هاتف طفلك أو جهازه اللوحي أو جهاز الألعاب. تظهر الأجهزة هنا بعد استخدامها للإنترنت في المنزل.',
       manual: 'إدخال العنوان يدويًا', addrLabel: 'عنوان MAC أو IP', nameLabel: 'الاسم',
       macTip: 'نصيحة: على جهاز الطفل، أوقف خيار «عنوان Wi‑Fi خاص» لشبكة المنزل حتى يحتفظ الجهاز بعنوان ثابت.',
@@ -295,7 +298,7 @@
       setupRouter: 'Router points to this box', setupRouterHow: 'No other device at home has used the box yet. See “Setup help” at the bottom of this page.', setupRouterBtn: 'Show setup help',
       setupChild: 'First child device added', setupChildHow: 'Add your child’s phone or tablet so the rules apply to it.',
       setupCounterQ: 'Help count Sinko boxes?', setupCounterDone: 'Counter question answered',
-      setupCounterText: 'Optional. Every few hours the box sends a random code, the Sinko version and the kind of box. Nothing about your family. You can change this in My box.',
+      setupCounterText: 'Optional. Every few hours the box sends a random code, the Sinko version and the kind of box. Nothing about your family. The counter also notes the country and when it last heard from the box. You can switch it off any time in My box, and the box then asks the counter service to forget it.',
       setupDone: 'done', setupTodo: 'not done yet',
       setupYes: 'Yes', setupNotNow: 'Not now', setupLaterToast: 'Okay. You can change this in My box.', setupDoneToast: 'Everything is set up.',
       updateReady: 'Sinko {v} is ready: open My box', updateRunning: 'Sinko is updating: open My box to follow it',
@@ -313,7 +316,7 @@
       setupRouter: 'الراوتر يوجّه الأجهزة إلى هذا الصندوق', setupRouterHow: 'لم يستخدم أي جهاز آخر في البيت الصندوق بعد. راجع «مساعدة في الإعداد» أسفل هذه الصفحة.', setupRouterBtn: 'عرض المساعدة',
       setupChild: 'إضافة أول جهاز لطفل', setupChildHow: 'أضف هاتف طفلك أو جهازه اللوحي لتُطبَّق عليه القواعد.',
       setupCounterQ: 'هل تساعد في عدّ صناديق سينكو؟', setupCounterDone: 'تمت الإجابة عن سؤال العدّاد',
-      setupCounterText: 'اختياري. يرسل الصندوق كل بضع ساعات رمزًا عشوائيًا ورقم إصدار سينكو ونوع الصندوق. لا شيء عن عائلتك. يمكنك تغيير ذلك من «صندوقي».',
+      setupCounterText: 'اختياري. يرسل الصندوق كل بضع ساعات رمزًا عشوائيًا ورقم إصدار سينكو ونوع الصندوق. لا شيء عن عائلتك. ويسجّل العدّاد أيضًا الدولة ووقت آخر رسالة من الصندوق. يمكنك إيقافه في أي وقت من «صندوقي»، وعندها يطلب الصندوق من خدمة العدّاد أن تنسى هذا الصندوق.',
       setupDone: 'تم', setupTodo: 'لم يتم بعد',
       setupYes: 'نعم', setupNotNow: 'ليس الآن', setupLaterToast: 'حسنًا. يمكنك تغيير ذلك من «صندوقي».', setupDoneToast: 'تم إعداد كل شيء.',
       updateReady: 'الإصدار {v} من سينكو جاهز: افتح صندوقي', updateRunning: 'يجري تحديث سينكو: افتح صندوقي للمتابعة',
@@ -339,6 +342,8 @@
   var pollTimer = null, tickTimer = null;
   var timerMode = 'free', timerMinutes = 0, pickedDevice = null;
   var serverOffsetMs = 0;            // box clock minus this device's clock, from the Date header of every API answer
+  var boxInfo = null;                // /pb/box.json as the box program writes it (parsed and checked); null = an older box, which has none
+  var heartbeatLateSince = 0;        // local time (ms) this page first saw the box's pulse late, 0 while it is not late
   var pageVersion = '';              // the version this page was loaded with (pb/version.txt at boot); the box may be newer after an update
   var UPDATED_KEY = 'pb.updated';    // set just before the page reloads itself after an update, so it can say what happened
 
@@ -403,7 +408,8 @@
 
   // ------------------------------------------------------------------ API
   // `body` is a JSON value. opts (all optional): blob = the answer is a file, resolves { blob }; form = a FormData to send as is (the browser
-  // writes the multipart header); noSid / sid = send no session / this one; quiet401 = an answer of 401 does not sign the page out.
+  // writes the multipart header); noSid / sid = send no session / this one; quiet401 = an answer of 401 does not sign the page out;
+  // text = the answer is plain text (a streamed run), resolves { text }.
   // An ApiError carries the status (0 = the box did not answer), a message for people, and `body`, the parsed answer.
   function ApiError(status, message, body) { this.status = status; this.message = message; this.body = body; }
   function call(method, path, body, opts) {
@@ -427,6 +433,7 @@
             if (e && e.hint) m += ' (' + e.hint + ')';
             throw new ApiError(r.status, m, j);
           }
+          if (opts.text) return { text: txt };
           return j;
         });
       });
@@ -438,6 +445,34 @@
   }
   function putClient(c, groups) {
     return call('PUT', '/api/clients/' + q(c.client), { comment: c.comment || '', groups: groups });
+  }
+
+  // ------------------------------------------------------------------ what the box says about itself (/pb/box.json)
+  // Written by the box program (docs/maintainers/architecture.md, "Amendments"): its number address, time zone, whether a counter address is
+  // configured, and `at`, its own pulse. Read without signing in. An older box has no such file and every feature that needs it stays off:
+  // nothing here may break the page. No answer at all keeps what was known; a file that is not what it should be counts as no file.
+  function loadBoxInfo() {
+    return fetch('/pb/box.json', { cache: 'no-store', credentials: 'omit' })
+      .then(function (r) { return r.ok ? r.json() : null; }, function () { return undefined; })
+      .then(function (j) { if (j !== undefined) boxInfo = PBBox.pure.parseBoxInfo(j); return boxInfo; },
+        function () { boxInfo = null; return null; });
+  }
+  // The number to give the router: the box's own address from box.json, else the address this page was opened by when that is a number.
+  // Never a name: a router takes only numbers there.
+  function renderHelp() {
+    var ip = (boxInfo && boxInfo.ip) || PBBox.pure.usableIpv4((location.hostname || '').toLowerCase());
+    $('helpBody').textContent = ip ? t('helpBody', { ip: ip }) : t('helpBodyNoIp');
+  }
+  // The timer on the box is overdue, or the box's own pulse (box.json's `at`) is more than 20 minutes behind the box's clock. The pulse is
+  // not written while an update runs, and it is only believed once this page has seen it late for a minute (right after the box's clock is
+  // corrected the file is a few seconds behind).
+  function schedulerSilent() {
+    var tm = M.state.timer, now = serverNowSec();
+    if (tm && tm.until < now - 90) return true;
+    var late = PBBox.pure.heartbeatLate(boxInfo, now) && M.state.update.status !== 'running';
+    if (!late) { heartbeatLateSince = 0; return false; }
+    if (!heartbeatLateSince) heartbeatLateSince = Date.now();
+    return Date.now() - heartbeatLateSince >= PBBox.timing.heartbeatGrace;
   }
 
   // ------------------------------------------------------------------ auth
@@ -654,7 +689,8 @@
       catalog ? Promise.resolve(catalog) : fetch('/pb/services.json', { cache: 'no-store' }).then(function (r) { return r.json(); }),
       // A missing file (an older install) is cached as "no names"; a failed fetch is retried on the next load.
       domainMap ? Promise.resolve(domainMap) : fetch('/pb/domains.json', { cache: 'no-store' }).then(function (r) { return r.status === 404 ? { domains: {} } : r.ok ? r.json() : null; })
-        .then(function (j) { return j && j.domains && typeof j.domains === 'object' ? j.domains : null; }).catch(function () { return null; })
+        .then(function (j) { return j && j.domains && typeof j.domains === 'object' ? j.domains : null; }).catch(function () { return null; }),
+      loadBoxInfo()
     ]).then(function (r) {
       catalog = r[4]; domainMap = r[5] || domainMap;
       var byName = {};
@@ -965,9 +1001,13 @@
     var items = [
       { id: 'pw', done: true, title: t('setupPw') },
       { id: 'router', done: routerPointsHere(), title: t('setupRouter'), how: t('setupRouterHow'), btn: t('setupRouterBtn'), act: 'setupHelp' },
-      { id: 'child', done: M.kids.length > 0, title: t('setupChild'), how: t('setupChildHow'), btn: t('addDevice'), act: 'openAdd' },
-      { id: 'counter', done: s.telemetry.on !== null, title: t('setupCounterQ'), doneTitle: t('setupCounterDone'), how: t('setupCounterText') }
+      { id: 'child', done: M.kids.length > 0, title: t('setupChild'), how: t('setupChildHow'), btn: t('addDevice'), act: 'openAdd' }
     ];
+    // The counter question is asked only when the box says a counter address is configured (box.json): a promise nothing keeps is worse than
+    // silence. A box with no box.json (an older one) does not ask.
+    if (boxInfo && boxInfo.counter === true) {
+      items.push({ id: 'counter', done: s.telemetry.on !== null, title: t('setupCounterQ'), doneTitle: t('setupCounterDone'), how: t('setupCounterText') });
+    }
     var doneCount = items.filter(function (i) { return i.done; }).length;
     var all = doneCount === items.length;
     if (all && !s.setup.done && !setupSaving) {
@@ -1021,7 +1061,8 @@
     renderDevices();
     renderBedtime(false);
     var tm = M.state.timer;
-    banner(tm && tm.until < serverNowSec() - 90 ? t('schedulerDown') : '');
+    banner(schedulerSilent() ? t('schedulerDown') : '');
+    renderHelp();
     Array.prototype.forEach.call(document.querySelectorAll('.mode'), function (b) {
       var m = b.getAttribute('data-mode');
       b.classList.toggle('mode-on', !!(tm && m === tm.mode));
@@ -1195,7 +1236,7 @@
     Array.prototype.forEach.call(document.querySelectorAll('.lang-toggle'), function (n) {
       n.textContent = t('langSwitch'); n.setAttribute('lang', lang === 'ar' ? 'en' : 'ar');
     });
-    $('helpBody').textContent = t('helpBody', { ip: location.hostname });
+    renderHelp();
     if (window.PBBox) PBBox.relang();
     if (M) { render(); renderBedtime(true); }
   }
@@ -1283,6 +1324,7 @@
       writeState: writeState, reload: load, openDialog: openDialog, closeDialog: closeDialog, confirm: confirmBox, toast: toast,
       endSession: endSession, serverNowSec: serverNowSec, clockOffsetMs: function () { return serverOffsetMs; },
       version: function () { return pageVersion; },
+      boxInfo: function () { return boxInfo; }, refreshBoxInfo: loadBoxInfo,
       rememberUpdate: function (v) { safeSet(sessionStorage, UPDATED_KEY, v); }
     });
     var updated = safeGet(sessionStorage, UPDATED_KEY);        // the page just reloaded itself after an update

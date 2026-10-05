@@ -39,7 +39,9 @@ test('update card: a request that has not been picked up is "starting", a run is
   assert.equal(view({ status: 'running', to: '3.1.0', at: NOW - 30, request: 5 }).phase, 'running', 'running wins over a leftover marker');
   const r = view({ status: 'running', to: '3.1.0', at: NOW - 30 });
   assert.equal(r.to, '3.1.0');
-  assert.equal(view({ status: 'running', to: '3.1.0', at: NOW - B.STALL_SEC - 1 }).phase, 'stalled', 'running for over 30 minutes means the runner died');
+  assert.equal(B.STALL_SEC, 15 * 60, 'the scheduler calls a run with no runner dead after 3 minutes; the page trails it by a wide margin');
+  assert.equal(view({ status: 'running', to: '3.1.0', at: NOW - B.STALL_SEC - 1 }).phase, 'stalled', 'running for longer than that means nobody is judging the run');
+  assert.equal(view({ status: 'running', to: '3.1.0', at: NOW - B.STALL_SEC + 60 }).phase, 'running', 'a slow but live run is not called stuck');
   assert.equal(view({ status: 'running', to: '3.1.0', at: 0 }).phase, 'stalled', 'running with no time at all too');
 });
 
@@ -54,6 +56,28 @@ test('update card: the result of an attempt is shown for a while, a failure for 
   assert.equal(view({ status: 'failed', to: '3.1.0', latest: '3.2.0', at: NOW - 3600 }).phase, 'available', 'a failure of an older version is not the story now');
   assert.equal(view({ status: 'failed', to: '3.1.0', at: NOW - 3600 }, '3.0.0').phase, 'failed', 'failed and nothing else on offer');
   assert.equal(view({ status: 'failed', latest: '3.1.0', at: NOW - 3600 }).phase, 'failed', 'a failure that never learned which version it was still counts for the one on offer');
+});
+
+test('update card: a failure carries whether the previous version is back (true, false, or not known), and only the box decides it', () => {
+  const failed = (rolledBack) => view({ status: 'failed', from: '3.0.0', to: '3.1.0', latest: '3.1.0', at: NOW - 60, error: 'x', rolledBack });
+  assert.equal(failed(true).rolledBack, true);
+  assert.equal(failed(false).rolledBack, false);
+  assert.equal(failed(null).rolledBack, null);
+  assert.equal(failed(undefined).rolledBack, null, 'a state with no such key is "not known"');
+  assert.equal(failed('yes').rolledBack, null, 'anything that is not a real boolean is "not known" too (parseState)');
+  assert.equal(failed(1).rolledBack, null);
+  assert.equal(view({ status: 'ok', to: '3.1.0', at: NOW - 60, rolledBack: true }, '3.1.0').rolledBack, undefined, 'only a failure has one');
+});
+
+test('an update is "busy" while it runs, while a request waits, and while this page is asking for one', () => {
+  const st = (update) => C.parseState(JSON.stringify({ update }));
+  assert.equal(B.updateBusy(st({ status: 'running', at: NOW }), null), true);
+  assert.equal(B.updateBusy(st({ request: 1800000000000 }), null), true);
+  assert.equal(B.updateBusy(st({ status: 'idle' }), { kind: 'update' }), true, 'this page has just pressed Update now');
+  assert.equal(B.updateBusy(st({ status: 'ok' }), null), false);
+  assert.equal(B.updateBusy(st({ status: 'failed' }), null), false);
+  assert.equal(B.updateBusy(null, null), false, 'no state read yet');
+  assert.equal(B.updateBusy({}, null), false);
 });
 
 test('temperature in plain words, whatever unit Pi-hole uses', () => {
@@ -112,7 +136,14 @@ test('addresses: the number the page was opened with, the names Pi-hole gives to
   assert.deepEqual(B.addressRows({ hostname: 'family.lan', port: '80', hosts, nodename: 'sinko' }).map((r) => r.value),
     ['192.168.1.50', 'family.lan', 'sinko.local'], 'opened by name: the number comes from the record that holds the name');
   assert.deepEqual(B.addressRows({ hostname: 'sinko.local', port: '', hosts: [], nodename: 'sinko' }), [{ kind: 'local', value: 'sinko.local' }],
-    'opened by the .local name with no record: only what is known');
+    'opened by the .local name with no record and no box.json: only what is known');
+  assert.deepEqual(B.addressRows({ hostname: 'sinko.local', port: '', boxIp: '192.168.1.50', hosts, nodename: 'sinko' }), [
+    { kind: 'ip', value: '192.168.1.50' }, { kind: 'name', value: 'family.lan' }, { kind: 'local', value: 'sinko.local' }],
+    'opened by the .local name: the box says its own number, and Pi-hole\'s record for that number gives the other name');
+  assert.deepEqual(B.addressRows({ hostname: '10.0.0.7', boxIp: '192.168.1.50', hosts, nodename: 'sinko' }).map((r) => r.value).slice(0, 1), ['192.168.1.50'],
+    'the number the box reports (its way to the router) wins over the one the page was opened by');
+  assert.deepEqual(B.addressRows({ hostname: 'sinko.local', boxIp: '127.0.0.1', hosts: [], nodename: 'sinko' }), [{ kind: 'local', value: 'sinko.local' }],
+    'a box.json address that no router could use is not shown');
   assert.ok(!B.addressRows({ hostname: '192.168.1.50', hosts, nodename: 'sinko' }).some((r) => /printer|v6/.test(r.value)), 'another device\'s record is never the box');
   assert.deepEqual(B.addressRows({ hostname: '192.168.1.50', port: '8080', hosts, nodename: 'sinko' }).map((r) => r.value),
     ['192.168.1.50', 'family.lan:8080', 'sinko.local:8080'], 'a port belongs to names, never to the number for the router');
@@ -127,6 +158,104 @@ test('addresses: nothing odd from Pi-hole or the host name becomes a row', () =>
   assert.ok(!B.addressRows({ hostname: '192.168.1.50', hosts: [], nodename: 'a.b' }).some((r) => r.kind === 'local'), 'nor one with dots');
   assert.deepEqual(B.addressRows({ hostname: '[fe80::1]', hosts: [], nodename: '' }), [], 'IPv6 is not offered as the number for a router');
   assert.deepEqual(B.addressRows({ hostname: 'localhost', hosts: [], nodename: '' }), [], 'localhost is not an address of the box');
+});
+
+test('a number for a router: four numbers, and not one that cannot be the box on a home network', () => {
+  for (const ok of ['192.168.1.50', '10.0.0.2', '172.16.5.9', '100.64.1.1', '8.8.8.8']) assert.equal(B.usableIpv4(ok), ok, ok);
+  for (const bad of ['', null, undefined, 42, 'sinko.local', '192.168.1', '192.168.1.256', '0.0.0.0', '127.0.0.1', '169.254.3.4', '224.0.0.1', '255.255.255.255',
+    '192.168.1.50 ', ' 192.168.1.50', '192.168.1.50\n', '[fe80::1]', '::1', '1.2.3.4.5', '01.2.3.4x']) assert.equal(B.usableIpv4(bad), '', JSON.stringify(bad));
+});
+
+test('box.json: only the documented shape is believed, field by field', () => {
+  const good = { v: 1, version: '3.0.0', ip: '192.168.1.50', tz: 'Asia/Bahrain', utcOffset: '+03:00', counter: true, mdns: true, at: 1790000000 };
+  assert.deepEqual(B.parseBoxInfo(good), { version: '3.0.0', ip: '192.168.1.50', tz: 'Asia/Bahrain', utcOffset: '+03:00', counter: true, mdns: true, at: 1790000000 });
+  for (const none of [null, undefined, 'x', 7, [], {}, { v: 2, ip: '192.168.1.50', at: 1790000000 }, { v: '1' }]) assert.equal(B.parseBoxInfo(none), null, JSON.stringify(none));
+  // null fields are legal (the box can have no route, no zone name): they cost only what they were for
+  assert.deepEqual(B.parseBoxInfo({ v: 1, version: '3.0.0', ip: null, tz: null, utcOffset: '+00:00', counter: false, mdns: false, at: 5 }),
+    { version: '3.0.0', ip: '', tz: '', utcOffset: '+00:00', counter: false, mdns: false, at: 5 });
+  assert.equal(B.parseBoxInfo(Object.assign({}, good, { ip: 'sinko.local' })).ip, '', 'a name is never the number for the router');
+  assert.equal(B.parseBoxInfo(Object.assign({}, good, { ip: '0.0.0.0' })).ip, '');
+  assert.equal(B.parseBoxInfo(Object.assign({}, good, { tz: '../../etc/passwd' })).tz, '');
+  assert.equal(B.parseBoxInfo(Object.assign({}, good, { tz: 'Asia/Bahrain<script>' })).tz, '');
+  assert.equal(B.parseBoxInfo(Object.assign({}, good, { utcOffset: '+3' })).utcOffset, '');
+  assert.equal(B.parseBoxInfo(Object.assign({}, good, { utcOffset: '+25:00' })).utcOffset, '');
+  assert.equal(B.parseBoxInfo(Object.assign({}, good, { counter: 'true' })).counter, false, 'true means the boolean true');
+  assert.equal(B.parseBoxInfo(Object.assign({}, good, { counter: 1 })).counter, false);
+  assert.equal(B.parseBoxInfo(Object.assign({}, good, { mdns: 'yes' })).mdns, false);
+  for (const at of [-1, 0, 1.5, NaN, Infinity, '1790000000', null]) assert.equal(B.parseBoxInfo(Object.assign({}, good, { at })).at, 0, String(at));
+  assert.equal(B.parseBoxInfo(Object.assign({}, good, { version: 'v3' })).version, '');
+});
+
+test('the box\'s pulse: late when box.json is more than 20 minutes behind the box\'s own clock, never for a missing or future one', () => {
+  const info = (at) => B.parseBoxInfo({ v: 1, at });
+  assert.equal(B.HEARTBEAT_LATE_SEC, 1200);
+  assert.equal(B.heartbeatLate(info(NOW - 1201), NOW), true);
+  assert.equal(B.heartbeatLate(info(NOW - 1200), NOW), false, 'exactly twenty minutes is not yet late');
+  assert.equal(B.heartbeatLate(info(NOW - 600), NOW), false, 'ten minutes is the box\'s normal rhythm at worst');
+  assert.equal(B.heartbeatLate(info(NOW + 3600), NOW), false, 'a file from the future (the box\'s clock was set back) is not a stopped scheduler');
+  assert.equal(B.heartbeatLate(null, NOW), false, 'an older box has no pulse to miss');
+  assert.equal(B.heartbeatLate(B.parseBoxInfo({ v: 1, at: 'soon' }), NOW), false, 'an unreadable time is no pulse either');
+  assert.equal(B.heartbeatLate(info(NOW - 5000), undefined), false);
+});
+
+test('the time zone note: the box\'s own zone, a warning only for universal time, and the phone\'s difference', () => {
+  const zi = (extra, phone) => B.zoneInfo(B.parseBoxInfo(Object.assign({ v: 1, at: 5 }, extra)), phone);
+  assert.deepEqual(B.zoneInfo(null, 180), { kind: 'unknown' }, 'an older box');
+  assert.deepEqual(zi({}, 180), { kind: 'unknown' }, 'a box that does not know its zone');
+  assert.deepEqual(zi({ tz: 'Asia/Bahrain', utcOffset: '+03:00' }, 180), { kind: 'zone', label: 'Asia/Bahrain, UTC+03:00', differs: false });
+  assert.equal(zi({ tz: 'Asia/Bahrain', utcOffset: '+03:00' }, 60).differs, true, 'a phone one zone away');
+  assert.equal(zi({ tz: 'Asia/Bahrain', utcOffset: '+03:00' }, null).differs, null, 'a phone that does not say');
+  assert.deepEqual(zi({ utcOffset: '-05:30' }, -330), { kind: 'zone', label: 'UTC-05:30', differs: false }, 'an offset alone is enough');
+  for (const name of ['UTC', 'Etc/UTC', 'utc', 'Etc/UCT', 'Universal', 'Zulu']) assert.equal(zi({ tz: name, utcOffset: '+00:00' }, 180).kind, 'utc', name);
+  assert.equal(zi({ tz: 'Europe/London', utcOffset: '+00:00' }, 180).kind, 'zone', 'London in winter is on +00:00 and is not universal time');
+  assert.equal(zi({ utcOffset: '+00:00' }, 180).kind, 'zone', 'an offset of zero alone is not called UTC either');
+});
+
+test('the box\'s own wall clock from box.json\'s offset, and nothing when it is not known', () => {
+  const info = B.parseBoxInfo({ v: 1, utcOffset: '+03:00', at: 5 });
+  const epoch = Date.UTC(2026, 9, 4, 18, 30, 0) / 1000;             // 18:30 UTC is 21:30 at +03:00
+  assert.equal(B.boxWallTime(info, epoch, 'en-GB'), '21:30');
+  assert.equal(B.boxWallTime(B.parseBoxInfo({ v: 1, utcOffset: '-05:30', at: 5 }), epoch, 'en-GB'), '13:00');
+  assert.equal(B.boxWallTime(B.parseBoxInfo({ v: 1, utcOffset: '+00:00', at: 5 }), epoch, 'en-GB'), '18:30');
+  assert.equal(B.boxWallTime(B.parseBoxInfo({ v: 1, at: 5 }), epoch, 'en-GB'), '', 'no offset: the page falls back to this phone\'s own conversion');
+  assert.equal(B.boxWallTime(null, epoch, 'en-GB'), '');
+  assert.equal(B.boxWallTime(info, NaN, 'en-GB'), '');
+});
+
+test('the reason of a failed update is shown only as plain English details, and never when it reads like a command', () => {
+  assert.equal(B.reasonDetails('The installer stopped with an error (exit status 1). The previous version (3.0.0) was put back.'),
+    'The installer stopped with an error (exit status 1). The previous version (3.0.0) was put back.');
+  assert.equal(B.reasonDetails('  The download did not match its checksum.\n'), 'The download did not match its checksum.');
+  assert.equal(B.reasonDetails('The update did not run to the end.'), 'The update did not run to the end.', 'the word run alone is not a command');
+  assert.equal(B.reasonDetails('The update could not be started.'), 'The update could not be started.');
+  for (const bad of ['Going back did not work either: run sudo sinko doctor.', 'try `systemctl restart sinko`', 'sudo reboot', 'Run: sinko update', 'use sinko doctor to see',
+    'then $(do-something)', 'apt-get install x', 'journalctl -u sinko']) assert.equal(B.reasonDetails(bad), '', bad);
+  for (const none of [null, undefined, '', '   ', 42, {}]) assert.equal(B.reasonDetails(none), '', String(none));
+  assert.ok(!/[\u0000-\u001f]/.test(B.reasonDetails('a\u0000b\u001bc')), 'no control characters');
+});
+
+test('a restore that took nothing is noticed from Pi-hole\'s own list of what it processed', () => {
+  assert.equal(B.restoreVerdict({ files: ['etc/pihole/gravity.db->group', 'etc/pihole/gravity.db->client'], took: 0.01 }), 'ok', 'FTL\'s real answer');
+  assert.equal(B.restoreVerdict({ processed: ['etc/pihole/gravity.db->group'] }), 'ok', 'what its documentation says');
+  assert.equal(B.restoreVerdict({ files: [] }), 'nothing', 'a config-only or unrelated zip: 200 and an empty list');
+  assert.equal(B.restoreVerdict({ files: ['etc/pihole/pihole.toml'] }), 'nothing');
+  assert.equal(B.restoreVerdict({}), 'ok', 'an answer with no list is not judged: a future FTL cannot make every restore look like a failure');
+  assert.equal(B.restoreVerdict(null), 'ok');
+  assert.equal(B.restoreVerdict({ files: 'etc/pihole/gravity.db->group' }), 'ok', 'a list that is not a list is not judged');
+});
+
+test('a rebuild of the block lists is "ok" only when its own text shows success and no failure line', () => {
+  const okText = '[i] Neutrino emissions detected...\n\n[\u2713] Pulling blocklist source list into range\n[\u2713] Swapping databases\n[\u2713] Pi-hole blocking is enabled\n';
+  assert.equal(B.gravityVerdict(okText), 'ok');
+  assert.equal(B.gravityVerdict(okText + '\n[\u2717] Status: Retrieval failed\n'), 'partial', 'one list that could not be fetched');
+  assert.equal(B.gravityVerdict('[\u2717] DNS resolution is currently unavailable'), 'partial');
+  assert.equal(B.gravityVerdict('   [\u2717] indented failure'), 'partial');
+  assert.equal(B.gravityVerdict('[i] Gravity failed'), 'partial');
+  assert.equal(B.gravityVerdict(''), 'partial', 'nothing that confirms it is not a confirmation');
+  assert.equal(B.gravityVerdict(null), 'partial');
+  assert.equal(B.gravityVerdict('[i] only information\n'), 'partial');
+  assert.equal(B.gravityVerdict('\u001b[32m[\u2713]\u001b[0m Swapping databases'), 'ok', 'colour codes are ignored');
+  assert.equal(B.gravityVerdict('[\u2713] a list says [\u2717] in the middle of a line'), 'ok', 'only a line that starts with the mark is a failure');
 });
 
 test('new password: 8 characters, typed twice, different from the old one', () => {
@@ -192,6 +321,7 @@ test('the shipped links.json has all seven keys, GitHub links, and nothing for s
   const l = JSON.parse(require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'web', 'links.json'), 'utf8'));
   assert.deepEqual(Object.keys(l).sort(), ['buy', 'home', 'issues', 'license', 'privacy', 'releases', 'support']);
   for (const k of ['home', 'issues', 'releases', 'privacy', 'license']) assert.match(l[k], /^https:\/\/github\.com\/iret33\/sinko(\/|#|$)/, k);
+  assert.equal(l.privacy, 'https://github.com/iret33/sinko/blob/master/docs/privacy.md', 'the privacy link opens the privacy statement, not a README anchor that does not exist');
   assert.equal(l.support, '');
   assert.equal(l.buy, '');
 });

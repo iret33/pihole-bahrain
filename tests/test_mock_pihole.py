@@ -237,8 +237,8 @@ class TeleporterTests(MockCase):
         self.box.login("changed-after-backup")
         status, j = self.upload(data, self.GRAVITY_ONLY)
         self.assertEqual(status, 200)
-        self.assertIn("etc/pihole/gravity.db->client", j["processed"])
-        self.assertNotIn("etc/pihole/pihole.toml", j["processed"], "the configuration was not imported")
+        self.assertIn("etc/pihole/gravity.db->client", j["files"])
+        self.assertNotIn("etc/pihole/pihole.toml", j["files"], "the configuration was not imported")
         self.assertEqual([c["comment"] for c in self.store.clients], ["Sara"])
         self.assertIsNotNone(self.store.gid("pb-kids"))
         self.assertEqual(self.box.json("GET", "/api/groups")[0], 200, "the password was not touched: the session still works")
@@ -260,7 +260,7 @@ class TeleporterTests(MockCase):
         self.box.login("changed-after-backup")
         status, j = self.upload(data)
         self.assertEqual(status, 200)
-        self.assertIn("etc/pihole/pihole.toml", j["processed"])
+        self.assertIn("etc/pihole/pihole.toml", j["files"])
         self.assertEqual(Box(self.httpd.server_port).login(mock_pihole.PASSWORD)[0], 200, "the backup's password is back")
         self.assertEqual(self.box.json("GET", "/api/groups")[0], 401, "so every session ended")
 
@@ -271,7 +271,7 @@ class TeleporterTests(MockCase):
         want = {"config": False, "gravity": {"client": True, "client_by_group": True}}
         status, j = self.upload(data, want)
         self.assertEqual(status, 200)
-        self.assertEqual(sorted(j["processed"]), ["etc/pihole/gravity.db->client", "etc/pihole/gravity.db->client_by_group"])
+        self.assertEqual(sorted(j["files"]), ["etc/pihole/gravity.db->client", "etc/pihole/gravity.db->client_by_group"])
         self.assertEqual(len(self.store.clients), 1)
         self.assertEqual(self.store.domains, [], "the domain list was not asked for")
 
@@ -442,6 +442,110 @@ class SchedulerSimTests(MockCase):
         self.write_state(lambda st: st.update({"scheduleActive": True}))
         self.assertEqual(self.sim.log, [])
         self.assertTrue(self.store.state()["scheduleActive"])
+
+    def test_a_power_request_during_an_update_is_dropped_and_cleared_like_the_real_scheduler_does(self):
+        self.sim.run_seconds = None
+        self.write_state(lambda st: st.setdefault("update", {}).update({"request": 5, "latest": "3.1.0"}))
+        self.assertEqual(self.store.state()["update"]["status"], "running")
+        self.write_state(lambda st: st.setdefault("power", {}).update({"request": 6, "action": "reboot"}))
+        self.assertEqual(self.store.state()["power"], {"request": None, "action": None}, "taken and cleared, not kept for later")
+        self.assertEqual(self.store.power_log, [], "and never acted on")
+        self.assertIn(("power-dropped", "reboot"), self.sim.log)
+        self.store.edit_state(lambda st: st["update"].update({"status": "ok"}))
+        self.write_state(lambda st: st["power"].update({"request": 6, "action": "reboot"}))
+        self.assertEqual(self.store.power_log, [], "the same marker never fires later")
+
+    def test_a_power_request_in_the_same_write_as_an_update_request_is_dropped_too(self):
+        self.sim.run_seconds = None
+        self.write_state(lambda st: (st.setdefault("update", {}).update({"request": 8, "latest": "3.1.0"}),
+                                     st.setdefault("power", {}).update({"request": 9, "action": "poweroff"})))
+        self.assertEqual(self.store.power_log, [])
+        self.assertEqual(self.store.state()["power"], {"request": None, "action": None})
+
+    def test_a_failed_run_says_whether_the_old_version_is_back(self):
+        marker = 100
+        for value in (True, False, None):
+            marker += 1
+            self.sim.outcome, self.sim.rolled_back = "failed", value
+            self.store.edit_state(lambda st: st.setdefault("update", {}).update({"status": "idle", "rolledBack": "x"}))
+            self.write_state(lambda st: st["update"].update({"request": marker}))
+            self.assertTrue(self.wait_for(lambda: self.store.state()["update"]["status"] == "failed"))
+            self.assertIs(self.store.state()["update"]["rolledBack"], value)
+
+
+class BoxJsonTests(MockCase):
+    """/pb/box.json as the box program writes it: served without a session, `at` on the box's own clock, absent on an older box."""
+
+    def setUp(self):
+        super().setUp()
+        self.httpd.RequestHandlerClass.web_dir = os.path.join(HERE, "..", "web")
+
+    def get(self):
+        return Box(self.httpd.server_port).req("GET", "/pb/box.json")
+
+    def test_it_is_served_to_anybody_with_the_fields_the_architecture_names(self):
+        status, payload, headers = self.get()
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["Content-Type"].startswith("application/json"))
+        j = json.loads(payload)
+        self.assertEqual(sorted(j), ["at", "counter", "ip", "mdns", "tz", "utcOffset", "v", "version"])
+        self.assertEqual((j["v"], j["counter"], j["mdns"]), (1, True, True))
+        self.assertAlmostEqual(j["at"], time.time(), delta=5)
+
+    def test_at_follows_the_boxs_own_clock_and_can_fall_behind(self):
+        self.store.clock_skew = 3 * 3600
+        self.assertAlmostEqual(json.loads(self.get()[1])["at"], time.time() + 3 * 3600, delta=5)
+        self.store.clock_skew, self.store.box_info_age = 0, 1500
+        self.assertAlmostEqual(json.loads(self.get()[1])["at"], time.time() - 1500, delta=5)
+
+    def test_an_older_box_has_no_file(self):
+        self.store.box_info = None
+        self.assertEqual(self.get()[0], 404)
+
+    def test_garbage_can_be_served_to_test_the_page(self):
+        self.store.box_raw = b"{not json"
+        self.assertEqual(self.get()[1], b"{not json")
+
+    def test_nothing_in_it_names_a_person_or_a_secret(self):
+        text = json.dumps(self.store.box_info)
+        for word in ("password", "pwhash", "family", "child"):
+            self.assertNotIn(word, text.lower())
+
+
+class GravityTests(MockCase):
+    """POST /api/action/gravity as FTL does it: the status is 200 before the run is over, so only the text tells how it ended."""
+
+    def setUp(self):
+        super().setUp()
+        self.box.login()
+
+    def run_gravity(self):
+        status, payload, headers = self.box.req("POST", "/api/action/gravity")
+        return status, payload.decode("utf-8"), headers
+
+    def test_a_run_streams_text_and_is_counted(self):
+        status, text, headers = self.run_gravity()
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["Content-Type"].startswith("text/plain"))
+        self.assertIn("Swapping databases", text)
+        self.assertNotIn("✗", text)
+        self.assertEqual(self.store.gravity_runs, 1)
+
+    def test_a_failed_run_is_still_a_200_and_says_so_in_the_text(self):
+        self.store.gravity_fail = True
+        status, text, _ = self.run_gravity()
+        self.assertEqual(status, 200, "FTL has sent 200 before it knows")
+        self.assertIn("✗", text)
+
+    def test_the_run_takes_as_long_as_it_is_told_to(self):
+        self.store.gravity_seconds = 0.6
+        started = time.time()
+        self.run_gravity()
+        self.assertGreaterEqual(time.time() - started, 0.55)
+
+    def test_it_needs_a_session(self):
+        self.assertEqual(Box(self.httpd.server_port).req("POST", "/api/action/gravity")[0], 401)
+        self.assertEqual(self.store.gravity_runs, 0)
 
 
 if __name__ == "__main__":
