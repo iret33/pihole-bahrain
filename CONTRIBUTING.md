@@ -52,7 +52,8 @@ Everything in `lists/` (the block lists and `services.json`) is public domain (C
   standard library, bash and curl, and the page is dependency-free JavaScript with no build step.
 * Every user-facing string exists in English and Arabic with the same `{placeholders}`; the copy test enforces it and
   bans technical words (DNS, query, cache, ...) outside the "how it works" sheet.
-* Update the README and `CHANGELOG.md` when users would notice.
+* Update the README and `CHANGELOG.md` when users would notice. If a change alters what the box sends or stores, change
+  `docs/privacy.md` (both languages), `site/strings.js` and the counter's root page in the same pull request.
 * Sign your commits off (`git commit -s`): it says you wrote the change or have the right to submit it under this
   project's licence (the [Developer Certificate of Origin](https://developercertificate.org)).
 
