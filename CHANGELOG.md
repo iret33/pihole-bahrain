@@ -77,7 +77,9 @@ everything needed to ship it on a ready-made Orange Pi Zero 3.
 
 ### Migrating from pihole-bahrain 2.x
 Run `sudo pihole-bahrain update` (or the new install command). The installer moves your settings, keeps your devices,
-rules and password, replaces the old services and leaves a `pihole-bahrain` command that points to `sinko`. A 2.x box
+rules and password, replaces the old services and leaves a `pihole-bahrain` command that points to `sinko`. The old updater
+fetches the `master` branch, but a box that follows releases gets the checksum-verified release instead as soon as one is
+published (and keeps a copy of it to go back to). A 2.x box
 followed the `master` branch (the old default); after migrating it follows **releases**, like a new install.
 
 ## [2.2.0] - 2026-10-03

@@ -428,6 +428,13 @@ class AnUpdateThatWasCutShortIsDescribedHonestly(unittest.TestCase):
     def test_the_troubleshooting_page_tells_a_parent_to_wait_a_quarter_of_an_hour(self):
         self.assertIn("Leave the box on for about a quarter of an hour", self.trouble)
 
+    def test_the_printed_card_and_the_sellers_guide_pass_the_same_advice_on_in_both_languages(self):
+        card = flat(read("docs/quick-start-card.md"))
+        self.assertIn("If the power failed while the box was updating, leave it plugged in for a quarter of an hour", card)
+        self.assertIn("وإن انقطعت الكهرباء أثناء تحديث الصندوق فاتركه موصولًا ربع ساعة", card)
+        self.assertIn("usually puts itself right", card)               # "usually": a cut after the page swap is not repaired by the box
+        self.assertIn("usually puts itself right within a quarter of an hour", flat(read("docs/selling.md")))
+
     def test_the_checklist_tests_a_cut_at_the_two_moments_and_names_what_it_cannot_promise(self):
         for needle in ("A cut between the program and the page", "A cut after the page swap", "/var/lib/sinko/repair.json",
                        "does not cover this case"):

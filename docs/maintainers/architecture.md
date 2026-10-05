@@ -119,8 +119,12 @@ the new files, `sinko setup` (re-registers every list under the new address, kee
 install the new units, leave `/usr/local/bin/pihole-bahrain` as a symlink to `sinko` (with a one-line notice), and only at
 the very end delete `/opt/pihole-bahrain` and `/etc/pihole-bahrain` (the running installer may live inside the old
 `/opt/pihole-bahrain/src`). The old page (`generator` = `pihole-bahrain`) is replaced, never backed up as a user page.
-Old boxes update themselves by running `pihole-bahrain update`, which fetches the new repo (GitHub redirects the old
-name) and runs the new installer.
+Old boxes update themselves by running `pihole-bahrain update`, which clones `master` into `/opt/pihole-bahrain/src` (GitHub
+redirects the old name) and runs the `install.sh` it finds there. When that checkout is inside the old program folder and the
+box follows the releases (`SINKO_REF` latest or a version), the installer does not install the checkout: it fetches and
+verifies the release first and lets the release's own installer do the work, so the box ends with a checksummed version, an
+`/opt/sinko/src` and a rollback copy. If the release cannot be had (none published yet, no connection) it installs the checkout
+as before and says so. A git checkout anywhere else, and a developer's `SINKO_REF=master`, are installed as they are.
 
 ## Shared state (`pb-state` group description, JSON)
 
@@ -223,8 +227,10 @@ before writing (existing pattern in `Controller.tick`) so it never overwrites wh
 "starting" to become "ok"): API reachable and logged in with the CLI password, the `pb-*` groups exist, every catalog list is
 registered, **the scheduler has run: the same process up for at least 20 s, at least 2 finished passes of this version, a
 heartbeat under 60 s old, and not crash-looping** (a unit that is merely "active" for a second between crashes does not
-pass), every file `index.html` loads exists and is not empty (and every file of the release's web folder when the source is
-that version), and `pb/version.txt` equals `VERSION`.
+pass), every file `index.html` loads exists and is not empty (and every file the installer copies from the release's web
+folder when the source is that version: the files directly in `web/` and in `web/fonts/`, no dotfiles; the check and
+`install_files` must learn about a new web sub-folder together), and `pb/version.txt` equals `VERSION`. A check that cannot run
+(an answer cut off by an FTL restart, say) is a failed check, and with `--wait` it is tried again.
 
 ## Power requests
 
@@ -325,8 +331,11 @@ failed and going back did not work, or there was nothing to go back to, or the r
 failure). Only the page decides what a parent reads from it: "the previous version is back" is shown only when it is
 `true`. `update.error` is technical text for whoever helps (English, at most 200 characters, **never a command to type**);
 the page does not print it as the reason in the parent's language. Both parsers are strict (ASCII digits, whole-string
-regular expressions, no NaN/Infinity tokens, `timer.snapshot.services` must be an object); `tests/fixtures/state-cases.json`
-is the spec.
+regular expressions, no NaN/Infinity tokens, `timer.snapshot.services` must be an object, and an integer too big for a double
+(more than 308 digits, which the page's JavaScript reads as Infinity) is refused by both, losing only its own field and never
+the whole state); `tests/fixtures/state-cases.json` is the spec. The parsers drop top-level keys they do not know, so an older
+component (after a rollback, or a phone that still holds the old page) wipes a field that a newer release added: that is
+accepted, and it is why every key must be known to both sides in the release that introduces it.
 
 **`/pb/box.json`** (written by the box program as root, mode 644, atomically; read by the page without signing in):
 `{"v":1,"version":"3.0.0","ip":"192.168.1.50","tz":"Asia/Bahrain","utcOffset":"+03:00","counter":true,"mdns":true,"at":1790000000}`.

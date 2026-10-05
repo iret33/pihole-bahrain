@@ -15,11 +15,12 @@ mounting the card on a computer.
 - [ ] Flash Armbian minimal (Debian Trixie), run the install one-liner from the latest release. It ends without errors and
       `sudo sinko doctor` shows only `ok`/`info`.
 - [ ] `http://<ip>/` opens the page; the parent password works; `/admin/` (Pi-hole) still works with the same password.
-- [ ] The password route, on the real Pi-hole: on a new Pi-hole the installer sets the password through Pi-hole's API
-      (nothing about it in `ps` while it runs; use `SINKO_PASSWORD=…` for this test and look from a second shell). Run the
+- [ ] The password route, on the real Pi-hole: on a new Pi-hole the installer sets the password through Pi-hole's API (type
+      it at the prompt, and from a second shell `ps -eo args` shows it in no line while the installer runs). Run the
       installer again with `SINKO_PASSWORD=…` on that box, which now has a password: Pi-hole's API refuses (403 for the
       command-line session), the installer says it uses `pihole setpassword`, and the password works on the page and on
-      `/admin/`. In that second case the password was briefly in `pihole`'s arguments, as the docs say.
+      `/admin/`. In that second case the password was briefly in `pihole`'s arguments, as the docs say (and in sudo's own
+      line, because the test passes it as `SINKO_PASSWORD=…`, as the docs also say).
 - [ ] The counter question follows the counter address. In a tree whose `TELEMETRY_URL` in `bin/sinko` is empty the
       interactive installer says nothing about the counter and the page shows no *Count this box* card and no checklist
       question; once the address is set (releasing step 5) the installer asks, and the page shows both.
