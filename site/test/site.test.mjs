@@ -55,6 +55,31 @@ test('no Arabic is English by mistake, and no English is Arabic', () => {
   assert.equal(STR.ar.langSwitch, 'English');
 });
 
+test('the privacy answer is true: the box asks an upstream DNS service, and nothing says that lookups never leave the box', () => {
+  for (const lang of ['en', 'ar']) {
+    assert.match(STR[lang].a2, /Cloudflare for Families/, lang);
+    assert.match(STR[lang].a2, /DNS/, lang);
+  }
+  assert.match(STR.en.a2, /upstream DNS service/);
+  assert.match(STR.en.a2, /site names and your home’s internet address/);
+  // What a family looks up does leave the box (Pi-hole passes it to its upstream DNS service), so none of these may come back.
+  const claims = [/stays? on the box/i, /nothing leaves the box/i, /never leaves? your box/i, /looks? up[^.]*\bstays?\b/i, /nothing (else )?is collected/i];
+  for (const [key, value] of Object.entries(STR.en)) for (const claim of claims) assert.doesNotMatch(value, claim, `en.${key}`);
+  for (const claim of claims.slice(0, 3)) assert.doesNotMatch(html, claim);
+  // The counter keeps a little more than the three things the box sends, and the note next to the numbers says so.
+  assert.match(STR.en.countsNote, /country/);
+  assert.match(STR.ar.countsNote, /البلد/);
+  // A ready-made box has nothing to uninstall, and the answer about removing it must not tell its owner to type a command.
+  assert.match(STR.en.a5, /ready-made box has nothing to remove/);
+});
+
+test('one Arabic tagline, in the title and under the name, and the old variants are gone', () => {
+  assert.equal(STR.ar.heroTagline, 'إنترنت هادئ للعائلة');
+  assert.equal(STR.ar.docTitle, `سينكو · ${STR.ar.heroTagline}`);
+  const everything = read('strings.js') + html + read('app.js');
+  for (const old of ['إنترنت هادئ لعائلتك', 'إنترنت العائلة']) assert.equal(everything.includes(old), false, old);
+});
+
 test('Arabic uses the terms the parent page itself shows', () => {
   const all = Object.values(STR.ar).join('\n');
   for (const term of ['وقت الدراسة', 'وقت النوم', 'الصورة الحيّة', 'صندوقي', 'حدّث الآن', 'صندوق العائلة']) assert.ok(all.includes(term), term);
@@ -262,9 +287,13 @@ test('assemble.sh builds the published folder, and refuses an address it cannot 
 
   fs.mkdirSync(path.join(root, 'docs', 'img'), { recursive: true });
   for (const name of ['panel-en.png', 'social-preview.png']) fs.writeFileSync(path.join(root, 'docs', 'img', name), 'x');
+  fs.writeFileSync(path.join(root, 'docs', 'img', 'README.md'), 'notes for the people who make the brand files');
   r = run(out);                                                            // rebuilt from scratch, base empty (local preview)
   assert.equal(r.status, 0, r.stderr);
-  assert.doesNotMatch(r.stdout, /warning/);
+  // The screenshots arrive later than the site: each missing one is named in the log, and none of them fails the build.
+  assert.deepEqual([...r.stdout.matchAll(/::warning::docs\/img\/(\S+) is missing/g)].map((m) => m[1]), ['panel-ar.png', 'live-en.png', 'box-en.png']);
+  assert.doesNotMatch(r.stdout, /no pictures/);
+  // Only pictures are published: the README that lives in docs/img is not for visitors.
   assert.deepEqual(fs.readdirSync(path.join(out, 'img')).sort(), ['panel-en.png', 'social-preview.png']);
   assert.match(fs.readFileSync(path.join(out, 'index.html'), 'utf8'), /property="og:image" content="\/img\/social-preview\.png"/);
 

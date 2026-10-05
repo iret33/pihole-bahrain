@@ -93,7 +93,7 @@
           <p class="stat" id="statOnline" hidden><strong class="num" id="numOnline"></strong><span data-i18n="countOnline">boxes online now</span></p>
           <p class="stat" id="statDownloads" hidden><strong class="num" id="numDownloads"></strong><span data-i18n="countDownloads">downloads</span></p>
         </div>
-        <p class="counts-note" id="countsNote"><span data-i18n="countsNote">A box is counted only when its family switches the counter on. Nothing else is collected.</span> <a data-privacy-link href="https://github.com/iret33/sinko/blob/master/docs/privacy.md" data-i18n="countsPrivacy">How the counter works</a></p>
+        <p class="counts-note" id="countsNote"><span data-i18n="countsNote">A box is counted only when its family switches the counter on. Only a random code, the version, the kind of box, the country and when it was first and last heard from are kept.</span> <a data-privacy-link href="https://github.com/iret33/sinko/blob/master/docs/privacy.md" data-i18n="countsPrivacy">How the counter works</a></p>
       </div>
     </div>
   </section>
@@ -190,7 +190,9 @@
     </div>
   </section>
 
-  <section class="section tint" id="shots" aria-labelledby="shotsTitle">
+  <!-- Hidden until app.js has found at least one picture: the screenshots are added to the repository later than the
+       site, and without JavaScript there is no way to know. -->
+  <section class="section tint" id="shots" aria-labelledby="shotsTitle" hidden>
     <div class="wrap">
       <h2 id="shotsTitle" data-i18n="shotsTitle">See it</h2>
       <ul class="shots">
@@ -211,7 +213,7 @@
       </details>
       <details class="qa">
         <summary data-i18n="q2">What does Sinko know about us?</summary>
-        <p data-i18n="a2">What your family looks up stays on the box in your home, and the project never receives it. There is one optional anonymous counter, and it is off until you say yes. It sends a random code, the version and the kind of box, and nothing else.</p>
+        <p data-i18n="a2">Sinko keeps your family’s names, devices and rules on the box and never sends them to the project. Like any DNS filter, the box asks an upstream DNS service (Cloudflare for Families by default) to find the address of the sites it does not block, so that service sees those site names and your home’s internet address. There is one optional anonymous counter, and it is off until you say yes. It sends a random code, the version and the kind of box, and nothing else.</p>
         <p><a class="more" data-privacy-link href="https://github.com/iret33/sinko/blob/master/docs/privacy.md" data-i18n="faqPrivacy">Read the privacy statement</a></p>
       </details>
       <details class="qa">
@@ -224,7 +226,7 @@
       </details>
       <details class="qa">
         <summary data-i18n="q5">How do I remove it?</summary>
-        <p data-i18n="a5">Run this command on the box. It removes Sinko and its rules and keeps Pi-hole. Then undo the router setting from step 2.</p>
+        <p data-i18n="a5">On a box you built yourself, run this command. It removes Sinko and its rules and keeps Pi-hole. A ready-made box has nothing to remove: unplug it. Then undo the router setting from step 2.</p>
         <p><code class="inline" dir="ltr">sudo /opt/sinko/uninstall.sh</code></p>
       </details>
     </div>

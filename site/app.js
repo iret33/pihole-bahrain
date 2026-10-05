@@ -182,6 +182,20 @@
     $('#shots').hidden = visible.length === 0;
   }
 
+  // The screenshots may be added to the repository after the site first goes live. A lazy image far down the page would
+  // only fail when a visitor scrolls to it, leaving empty frames until then, so ask once, cheaply, which ones exist
+  // (a HEAD request moves no picture) and hide the others at once. The section stays hidden until at least one exists.
+  function probeGallery() {
+    var checks = all('#shots figure').map(function (figure) {
+      var img = figure.querySelector('img');
+      if (!img || typeof window.fetch !== 'function') return Promise.resolve();
+      return window.fetch(img.getAttribute('src'), { method: 'HEAD', credentials: 'omit' }).then(function (response) {
+        if (!response.ok) figure.hidden = true;
+      }, function () { /* offline or blocked: the image itself decides when it is shown */ });
+    });
+    return Promise.all(checks).then(syncGallery, syncGallery);
+  }
+
   function watchImages() {
     var hero = $('.hero');
     all('.hero-shot img').forEach(function (img) {
@@ -197,5 +211,6 @@
   applyConfig();
   applyLanguage(lang);
   watchImages();
+  probeGallery();
   loadCounters();
 })();
