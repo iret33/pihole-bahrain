@@ -36,6 +36,10 @@ mounting the card on a computer.
       missing or doubled (`sudo sinko doctor`). Pi-hole's own weekly run (its cron, Sundays; look at `/etc/cron.d/pihole`
       for the time) and the page's restore do not take that lock: write down whether the nightly refresh (03:30 plus up to
       two hours) can land on the weekly one on this Pi-hole version.
+- [ ] **The address follows the router.** Give the box another address (change its DHCP reservation, or move the unit to
+      another network): within about five minutes the scheduler's address watch notices, `SINKO_IP` in `/etc/sinko/config`
+      and the local name `family.lan` follow, `/pb/box.json` carries the new number (the page's router help shows that number,
+      never a name), and `sudo sinko doctor` is clean. The router's own DNS setting is still the parent's to change.
 - [ ] A system that speaks another language: on a unit whose locale is Arabic or German (`dpkg-reconfigure locales`, log in
       again), run the installer on a clean card: `avahi-daemon`, `unattended-upgrades` and a time service are installed all
       the same (the installer asks apt for its answers in English; `apt-cache policy` prints another word in another
@@ -141,8 +145,10 @@ mounting the card on a computer.
 - [ ] **A cut between the program and the page.** [test unit] Start an update to a newer test release and watch
       `ls -l --time-style=full-iso /opt/sinko/bin/sinko`: the moment it changes, pull the power (or `sudo systemctl kill -s
       KILL sinko-update`, then `sudo reboot -f`). After the start the box still filters, and `sudo sinko selfcheck` says the
-      page and the program are of different versions. Within about a quarter of an hour (ten minutes of difference, a minute
-      for the look, then the installer) the box repairs itself: `sudo journalctl -u sinko` says the page and the program
+      page and the program are of different versions. With the network cable in, within about a quarter of an hour (the
+      box first reports the cut update after about three minutes, then ten minutes of difference, a minute for the look,
+      then the installer; with no time server the clock is believed only after ten minutes of uptime, so allow about ten
+      minutes more) the box repairs itself: `sudo journalctl -u sinko` says the page and the program
       have been of different versions and that it installs this version again, `sudo journalctl -u sinko-repair` has the
       installer's output, `/var/lib/sinko/repair.json` exists, the selfcheck passes and *My box* says the update worked. Do it once more with the network cable out during the repair:
       write down whether the installer's `sinko setup` (it runs `pihole -g`) gets through with the lists the box already
