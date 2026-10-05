@@ -137,7 +137,7 @@ class SeatLeakTests(LoopFixture):
         with mock.patch.object(pb.signal, "signal", lambda sig, handler: stop.update(handler=handler)), \
                 mock.patch.object(pb.time, "sleep", fake_sleep), \
                 mock.patch.object(pb.Controller, "tick", side_effect=TypeError("boom")), \
-                mock.patch.object(pb, "Maintenance", lambda clock_ok=None: self.m), \
+                mock.patch.object(pb, "Maintenance", lambda clock_ok=None, **kw: self.m), \
                 mock.patch.object(pb, "ClockGuard", lambda: guard), \
                 self.assertLogs("sinko", level="INFO") as logs:
             self.assertEqual(pb.cmd_run(None), 0)
@@ -392,14 +392,15 @@ def garbage(rng, depth=0):
     if kind == "bool":
         return rng.random() < 0.5
     if kind == "int":
-        return rng.choice([0, 1, -1, 7, 255, 2 ** 31, 2 ** 70, -2 ** 70, 1700000000, 1790000000123])
+        return rng.choice([0, 1, -1, 7, 255, 2 ** 31, 2 ** 70, -2 ** 70, 1700000000, 1790000000123,
+                           10 ** 308, 10 ** 309, 10 ** 400, -10 ** 400, 2 ** 1024, -2 ** 1024])      # past a double: Infinity to the page
     if kind == "float":
         return rng.choice([0.0, -0.0, 1.5, 1e308, -1e308, 1e-320, 1700000000.5, float("nan"), float("inf"), float("-inf")])
     if kind == "str":
         return rng.choice(["", " ", "x", "3.1.0", "21:00", "reboot", "free", "failed", "https://github.com/a/b/releases",
                            "سلام", "a" * 500, "\x00", "\n", "﻿", "../..", "NaN", "{}", "[]"])
     if kind == "weird":
-        return rng.choice([[], {}, [[]], {"": {}}, [None], {"a": [1, {"b": None}]}, "0" * 40, 10 ** 400 if False else 10 ** 30])
+        return rng.choice([[], {}, [[]], {"": {}}, [None], {"a": [1, {"b": None}]}, "0" * 40, 10 ** 30, 10 ** 400, -10 ** 400])
     if kind == "list":
         return [garbage(rng, depth + 1) for _ in range(rng.randint(0, 4))]
     return {rng.choice(["a", "mode", "until", "snapshot", "services", "offline", "enabled", "start", "days", "on", "online", "at",
@@ -532,6 +533,92 @@ class FuzzTests(LoopFixture):
             self.advance(rng.choice([1, 15, 300, 3600]))
             self.assertIsInstance(self.pass_(), list)
         self.assertEqual(self.reached, [], "and none of it reached anything real")
+
+
+class PoisonedNumbersTests(LoopFixture):
+    """An integer of hundreds of digits is valid JSON, and the page's JavaScript reads it as Infinity and refuses it. In
+    Python it is a perfectly good int whose float() raises, so every check that only compared it with infinity let it
+    through and the next line raised, on every pass, forever: no bedtime, no timers, no heartbeat, no request from the
+    page. (Anybody who can open Pi-hole's admin pages can edit the description of pb-state by hand.)"""
+
+    BIG = "1" + "0" * 399
+
+    def store_text(self, text):
+        next(g for g in self.store.groups if g["name"] == "pb-state")["comment"] = text
+
+    def test_a_state_with_numbers_past_a_double_in_every_place_does_not_stop_the_loop(self):
+        big = self.BIG
+        self.store_text(
+            '{"timer": {"mode": "free", "until": %s, "snapshot": {"services": {}, "offline": false}}, '
+            '"community": {"online": %s, "at": %s}, '
+            '"update": {"request": 123, "checkRequest": %s, "checked": %s, "at": %s, "status": "failed"}, '
+            '"power": {"request": %s, "action": "reboot"}}' % (big, big, big, big, big, big, big))
+        wait = self.sched.step()
+        self.assertEqual(wait, pb.TICK_SECONDS, "the pass worked: it did not back off")
+        self.assertEqual(pb.read_heartbeat()["ticks"], 1, "and left its pulse")
+        self.assertEqual(self.runner_calls, ["running"], "the update request next to the poisoned numbers was still acted on")
+        self.assertEqual(self.power_calls, [], "a power marker that is no number is no request")
+        state = self.state()
+        self.assertIsNone(state["timer"])
+        self.assertIsNone(state["community"])
+        self.assertIsNone(state["update"]["checkRequest"])
+
+    def test_the_side_jobs_alone_survive_it_too(self):
+        big = self.BIG
+        self.store_text('{"community": {"online": 1, "at": %s}, "update": {"request": 5, "at": -%s}}' % (big, big))
+        self.assertIsInstance(self.pass_(), list)
+        self.assertEqual(self.runner_calls, ["running"])
+
+    def test_a_number_past_a_double_is_no_number_anywhere(self):
+        big = int(self.BIG)
+        for value in (big, -big, 2 ** 1024, -2 ** 1024):
+            self.assertFalse(pb._is_number(value), value)
+            self.assertFalse(pb._is_count(value), value)
+            self.assertIsNone(pb._nonce(value), value)
+        for value in (0, 1, -1, 10 ** 308, 2 ** 1023, 1.5, 1e308, -1e308):
+            self.assertTrue(pb._is_number(value), value)
+        for value in (float("nan"), float("inf"), float("-inf"), True, False, None, "1", [], {}):
+            self.assertFalse(pb._is_number(value), value)
+        self.assertEqual(pb._nonce(10 ** 30), 1e30, "a double, the only kind of number the page has")
+        self.assertEqual(pb._nonce(1790000000123), 1790000000123)
+        self.assertIsInstance(pb._nonce(1790000000123), int)
+
+    def test_the_files_of_the_state_folder_with_such_numbers_read_as_missing(self):
+        big = self.BIG
+        os.makedirs(self.state_dir, exist_ok=True)
+        os.makedirs(self.run_dir, exist_ok=True)
+
+        def put(folder, name, text):
+            with open(os.path.join(folder, name), "w") as fh:
+                fh.write(text)
+        for text in ('{"status": "ok", "at": %s}' % big, '{"status": "failed", "at": -%s}' % big,
+                     '{"status": "ok", "at": 1' + "0" * 5000 + '}'):
+            put(self.state_dir, "update-result.json", text)
+            self.assertIsNone(pb.read_update_result(), text[:40])
+        put(self.state_dir, "update-result.json", '{"status": "ok", "at": 1800000000, "from": "3.0.0", "to": "3.1.0"}')
+        self.assertEqual(pb.read_update_result()["at"], 1800000000.0)
+        put(self.state_dir, "update-result.json", "[" * 5000)
+        self.assertIsNone(pb.read_update_result(), "nesting deeper than the parser allows is garbage, not a crash")
+        put(self.state_dir, "handled.json", '{"update": %s, "check": 7, "power": "x"}' % big)
+        self.assertEqual(pb.load_handled(), {"check": 7, "power": "x"})
+        put(self.run_dir, "heartbeat.json", '{"v": 1, "pid": 5, "version": "3.0.0", "ticks": 3, "mono": %s}' % big)
+        self.assertIsNone(pb.read_heartbeat())
+
+    def test_a_box_json_with_such_a_time_is_rewritten_not_crashed_on(self):
+        page = os.path.join(self.webroot, "pb")
+        os.makedirs(page)
+        path = os.path.join(page, "box.json")
+        kw = dict(conf={}, ip=None, root=self.webroot, mdns=False)
+        self.assertEqual(tm.REAL_WRITE_BOX_INFO(**kw), "written")
+        self.assertEqual(tm.REAL_WRITE_BOX_INFO(**kw), "unchanged")
+        with open(path) as fh:
+            info = json.load(fh)
+        for at in (self.BIG, "-" + self.BIG):
+            body = json.dumps(dict(info, at="@@"), separators=(",", ":")).replace('"@@"', at)
+            with open(path, "w") as fh:
+                fh.write(body)
+            self.assertEqual(tm.REAL_WRITE_BOX_INFO(**kw), "written", at[:6])
+            self.assertEqual(tm.REAL_WRITE_BOX_INFO(**kw), "unchanged")
 
 
 if __name__ == "__main__":

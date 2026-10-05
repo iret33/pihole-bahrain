@@ -3,10 +3,12 @@ address watch, reconciling the update result. Pi-hole is the in-memory mock; eve
 systemd, reboot, pihole-FTL) is a fake that records what it was asked, so no test can reboot or update this machine."""
 import datetime as dt
 import contextlib
+import fcntl
 import importlib.machinery
 import importlib.util
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -642,6 +644,18 @@ class RolledBackTests(Fixture):
         self.set_state(lambda s: s["update"].update(status="failed", rolledBack=True, at=0, request=3, latest="3.1.0"))
         self.pass_()
         self.assertEqual((self.state()["update"]["status"], self.state()["update"]["rolledBack"]), ("running", None))
+
+    def test_a_failure_that_names_no_release_is_remembered_for_the_retry_rule_under_the_one_the_state_names(self):
+        # No room on the card: the runner stops before it has asked which release, so its result has none. The state keeps
+        # the one the scheduler started it for, and the retry rule only knows a failure by that.
+        self.running()
+        pb.write_update_result("failed", "3.0.0", None, "There is not enough free space on the box: 150 MB are free and "
+                               "more than 200 MB are needed. Nothing on the box was changed.",
+                               self.now.timestamp() - 5, rolled_back=True, transient=True)
+        self.pass_()
+        u = self.state()["update"]
+        self.assertEqual((u["status"], u["to"], u["rolledBack"]), ("failed", "3.1.0", True))
+        self.assertTrue(pb.failure_is_transient(u), "tried again within the hour, not after a week")
 
     def test_a_result_that_says_the_failure_was_the_network_is_remembered_for_the_retry_rule(self):
         self.running()
@@ -1356,6 +1370,25 @@ class RunnerStartTests(unittest.TestCase):
             self.assertTrue(pb.start_update_runner())
         popen.assert_not_called()
 
+    def test_the_repair_runs_as_a_unit_of_its_own_too_and_falls_back_to_its_own_log(self):
+        with mock.patch.object(pb.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run, \
+                mock.patch.object(pb.subprocess, "Popen") as popen:
+            self.assertTrue(pb.start_repair_runner())
+        popen.assert_not_called()
+        cmd = run.call_args[0][0]
+        self.assertEqual(cmd[cmd.index("--unit") + 1], "sinko-repair", "not the update's unit: both can be told apart and neither blocks the other's name")
+        self.assertIn("--description=Sinko repair", cmd)
+        self.assertEqual(cmd[-1:], ["repair"])
+        with mock.patch.object(pb.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "no bus")), \
+                mock.patch.object(pb, "unit_active", return_value=False) as active, \
+                mock.patch.object(pb.subprocess, "Popen") as popen, self.assertLogs("sinko", level="WARNING") as logs:
+            self.assertTrue(pb.start_repair_runner())
+        active.assert_called_with("sinko-repair")
+        self.assertEqual(popen.call_args[0][0][-1:], ["repair"])
+        self.assertIn("could not start the repair", logs.records[0].getMessage())
+        self.assertTrue(os.path.exists(pb.state_path("repair.log")))
+        self.assertFalse(os.path.exists(pb.state_path("update.log")))
+
     def test_power_commands(self):
         with mock.patch.object(pb.subprocess, "run") as run:
             pb.run_power("reboot")
@@ -1428,6 +1461,90 @@ class BoxInfoJobTests(Fixture):
         self.advance(15)
         self.settle()
         self.assertEqual(len(self.boxinfo_calls), 1, "once, then back to the five minutes")
+
+    def test_a_clock_that_is_set_makes_the_file_fresh_at_once_and_not_at_the_next_five_minutes(self):
+        # No internet when the box started: its clock was the last saved one and was believed after ten minutes. Days
+        # later the time server answers and the clock jumps. box.json holds the old time until the next write, and the page
+        # (which compares it with the box's clock) would call the scheduler dead and tell the parent to unplug the box.
+        self.advance(11)
+        self.settle()
+        self.assertEqual(self.calls(), [{"force": False}])
+        self.advance(40)
+        self.settle()
+        self.assertEqual(len(self.boxinfo_calls), 1, "time passing as it should: nothing to do before five minutes")
+        self.now += dt.timedelta(days=3)                    # the clock is set; the monotonic clock did not move
+        self.pass_()
+        self.assertEqual(self.calls(), [{"force": False}, {"force": True}], "written in the pass that saw the step")
+        self.advance(15)
+        self.settle()
+        self.assertEqual(len(self.boxinfo_calls), 2, "and then back to every five minutes")
+        self.advance(300)
+        self.settle()
+        self.assertEqual(len(self.boxinfo_calls), 3)
+
+    def test_a_clock_that_is_set_back_is_noticed_too(self):
+        self.advance(11)
+        self.settle()
+        self.now -= dt.timedelta(hours=2)
+        self.pass_()
+        self.assertEqual(self.calls()[-1], {"force": True})
+
+    def test_a_clock_that_is_a_little_off_is_not_a_step(self):
+        self.advance(11)
+        self.settle()
+        for drift in (5, -5, 20, -20):
+            self.now += dt.timedelta(seconds=drift)         # what slewing by a time server does, and a slow pass
+            self.pass_()
+        self.assertEqual(len(self.boxinfo_calls), 1)
+
+    def test_a_step_during_an_update_is_remembered_until_the_file_may_be_written_again(self):
+        self.advance(11)
+        self.settle()
+        self.set_state(lambda s: s["update"].update(status="running", at=self.now.timestamp()))
+        self.now += dt.timedelta(seconds=120)               # (a step; small enough that the runner is not yet called gone)
+        self.settle()
+        self.assertEqual(len(self.boxinfo_calls), 1, "the installer is swapping the folder the file lives in")
+        self.set_state(lambda s: s["update"].update(status="ok", at=self.now.timestamp()))
+        self.advance(15)
+        self.settle()
+        self.assertEqual(self.calls()[-1], {"force": True})
+        self.assertEqual(len(self.boxinfo_calls), 2)
+
+    def test_a_step_while_the_tick_fails_waits_for_a_pass_that_works(self):
+        self.advance(11)
+        self.settle()
+        self.m.tick_ok = False
+        self.now += dt.timedelta(days=1)
+        self.settle()
+        self.assertEqual(len(self.boxinfo_calls), 1)
+        self.m.tick_ok = True
+        self.advance(15)
+        self.settle()
+        self.assertEqual(self.calls()[-1], {"force": True})
+
+    def test_the_file_on_disk_carries_the_new_time_in_the_pass_that_saw_the_step(self):
+        os.makedirs(os.path.join(self.webroot, "pb"))
+        path = os.path.join(self.webroot, "pb", "box.json")
+
+        def write(conf, force=False):
+            return REAL_WRITE_BOX_INFO(conf, ip=None, force=force, root=self.webroot, when=self.now.timestamp(), mdns=False)
+        m = pb.Maintenance(self.api, config_path=self.config_path, monotonic=lambda: self.mono, job_factory=InlineJob,
+                           clock_ok=lambda: True, box_info=write, catalog=lambda: self.catalog, check=lambda c: None,
+                           default_ip=lambda: "192.168.1.5")
+        self.advance(11)
+        m.run(self.now)
+        m.run(self.now)
+        with open(path) as fh:
+            before = json.load(fh)["at"]
+        self.assertEqual(before, int(self.now.timestamp()))
+        self.advance(60)
+        m.run(self.now)
+        self.now += dt.timedelta(days=2)
+        m.run(self.now)
+        m.run(self.now)
+        with open(path) as fh:
+            after = json.load(fh)["at"]
+        self.assertEqual(after, int(self.now.timestamp()), "the file is not hours or days behind the box's clock")
 
     def test_a_failure_to_write_is_logged_now_and_then_never_reaches_the_tick_and_is_retried_in_a_minute(self):
         self.boxinfo_error = OSError(30, "Read-only file system")
@@ -1761,7 +1878,7 @@ class TickDoesNotWaitTests(Fixture):
         class FakeMaintenance:
             api = None
 
-            def __init__(self, clock_ok=None):
+            def __init__(self, clock_ok=None, **kw):
                 pass
 
             def run(self, now):
@@ -1799,7 +1916,7 @@ class TickDoesNotWaitTests(Fixture):
         class FakeMaintenance:
             api = None
 
-            def __init__(self, clock_ok=None):
+            def __init__(self, clock_ok=None, **kw):
                 pass
 
             def run(self, now):
@@ -1908,6 +2025,245 @@ class EverythingFailsTests(Fixture):
         self.assertEqual(self.rules(), json.dumps([g for g in self.store.groups if g["name"] != "pb-state"], sort_keys=True))
 
 
+class PageRepairTests(Fixture):
+    """An update cut off between the program and the page leaves a box of two versions that nothing else puts right:
+    after ten minutes of that, with nothing running and Sinko not removed on purpose, the scheduler starts `sinko repair`
+    (the installer, from the copy on the box), at most once an hour, and the note of the last try survives its restart."""
+
+    def setUp(self):
+        super().setUp()
+        self.shown = "2.9.0"                                    # the page of the version before
+        self.repairs = []
+        self.repair_result = True
+        self.app = os.path.join(self.tmp, "app")
+        os.makedirs(os.path.join(self.app, "src"))
+        self.put_source(pb.VERSION)
+        patch = mock.patch.object(pb, "APP_DIR", self.app)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.arm(self.m)
+
+    def put_source(self, version):
+        with open(os.path.join(self.app, "src", "VERSION"), "w") as fh:
+            fh.write(version + "\n")
+
+    def start_repair(self):
+        self.repairs.append(self.now)
+        self.seen_note = os.path.exists(pb.state_path("repair.json"))
+        if isinstance(self.repair_result, Exception):
+            raise self.repair_result
+        return self.repair_result
+
+    def arm(self, m):
+        m.page_version = lambda: self.shown
+        m.start_repair = self.start_repair
+        return m
+
+    def watch(self, minutes, m=None):
+        """Time passes, a minute at a time (the page's version is looked at once a minute), passes of the scheduler between."""
+        for _ in range(int(minutes)):
+            self.advance(60)
+            if m is None:
+                self.settle()
+            else:
+                m.run(self.now)
+                m.run(self.now)
+
+    def test_nothing_happens_while_the_versions_agree(self):
+        self.shown = pb.VERSION
+        self.watch(120)
+        self.assertEqual(self.repairs, [])
+        self.assertFalse(os.path.exists(pb.state_path("repair.json")))
+
+    def test_ten_minutes_of_two_versions_start_one_repair_and_nine_do_not(self):
+        self.watch(8)
+        self.assertEqual(self.repairs, [])
+        with self.assertLogs("sinko", level="WARNING") as logs:
+            self.watch(5)
+        self.assertEqual(len(self.repairs), 1)
+        self.assertIn("(2.9.0) and the program (%s) have been of different versions" % pb.VERSION, logs.records[0].getMessage())
+        self.assertIn("at most once an hour", logs.records[0].getMessage())
+        self.assertTrue(self.seen_note, "the note that it was tried is on disk before the repair starts: it restarts this scheduler")
+
+    def test_a_page_that_is_right_again_starts_the_ten_minutes_over(self):
+        self.watch(8)
+        self.shown = pb.VERSION
+        self.watch(2)
+        self.shown = "2.9.0"
+        self.watch(8)
+        self.assertEqual(self.repairs, [], "eight and eight is not ten in a row")
+        with self.assertLogs("sinko", level="WARNING"):
+            self.watch(4)
+        self.assertEqual(len(self.repairs), 1)
+
+    def test_a_page_without_a_version_file_counts_as_a_different_version(self):
+        self.shown = None
+        with self.assertLogs("sinko", level="WARNING") as logs:
+            self.watch(13)
+        self.assertEqual(len(self.repairs), 1)
+        self.assertIn("no version", logs.records[0].getMessage())
+
+    def test_a_mismatch_seen_while_an_update_runs_does_not_count_toward_the_ten_minutes(self):
+        # (an update's runner holds this lock for as long as it lives, and the two versions are expected meanwhile)
+        holder = pb.RunLock()
+        self.assertTrue(holder.acquire())
+        self.watch(15)
+        holder.release()
+        self.assertEqual(self.repairs, [])
+        self.watch(9)
+        self.assertEqual(self.repairs, [], "the ten minutes begin when the box is quiet, not when the update began")
+        with self.assertLogs("sinko", level="WARNING"):
+            self.watch(3)
+        self.assertEqual(len(self.repairs), 1)
+
+    def test_a_mismatch_seen_while_the_installer_runs_does_not_count_either(self):
+        install = pb.open_lock_file("install.lock")              # the installer, started by hand
+        fcntl.flock(install, fcntl.LOCK_EX)
+        self.watch(15)
+        self.assertEqual(self.repairs, [])
+        os.close(install)
+        self.watch(9)
+        self.assertEqual(self.repairs, [], "the ten minutes begin when it is over, not when it began")
+        with self.assertLogs("sinko", level="WARNING"):
+            self.watch(3)
+        self.assertEqual(len(self.repairs), 1)
+
+    def test_not_while_the_state_says_an_update_is_running_and_not_counting_it(self):
+        for _ in range(15):
+            self.set_state(lambda s: s["update"].update(status="running", at=self.now.timestamp(), to="3.1.0"))
+            self.watch(1)
+        self.assertEqual(self.repairs, [])
+        self.set_state(lambda s: s["update"].update(status="ok", at=self.now.timestamp()))
+        self.watch(9)
+        self.assertEqual(self.repairs, [], "and the ten minutes start only now")
+        with self.assertLogs("sinko", level="WARNING"):
+            self.watch(3)
+        self.assertEqual(len(self.repairs), 1)
+
+    def test_not_after_sinko_was_removed_on_purpose(self):
+        pb.ensure_state_dir()
+        pb.atomic_write(pb.removed_flag(), "1\n")
+        self.watch(120)
+        self.assertEqual(self.repairs, [])
+
+    def test_not_without_a_copy_of_this_very_version_to_install_from(self):
+        self.put_source("2.9.0")
+        self.watch(30)
+        self.assertEqual(self.repairs, [], "the copy is another version's")
+        shutil.rmtree(os.path.join(self.app, "src"))
+        self.watch(30)
+        self.assertEqual(self.repairs, [], "no copy at all")
+        os.makedirs(os.path.join(self.app, "src"))
+        self.put_source(pb.VERSION)
+        with self.assertLogs("sinko", level="WARNING"):
+            self.watch(2)
+        self.assertEqual(len(self.repairs), 1, "and as soon as there is one")
+
+    def test_not_on_a_clock_that_is_not_believed(self):
+        self.clock_trusted = False
+        self.watch(30)
+        self.assertEqual(self.repairs, [])
+        self.clock_trusted = True
+        with self.assertLogs("sinko", level="WARNING"):
+            self.watch(1)
+        self.assertEqual(len(self.repairs), 1)
+
+    def test_at_most_once_an_hour_whatever_restarts_in_between(self):
+        with self.assertLogs("sinko", level="WARNING"):
+            self.watch(12)
+        self.assertEqual(len(self.repairs), 1)
+        # The repair restarted the scheduler: a new process, with no memory but the note on disk. The page is still wrong.
+        fresh = self.arm(pb.Maintenance(self.api, config_path=self.config_path, monotonic=lambda: self.mono, job_factory=InlineJob,
+                                        clock_ok=lambda: self.clock_trusted, check=lambda c: None, default_ip=lambda: self.ip,
+                                        box_info=self.fake_box_info, catalog=lambda: self.catalog))
+        self.watch(40, fresh)
+        self.assertEqual(len(self.repairs), 1, "not within the hour (the old process started it 52 minutes ago)")
+        with self.assertLogs("sinko", level="WARNING"):
+            self.watch(20, fresh)
+        self.assertEqual(len(self.repairs), 2, "and again once the hour is over")
+
+    def test_a_note_from_the_future_does_not_block_for_ever(self):
+        pb.ensure_state_dir()
+        pb.atomic_write(pb.state_path("repair.json"), json.dumps({"at": self.now.timestamp() + 10 * 86400}))
+        with self.assertLogs("sinko", level="WARNING"):
+            self.watch(13)
+        self.assertEqual(len(self.repairs), 1)
+        for junk in ("garbage", "[]", '{"at": "x"}', '{"at": 1' + "0" * 400 + "}"):
+            pb.atomic_write(pb.state_path("repair.json"), junk)
+            self.assertTrue(pb.repair_due(self.now.timestamp()), junk)
+
+    def test_a_failing_look_is_logged_once_and_never_stops_anything(self):
+        def broken():
+            raise OSError("the card is read-only")
+        self.m.page_version = broken
+        with self.assertLogs("sinko", level="WARNING") as logs:
+            self.watch(20)
+        self.assertEqual(len([r for r in logs.records if "version of the page" in r.getMessage()]), 1)
+        self.assertEqual(self.repairs, [])
+
+    def test_a_repair_that_cannot_be_started_is_logged_and_the_hour_still_counts(self):
+        self.repair_result = RuntimeError("no systemd")
+        with self.assertLogs("sinko", level="WARNING") as logs:
+            self.watch(13)
+        self.assertEqual(len(self.repairs), 1)
+        self.assertTrue([r for r in logs.records if "repair: no systemd" in r.getMessage()], [r.getMessage() for r in logs.records])
+        self.assertFalse(pb.repair_due(self.now.timestamp()), "so that a failing start is not tried every minute")
+
+    def test_a_runner_that_says_it_did_not_start_is_logged_too(self):
+        self.repair_result = False
+        with self.assertLogs("sinko", level="WARNING") as logs:
+            self.watch(13)
+        self.assertEqual(len(self.repairs), 1)
+        self.assertTrue([r for r in logs.records if "it could not be started" in r.getMessage()])
+
+    def test_the_repair_is_off_unless_the_scheduler_gave_it_both_hands(self):
+        for missing in ("page_version", "start_repair"):
+            m = pb.Maintenance(self.api, config_path=self.config_path, monotonic=lambda: self.mono, job_factory=InlineJob,
+                               clock_ok=lambda: self.clock_trusted, check=lambda c: None, default_ip=lambda: self.ip,
+                               box_info=self.fake_box_info, catalog=lambda: self.catalog)
+            self.arm(m)
+            setattr(m, missing, None)
+            self.watch(30, m)
+        self.assertEqual(self.repairs, [])
+        self.assertEqual(pb.Maintenance(self.api).page_version, None)
+        self.assertEqual(pb.Maintenance(self.api).start_repair, None)
+
+    def test_the_scheduler_builds_its_maintenance_with_the_real_ones(self):
+        built = {}
+
+        class Spy:
+            def __init__(self, **kw):
+                built.update(kw)
+        with mock.patch.object(pb, "Maintenance", Spy):
+            pb.Scheduler()
+        self.assertEqual(built["start_repair"], pb.start_repair_runner)
+        self.assertEqual(built["page_version"].__self__.__class__, pb.PageWatch)
+
+    def test_the_look_at_the_page_asks_pihole_for_the_web_root_once(self):
+        os.makedirs(os.path.join(self.webroot, "pb"))
+        with open(os.path.join(self.webroot, "pb", "version.txt"), "w") as fh:
+            fh.write("3.0.0\n")
+        with mock.patch.dict(os.environ):
+            os.environ.pop("SINKO_WEBROOT")
+            with mock.patch.object(pb, "ftl_config", return_value=self.webroot) as asked:
+                watch = pb.PageWatch()
+                self.assertEqual((watch.version(), watch.version(), watch.version()), ("3.0.0",) * 3)
+                self.assertEqual(asked.call_count, 1)
+            with mock.patch.object(pb, "ftl_config", side_effect=OSError("no pihole-FTL")) as asked, \
+                    mock.patch.object(pb, "page_version", return_value="3.0.0") as read:
+                watch = pb.PageWatch()
+                with mock.patch.object(pb.os.path, "isdir", return_value=False), self.assertRaises(OSError) as caught:
+                    watch.version()
+                self.assertIn("cannot be asked of Pi-hole", str(caught.exception), "not 'there is no page': nothing is known")
+                read.assert_not_called()
+                with mock.patch.object(pb.os.path, "isdir", return_value=True):
+                    self.assertEqual(watch.version(), "3.0.0")
+                self.assertEqual(asked.call_count, 2, "an answer that did not come is asked for again")
+                self.assertEqual(read.call_args[0][0], "/var/www/html", "and meanwhile the usual place is looked at, if the page is there")
+        self.assertEqual(pb.page_version(self.webroot), "3.0.0")
+        self.assertIsNone(pb.page_version(os.path.join(self.webroot, "nowhere")))
+
+
 class ClockGuardTests(unittest.TestCase):
     def guard(self, uptime=100.0, answers=(False,), mono=None):
         self.asked = []
@@ -1991,6 +2347,60 @@ class ClockGuardTests(unittest.TestCase):
         for error in (FileNotFoundError("timedatectl"), subprocess.TimeoutExpired("timedatectl", 1), PermissionError()):
             with mock.patch.object(pb.subprocess, "run", side_effect=error):
                 self.assertIsNone(pb.ntp_synchronized())
+
+    def test_a_timedatectl_that_does_not_answer_in_time_counts_as_not_yet_for_the_guard_but_not_for_the_doctor(self):
+        timeout = subprocess.TimeoutExpired("timedatectl", 1)
+        with mock.patch.object(pb.subprocess, "run", side_effect=timeout):
+            self.assertIsNone(pb.ntp_synchronized(), "by default: it could not say")
+            self.assertIs(pb.ntp_synchronized(on_timeout=False), False)
+            self.assertIsNone(pb.SystemProbe().clock_synchronized(), "the doctor does not warn about a slow answer")
+        with mock.patch.object(pb.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "yes\n", "")) as run:
+            self.assertIs(pb.SystemProbe().clock_synchronized(), True)
+            self.assertEqual(run.call_args[1]["timeout"], 5, "and gives it longer than the scheduler does")
+            pb.ntp_synchronized(timeout=3)
+            self.assertEqual(run.call_args[1]["timeout"], 3)
+
+    def real_guard(self, uptime, mono=None):
+        self.clock = [0.0] if mono is None else mono
+        return pb.ClockGuard(uptime=lambda: uptime[0], monotonic=lambda: self.clock[0])
+
+    def test_with_the_real_probe_a_slow_timedatectl_in_the_first_ten_minutes_is_not_a_trusted_clock(self):
+        # After a power cut the clock is the last one saved, up to an hour old. If a slow timedatectl read as "believe it",
+        # bedtime would end at 02:00 on a clock that says 21:30, with the children's internet back until it got synchronised.
+        uptime = [40.0]
+        guard = self.real_guard(uptime)
+        with mock.patch.object(pb.subprocess, "run", side_effect=subprocess.TimeoutExpired("timedatectl", 1)) as run, \
+                self.assertLogs("sinko", level="INFO") as logs:
+            self.assertFalse(guard.trusted(), "the first question timed out: not believed")
+            self.assertFalse(guard.trusted())
+            self.assertEqual(run.call_count, 1, "and it is not asked again at once")
+            self.clock[0] += 6
+            uptime[0] += 6
+            self.assertFalse(guard.trusted())
+            self.assertEqual(run.call_count, 2, "but again after five seconds")
+        self.assertIn("not synchronised", logs.output[0])
+
+    def test_with_the_real_probe_the_hold_ends_when_timedatectl_does_answer_and_by_itself_after_ten_minutes(self):
+        uptime = [40.0]
+        guard = self.real_guard(uptime)
+        timeout = subprocess.TimeoutExpired("timedatectl", 1)
+        with mock.patch.object(pb.subprocess, "run", side_effect=[timeout, subprocess.CompletedProcess([], 0, "yes\n", "")]), \
+                self.assertLogs("sinko", level="INFO"):
+            self.assertFalse(guard.trusted())
+            self.clock[0] += 6
+            self.assertTrue(guard.trusted(), "synchronised at the second question")
+        late = self.real_guard([599.0])
+        with mock.patch.object(pb.subprocess, "run", side_effect=timeout), self.assertLogs("sinko", level="INFO"):
+            self.assertFalse(late.trusted())
+        later = self.real_guard([600.0])
+        with mock.patch.object(pb.subprocess, "run", side_effect=AssertionError("must not be asked")):
+            self.assertTrue(later.trusted(), "a home without internet still gets its bedtime after ten minutes")
+
+    def test_with_the_real_probe_a_machine_that_cannot_be_asked_at_all_is_believed(self):
+        for error in (FileNotFoundError("timedatectl"), PermissionError("no"), OSError("exec format error")):
+            guard = self.real_guard([40.0])
+            with mock.patch.object(pb.subprocess, "run", side_effect=error):
+                self.assertTrue(guard.trusted(), repr(error))
 
     def test_uptime_is_read_from_proc_uptime_or_the_override(self):
         with tempfile.NamedTemporaryFile("w", delete=False) as fh:
@@ -2100,7 +2510,7 @@ class ClockHoldTests(Fixture):
         class FakeMaintenance:
             api = None
 
-            def __init__(self, clock_ok=None):
+            def __init__(self, clock_ok=None, **kw):
                 seen["maintenance"] = clock_ok
 
             def run(self, now):

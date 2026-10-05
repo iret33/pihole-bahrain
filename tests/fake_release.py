@@ -15,6 +15,11 @@ import threading
 INSTALL_SH = """#!/usr/bin/env bash
 set -e
 echo "install $(cat "$SINKO_SRC/VERSION") src=$SINKO_SRC noninteractive=$SINKO_NONINTERACTIVE ref=$SINKO_REF" >> "$FAKE_LOG"
+if [ -n "${{SINKO_CONFIG_FILE:-}}" ]; then
+  # What the real installer does before anything can go wrong later: it saves the ref it was given as SINKO_REF.
+  {{ grep -v '^SINKO_REF=' "$SINKO_CONFIG_FILE" 2>/dev/null || true; echo "SINKO_REF=$SINKO_REF"; }} > "$SINKO_CONFIG_FILE.new"
+  mv "$SINKO_CONFIG_FILE.new" "$SINKO_CONFIG_FILE"
+fi
 {install_fail}
 install -D -m 755 "$SINKO_SRC/bin/sinko" "$SINKO_APP_DIR/bin/sinko"
 install -D -m 644 "$SINKO_SRC/VERSION" "$SINKO_APP_DIR/VERSION"
@@ -251,3 +256,40 @@ def serve_pihole():
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     return httpd, store
+
+
+def serve_truncated(good_after=None):
+    """A Pi-hole whose every answer is cut short: it promises 500 bytes and sends 11, then closes the connection (FTL
+    restarting, a connection dropped half way). urllib then raises http.client.IncompleteRead, which is neither an OSError
+    nor a ValueError. With `good_after` = n the first n answers are cut and the later ones are `{}` with status 200.
+    Returns (httpd, calls): `calls` is a list that holds the path of every request, `httpd.url` the address."""
+    calls = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def handle_any(self):
+            calls.append(self.path)
+            if self.headers.get("Content-Length"):
+                self.rfile.read(int(self.headers["Content-Length"]))
+            if good_after is not None and len(calls) > good_after:
+                body = b"{}"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "500")
+            self.end_headers()
+            self.wfile.write(b'{"session":')
+            self.close_connection = True
+
+        do_GET = do_POST = do_PUT = do_DELETE = handle_any
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
+    httpd.url = "http://127.0.0.1:%d" % httpd.server_port
+    return httpd, calls

@@ -2,7 +2,8 @@
 """sinko — parental controls on top of Pi-hole v6.
 
 Commands
-  setup        Create/refresh the Pi-hole groups, lists and rules this add-on uses.
+  setup        Create/refresh the Pi-hole groups, lists and rules this add-on uses (and run 'pihole -g': one run at a
+               time, so it waits up to 30 minutes for a run that is already going).
   configure    Apply the Pi-hole settings the add-on needs (web root, local name).
   run          Background scheduler (timers, bedtime, updates, requests from the page). Run by systemd.
   status       Print the current state.
@@ -10,8 +11,12 @@ Commands
   diagnose     Read-only report on why a service is still reachable after it was blocked.
   watch        Follow the DNS log to see whether a device's queries reach the box.
   update       Update to the newest release (--check, --yes, --ref REF, --force); rolls back by itself if it fails.
-               --ref pins the box to that release or branch; --ref latest follows the newest release again.
-  rollback     Go back to the previous version stored on this box.
+               --ref pins the box to that release or branch once the update has worked (a failed update leaves the
+               choice as it was); --ref latest follows the newest release again. Needs more than 200 MB free.
+  rollback     Go back to the previous version stored on this box (also needs more than 200 MB free).
+  repair       Install this version again from the copy on the box when the page and the program are of different
+               versions (an update was cut short). Nothing is downloaded. The scheduler runs it by itself after ten
+               minutes of such a state, at most once an hour.
   selfcheck    Check that the installation works (run after every update): Pi-hole objects, the scheduler (up for a
                while and finishing its passes), every file of the page.
   telemetry    The optional anonymous counter: on, off (and the counter forgets this box), status, payload (what
@@ -19,7 +24,8 @@ Commands
   box-info     Print what the page may know about this box (/pb/box.json); --write puts it in the page folder.
                The scheduler refreshes that file every five minutes: the page reads it as the scheduler's heartbeat.
   use-mac      Re-register children that were added by IP address under their MAC address.
-  remove       Delete everything this add-on created inside Pi-hole.
+  remove       Delete everything this add-on created inside Pi-hole. A device that also has a group of yours stays
+               (without this add-on's groups); one that was registered only for this add-on goes.
 
 How it works
   Every service (YouTube, TikTok, ...) has its own Pi-hole group "pb-svc-<id>"
@@ -47,6 +53,7 @@ import http.client
 import ipaddress
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -97,6 +104,10 @@ def block_all_is_ours(rule: dict) -> bool:
 
 DEFAULT_GROUP = 0
 TICK_SECONDS = 15
+GRAVITY_LOCK_NAME = "gravity.lock"       # in the state folder: /var/lib/sinko/gravity.lock (the unit that refreshes the lists uses it)
+GRAVITY_LOCK_WAIT = 30 * 60              # seconds a run waits for the one before it ...
+GRAVITY_RUN_LIMIT = 30 * 60              # ... and a run itself may take
+GRAVITY_POLL = 1.0                       # seconds between two looks at a lock that somebody else holds
 
 DEFAULT_STATE = {
     "v": 1,
@@ -261,11 +272,12 @@ def atomic_write(path: str, data, mode: int = 0o600) -> None:
 
 
 def read_json_file(path: str, default=None):
-    """The parsed JSON in `path`, or `default` when it is missing or unreadable (never raises)."""
+    """The parsed JSON in `path`, or `default` when it is missing or unreadable (never raises). An integer of more than
+    400 digits reads as Infinity, which every number check refuses (see _json_int)."""
     try:
         with open(path, encoding="utf-8") as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
+            return json.load(fh, parse_int=_json_int)
+    except (OSError, ValueError, RecursionError):
         return default
 
 
@@ -418,6 +430,24 @@ class LogGate:
         return True
 
 
+def open_lock_file(name: str) -> int:
+    """A file descriptor on /var/lib/sinko/<name>, for flock. The file lives in the state folder (mode 0700, root only),
+    never in a folder every user can write to (/run/lock): there another user could keep the lock, or, with
+    fs.protected_regular (Debian's default), make root's own open of an existing file fail. It is opened without
+    following a link, and anything but a plain file of ours is refused."""
+    ensure_state_dir()
+    path = state_path(name)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+            raise OSError("%s is not a plain file of this user" % path)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 class RunLock:
     """An flock on /var/lib/sinko/lock: held for the whole of an update or rollback, so two never run at once.
 
@@ -429,17 +459,9 @@ class RunLock:
         self._fh = None
 
     def acquire(self) -> bool:
-        """True when this object now holds the lock. The file lives in the state folder (mode 0700, root only), never
-        in a folder every user can write to (/run/lock): there another user could keep the lock, or, with
-        fs.protected_regular (Debian's default), make root's own open of an existing file fail. It is opened without
-        following a link, and anything but a plain file of ours is refused."""
-        ensure_state_dir()
-        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-        fd = os.open(state_path("lock"), flags, 0o600)
+        """True when this object now holds the lock (the file: see open_lock_file)."""
+        fd = open_lock_file("lock")
         try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
-                raise OSError("%s is not a plain file of this user" % state_path("lock"))
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             os.close(fd)
@@ -577,6 +599,13 @@ class ApiError(Exception):
     def __init__(self, status: int, message: str):
         super().__init__("HTTP %s: %s" % (status, message))
         self.status = status
+
+
+# Errors that mean "Pi-hole (or the network to it) did not answer properly": the session is dropped and the pass is
+# tried again with a back-off. Anything else is a bug in this program or a state it did not foresee. An answer that is
+# shorter than its Content-Length (FTL restarting, a connection closed half way) raises http.client.IncompleteRead,
+# which is neither an OSError nor a ValueError.
+TRANSPORT_ERRORS = (ApiError, OSError, ValueError, http.client.HTTPException)
 
 
 def ftl_config(key: str) -> str:
@@ -752,7 +781,7 @@ class Api:
                 status, _ = self._raw("GET", "/api/auth")
                 if status in (200, 401):
                     return
-            except (OSError, ValueError):
+            except TRANSPORT_ERRORS:
                 pass
             if time.time() > deadline:
                 raise ApiError(0, "Pi-hole API did not come up at " + self.base)
@@ -831,9 +860,36 @@ class Api:
 # State (JSON stored in the pb-state group description)
 # --------------------------------------------------------------------------- #
 def parse_state(raw) -> dict:
+    """The shared state from the text stored in the pb-state group, always a complete and valid one.
+
+    TOTAL: whatever is stored there (the page writes it, but so can anybody who can open Pi-hole's admin pages, and a
+    backup brings back whatever was in it) gives a state, and never an exception: this is called on every pass of the
+    scheduler, and one that raises stops bedtime, timers and every request from the page. Numbers are judged the way the
+    page's JavaScript judges them (see _is_number); `tests/fixtures/state-cases.json` is the spec both parsers meet."""
+    try:
+        return _parse_state(raw)
+    except Exception as err:             # a last net: every field below is checked on its own, so this is "cannot happen"
+        if _PARSE_GATE.allow("parse_state"):
+            log.error("the shared state could not be read (%s: %s); using the default one", type(err).__name__,
+                      short_text(err, 80))
+        return json.loads(json.dumps(DEFAULT_STATE))
+
+
+_PARSE_GATE = LogGate()                  # that message at most every half hour: parse_state runs on every pass
+
+
+def _json_int(text: str):
+    """json's way of reading an integer: as long as it is written, except that a number of more than 400 digits (no finite
+    double has that many: the page's JSON.parse reads it as Infinity, which it then refuses) is Infinity here too. Python
+    would otherwise raise for one of more than 4300 digits and refuse the whole text, where the page keeps the rest."""
+    return float("inf") if len(text) > 400 else int(text)
+
+
+def _parse_state(raw) -> dict:
     state = json.loads(json.dumps(DEFAULT_STATE))
     try:
-        data = json.loads(raw, parse_constant=_no_constants) if raw else {}
+        text = raw if isinstance(raw, (str, bytes, bytearray)) else None          # only text is ever stored there
+        data = json.loads(text, parse_constant=_no_constants, parse_int=_json_int) if text else {}
     except (ValueError, RecursionError):
         data = {}
     if not isinstance(data, dict):
@@ -868,7 +924,7 @@ def parse_state(raw) -> dict:
         state["telemetry"] = {"on": tel["on"]}
     comm = data.get("community")
     if isinstance(comm, dict) and _is_count(comm.get("online")) and _is_number(comm.get("at")):
-        state["community"] = {"online": int(comm["online"]), "at": float(comm["at"])}
+        state["community"] = {"online": int(float(comm["online"])), "at": float(comm["at"])}
     setup = data.get("setup")
     if isinstance(setup, dict):
         state["setup"] = {"done": setup.get("done") is True}
@@ -886,17 +942,31 @@ _BLANK_RE = re.compile("[\t\n\x0b\x0c\r \xa0\u1680\u2000-\u200a\u2028\u2029\u202
 
 
 def _is_number(value) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and value == value and abs(value) != float("inf")
+    """A finite number, exactly as the page's `typeof x === 'number' && isFinite(x)` says. The test is the conversion to
+    a double itself: an integer of more than 308 digits is a valid Python int that the page reads as Infinity, and the
+    first float() of it raises OverflowError (comparing it with infinity would not)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False
 
 
 def _is_count(value) -> bool:
     return _is_number(value) and value >= 0
 
 
+def _plain(value):
+    """The number as the page holds it: an integer that a double cannot hold exactly is the double (the page has no other
+    kind), so both programs write back, and compare, the same value."""
+    return float(value) if isinstance(value, int) and abs(value) > 2 ** 53 else value
+
+
 def _nonce(value):
     """A request marker the page writes (the time in ms) and the scheduler acts on once: a number or a short string."""
     if _is_number(value) and value > 0:
-        return value
+        return _plain(value)
     if isinstance(value, str) and 0 < len(value) <= 40:
         return value
     return None
@@ -916,7 +986,7 @@ def _parse_update(raw) -> dict:
     out["notes"] = notes if isinstance(notes, str) and NOTES_RE.fullmatch(notes) else None
     for key in ("checked", "at"):
         v = raw.get(key)
-        out[key] = v if _is_count(v) else 0
+        out[key] = _plain(v) if _is_count(v) else 0
     out["status"] = raw.get("status") if raw.get("status") in UPDATE_STATUSES else "idle"
     err = raw.get("error")
     out["error"] = err[:200] if isinstance(err, str) and not _BLANK_RE.fullmatch(err) else None
@@ -975,11 +1045,18 @@ RELEASE_ASSET = "sinko.tar.gz"
 MAX_DOWNLOAD = 20 * 1024 * 1024        # a release is a few MB; anything bigger is not ours
 MAX_UNPACKED = 100 * 1024 * 1024       # gzip can inflate a small download a thousandfold
 MAX_MEMBERS = 5000
-MIN_FREE_BYTES = 100 * 1024 * 1024
+# Free space an update or a rollback needs. ONE number, the installer's: install.sh refuses to start an update or a
+# rollback (a box that already has Sinko) with 200 MB or less free, and a first install with 1 GB or less (that one may
+# have to install Pi-hole). An engine that asked for less would download, install, fail in the installer's first check,
+# fail again in the rollback's, and report a box that was never touched as one that could not be put back. The doctor
+# warns earlier (DISK_WARN_BYTES), so there is time to make room.
+MIN_FREE_BYTES = 200 * 1024 * 1024
 CHECK_TIMEOUT = 10
 DOWNLOAD_TIMEOUT = 30                  # for each wait on the network ...
 DOWNLOAD_DEADLINE = 600                # ... and for a whole download
-INSTALL_TIMEOUT = 1800
+# The installer's `sinko setup` may wait for a run of gravity that is going (up to GRAVITY_LOCK_WAIT), then does its own
+# (up to GRAVITY_RUN_LIMIT); the rest of the installer takes minutes. A slow night must not become a rolled-back update.
+INSTALL_TIMEOUT = GRAVITY_LOCK_WAIT + GRAVITY_RUN_LIMIT + 900
 SELFCHECK_WAIT = 90                    # the installer has just restarted FTL and the scheduler: give them time
 REQUIRED_MEMBERS = ("sinko/VERSION", "sinko/install.sh", "sinko/bin/sinko")
 REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,100}\Z")      # never starts with "-": it reaches git's command line
@@ -1157,7 +1234,7 @@ def fetch_latest_release(settings: dict, fetch=http_fetch):
     body = fetch(settings["api"], 1 << 20, CHECK_TIMEOUT, 30)
     try:
         data = json.loads(body.decode("utf-8"))
-    except ValueError:
+    except (ValueError, RecursionError):
         raise UpdateError("The answer about the newest version was not understood.")
     return pick_release(data)
 
@@ -1494,7 +1571,7 @@ class Updater:
         except UpdateError as err:
             return {"status": "failed", "from": VERSION, "to": None, "error": str(err)}
         try:
-            ensure_state_dir("cache")
+            self._require_free_space()
             older = [v for v in cached_versions() if is_newer(VERSION, v)]
             if not older:
                 return {"status": "failed", "from": VERSION, "to": None,
@@ -1514,9 +1591,7 @@ class Updater:
         ref = ref or settings["ref"]
         kind, value = classify_ref(ref)
         self._clean_leftovers()
-        free = shutil.disk_usage(ensure_state_dir("cache")).free
-        if free < MIN_FREE_BYTES:
-            raise TransientError("There is not enough free space on the box (%d MB are needed)." % (MIN_FREE_BYTES >> 20))
+        self._require_free_space()                       # before anything is downloaded, unpacked or installed
         os.makedirs(APP_DIR, exist_ok=True)
         if kind == "branch":
             if confirm and not confirm(current, None):
@@ -1545,6 +1620,12 @@ class Updater:
                 self.out("Sinko %s is already the newest version." % current)
                 return "ok", current, None, None, False
         self._ensure_rollback_copy(settings, current)
+        try:
+            self._require_free_space()                   # what was just written (downloads, the unpacked tree) came out of it
+        except TransientError:
+            if version != current:
+                drop_cached(version)
+            raise
         self.out("Installing Sinko %s ..." % version)
         target["touched"] = True
         ok, why = self._install_and_check(src, ref)
@@ -1555,7 +1636,10 @@ class Updater:
         if version != current:
             drop_cached(version)              # a release that failed here is no rollback target
             self.out("%s Going back to %s ..." % (why, current))
-            back_ok, back_why = self._rollback_to(current, ref)
+            # The installer saves the ref it is given as SINKO_REF. The version that is put back gets the ref the box had
+            # BEFORE this run (settings, read at the start), not the one that was asked for and failed: otherwise the
+            # box would stay pinned to a release that does not work here (and never see the fixed one after it).
+            back_ok, back_why = self._rollback_to(current, settings["ref"])
         else:
             back_ok, back_why = False, "it is the version that was just installed"
         # The reason is for whoever helps (and for the log): English, short, and never a command to type. The page
@@ -1567,6 +1651,17 @@ class Updater:
         else:
             error = "%s Going back to %s did not work either (%s)." % (why, current, back_why)
         return "failed", version, error, bool(back_ok), False
+
+    @staticmethod
+    def _require_free_space() -> None:
+        """Stop, with a reason a person can act on, when the card has no room for the installer: the installer asks for
+        the same amount (see MIN_FREE_BYTES) and would stop at its very first line. Nothing has been changed yet, and
+        that is said, because `rolledBack` of such a failure comes from a check of the box as it was. More than the
+        limit is needed, not the limit itself, as in the installer."""
+        free = shutil.disk_usage(ensure_state_dir("cache")).free
+        if free <= MIN_FREE_BYTES:
+            raise TransientError("There is not enough free space on the box: %d MB are free and more than %d MB are needed. "
+                                 "Nothing on the box was changed." % (free >> 20, MIN_FREE_BYTES >> 20))
 
     def _resolve(self, kind, value, settings):
         """{"version", "tag"} of the release to install; version None means "whatever /latest/ is" (see below)."""
@@ -1823,8 +1918,11 @@ def referenced_page_files(index_html: str) -> list:
 
 def page_file_problems(root: str, src_web=None) -> list:
     """What is missing (or empty) among the page's files: a page that lacks one of its scripts shows nothing at all.
-    `root` is the web root. Checked: index.html, version.txt, every /pb/ file index.html names, and every file the
-    installed release's web folder (`src_web`, when it is there) ships."""
+    `root` is the web root. Checked: index.html, version.txt, every /pb/ file index.html names, and every file of the
+    installed release's web folder (`src_web`, when it is there) that the installer copies: the files directly in it
+    (index.html goes to the web root, the others into pb/) and the files directly in fonts/, nothing deeper and no
+    file whose name starts with a dot, exactly the installer's own rule (install_files in install.sh: web/* and
+    web/fonts/*). A file the installer leaves out is not missing."""
     wanted = ["index.html", "pb/app.js", "pb/version.txt", "pb/services.json"]       # the page cannot start without these
     try:
         with open(os.path.join(root, "index.html"), encoding="utf-8", errors="replace") as fh:
@@ -1832,10 +1930,15 @@ def page_file_problems(root: str, src_web=None) -> list:
     except OSError:
         pass
     if src_web and os.path.isdir(src_web):
-        for here, _dirs, names in os.walk(src_web):
+        for folder, prefix in ((src_web, ""), (os.path.join(src_web, "fonts"), "fonts/")):
+            try:
+                names = sorted(os.listdir(folder))
+            except OSError:
+                continue
             for name in names:
-                rel = os.path.relpath(os.path.join(here, name), src_web).replace(os.sep, "/")
-                wanted.append(rel if rel == "index.html" else "pb/" + rel)
+                if name.startswith(".") or not os.path.isfile(os.path.join(folder, name)):
+                    continue
+                wanted.append("index.html" if prefix + name == "index.html" else "pb/" + prefix + name)
     problems = []
     for name in dict.fromkeys(wanted):
         try:
@@ -1858,6 +1961,39 @@ def installed_source_web():
     return path if os.path.isdir(path) else None
 
 
+def page_version(root=None):
+    """The version the installed page says it is (pb/version.txt in the web root), or None when it says none."""
+    try:
+        with open(os.path.join(root or webroot(), "pb", "version.txt"), encoding="utf-8") as fh:
+            return fh.read(64).strip() or None
+    except (OSError, ValueError):
+        return None
+
+
+class PageWatch:
+    """What the scheduler asks, once a minute, about the installed page: its version. The web root comes from Pi-hole's
+    settings (a subprocess), so it is asked once and kept. When Pi-hole cannot say, the usual place is looked at if the
+    page is there, and otherwise nothing is known (an error, not "no page"): a box must not be reinstalled because a
+    question was not answered."""
+
+    DEFAULT_ROOT = "/var/www/html"
+
+    def __init__(self):
+        self._root = None
+
+    def version(self):
+        root = self._root or os.environ.get("SINKO_WEBROOT")
+        if not root:
+            value, err = ftl_try("webserver.paths.webroot")
+            if value and err is None:
+                self._root = root = value
+            elif os.path.isdir(os.path.join(self.DEFAULT_ROOT, "pb")):
+                root = self.DEFAULT_ROOT
+            else:
+                raise OSError("the web root cannot be asked of Pi-hole just now (%s)" % short_text(err or "no answer", 60))
+        return page_version(root)
+
+
 def selfcheck_round(catalog: dict, scheduler=None) -> list:
     """[(ok, text)], one per check. `scheduler` replaces the check of the scheduler service (the scheduler itself,
     which has just been started and checks itself, cannot be asked whether it is running)."""
@@ -1870,14 +2006,14 @@ def selfcheck_round(catalog: dict, scheduler=None) -> list:
         api = Api()
         api.login()
         add(True, "Pi-hole API reachable, signed in with the CLI password")
-    except (ApiError, OSError, ValueError) as err:
+    except Exception as err:                 # a check that cannot run FAILS: it must never end the process with a traceback
         api = None
         add(False, "Pi-hole API reachable, signed in with the CLI password (%s)" % short_text(err, 80))
     groups = lists = None
     if api is not None:
         try:
             groups, lists = api.group_map(), api.lists()
-        except (ApiError, OSError, ValueError) as err:
+        except Exception as err:
             groups = None
             reason = "could not be read: %s" % short_text(err, 60)
     else:
@@ -1895,7 +2031,7 @@ def selfcheck_round(catalog: dict, scheduler=None) -> list:
     if api is not None:
         try:
             api.logout()
-        except (ApiError, OSError, ValueError):
+        except Exception:
             pass
     if scheduler is None:
         state, text = scheduler_status()
@@ -1905,11 +2041,7 @@ def selfcheck_round(catalog: dict, scheduler=None) -> list:
     root = webroot()
     problems = page_file_problems(root, installed_source_web())
     add(not problems, "page files installed in %s%s" % (root, " (missing: %s)" % ", ".join(problems[:3]) if problems else ""))
-    try:
-        with open(os.path.join(root, "pb", "version.txt"), encoding="utf-8") as fh:
-            shown = fh.read().strip()
-    except OSError:
-        shown = None
+    shown = page_version(root)
     add(shown == VERSION, "page and program are the same version (page: %s, program: %s)" % (shown or "none", VERSION))
     return results
 
@@ -1944,11 +2076,15 @@ def read_uptime():
         return None
 
 
-def ntp_synchronized():
-    """True / False as `timedatectl` says, None when it cannot say (no systemd, no answer within a second)."""
+def ntp_synchronized(timeout: float = 1, on_timeout=None):
+    """True / False as `timedatectl` says, None when it cannot say (no systemd, an answer that makes no sense).
+    `on_timeout` is what a command that has not answered within `timeout` seconds counts as: None, unless the caller
+    knows better (the clock guard counts it as "not yet")."""
     try:
         done = subprocess.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"], capture_output=True,
-                              text=True, timeout=1)
+                              text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return on_timeout
     except (OSError, subprocess.SubprocessError):
         return None
     answer = done.stdout.strip().lower() if done.returncode == 0 else ""
@@ -1961,14 +2097,16 @@ class ClockGuard:
     The Orange Pi has no real-time clock: after a power cut it starts with the time it last saved, hours or days
     ago, until it has reached an internet time server. Acting on that time would switch bedtime off in the middle
     of the night, or end a timer that has not run out. So while the box has been up less than ten minutes and
-    timedatectl says the clock is NOT synchronised, the current state is held. Only an explicit "no" holds: a machine
-    that cannot tell (no systemd) is believed, and so is every box after ten minutes, because a home without
-    internet must still get its bedtime.
+    timedatectl says the clock is NOT synchronised, the current state is held. A timedatectl that does not answer in
+    time counts as "no" as well: right after a boot it has to be started by systemd (it exits when idle) on a card that
+    FTL is also reading, and a second can be too little; asked again five seconds later, it answers. A machine that
+    cannot tell at all (no systemd, no such command) is believed, and so is every box after ten minutes, because a home
+    without internet must still get its bedtime.
     """
 
-    def __init__(self, uptime=read_uptime, synchronized=ntp_synchronized, monotonic=time.monotonic):
+    def __init__(self, uptime=read_uptime, synchronized=None, monotonic=time.monotonic):
         self._uptime = uptime
-        self._probe = synchronized
+        self._probe = synchronized or (lambda: ntp_synchronized(on_timeout=False))
         self._mono = monotonic
         self._synced = False
         self._asked = None             # (monotonic time, answer) of the last "no"
@@ -2118,9 +2256,42 @@ class Controller:
             self.gravity()
 
     @staticmethod
-    def gravity() -> None:
-        log.info("updating gravity (this can take a minute)…")
-        subprocess.run(["pihole", "-g"], check=True, stdout=subprocess.DEVNULL, timeout=1800)
+    def gravity(wait: float = GRAVITY_LOCK_WAIT) -> None:
+        """`pihole -g`, one run at a time. Pi-hole's gravity.sh has no lock of its own: every run deletes and rebuilds
+        one fixed temporary database and ends by moving it over the live one, so two that overlap (an update's setup
+        and the nightly list refresh, a self-repair, the retry of an update) leave a mix of both, and a service that
+        should be blocked can stay reachable until the next run, with every check saying all is well. Every run that
+        Sinko starts takes the flock on /var/lib/sinko/gravity.lock first (the systemd service that refreshes the lists
+        takes the same one with flock(1)) and waits for the one that is running, up to `wait` seconds. Pi-hole's own
+        weekly run and the page's restore start gravity without asking: only the timer's hour keeps clear of those."""
+        try:
+            fd = open_lock_file(GRAVITY_LOCK_NAME)
+        except OSError as err:
+            # The lock is the safety, not the job: a folder that cannot be used must not stop the first installation.
+            log.warning("could not open the lock that keeps two updates of the block lists apart (%s): going on without it",
+                        short_text(err, 80))
+            fd = None
+        try:
+            if fd is not None:
+                deadline = time.monotonic() + wait
+                announced = False
+                while True:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise subprocess.TimeoutExpired("pihole -g", wait)   # as for a run that takes too long
+                        if not announced:
+                            announced = True
+                            log.info("the block lists are being updated by another run: waiting for it (up to %d minutes)",
+                                     wait // 60)
+                        time.sleep(GRAVITY_POLL)
+            log.info("updating gravity (this can take a minute)…")
+            subprocess.run(["pihole", "-g"], check=True, stdout=subprocess.DEVNULL, timeout=GRAVITY_RUN_LIMIT)
+        finally:
+            if fd is not None:
+                os.close(fd)                                                     # closing drops the lock
 
     def migrate_legacy(self) -> None:
         """Remove objects created by the old (pre-2.0) installer."""
@@ -2194,15 +2365,22 @@ class Controller:
         return lines
 
     def remove(self) -> None:
+        """Take everything Sinko made out of Pi-hole. A client row that holds only Sinko's groups (and the Default one) is
+        Sinko's own and is deleted. A row that also holds a group of the owner's (the owner had registered the device
+        before, or gave it a group of their own since) is the owner's: Sinko's groups come off it and the row, its name
+        and the owner's groups stay."""
         groups = self.api.group_map()
         ours = {g["id"] for n, g in groups.items() if n.startswith("pb-")}
+        kids_id = groups.get(G_KIDS, {}).get("id")
         for c in self.api.clients():
-            if set(c.get("groups", [])) & ours:
-                if groups.get(G_KIDS) and groups[G_KIDS]["id"] in c.get("groups", []):
-                    self.api.request("DELETE", "/api/clients/" + Api.q(c["client"]))
-                else:
-                    keep = [g for g in c["groups"] if g not in ours] or [DEFAULT_GROUP]
-                    self.api.put_client(c["client"], c.get("comment") or "", keep)
+            held = c.get("groups", [])
+            if not set(held) & ours:
+                continue
+            keep = [g for g in held if g not in ours]
+            if kids_id in held and set(keep) <= {DEFAULT_GROUP}:
+                self.api.request("DELETE", "/api/clients/" + Api.q(c["client"]))
+            else:
+                self.api.put_client(c["client"], c.get("comment") or "", keep or [DEFAULT_GROUP])
         for l in self.api.lists():
             if (l.get("comment") or "").startswith(LIST_COMMENT_PREFIX):
                 self.api.request("DELETE", "/api/lists/%s?type=block" % Api.q(l["address"]))
@@ -2467,14 +2645,24 @@ def refresh_box_info(**kw) -> None:
 
 
 def start_update_runner() -> bool:
-    """Start `sinko update --yes --from-panel` so that it outlives the restart of this service, which the installer
-    causes: as its own transient systemd unit, and if systemd refuses, as a detached process."""
-    argv = [sys.executable, os.path.abspath(__file__), "update", "--yes", "--from-panel"]
+    """Start `sinko update --yes --from-panel` (see start_runner)."""
+    return start_runner("sinko-update", "Sinko update", ["update", "--yes", "--from-panel"], "update.log", "the update")
+
+
+def start_repair_runner() -> bool:
+    """Start `sinko repair` (see start_runner)."""
+    return start_runner("sinko-repair", "Sinko repair", ["repair"], "repair.log", "the repair")
+
+
+def start_runner(unit: str, description: str, args: list, log_name: str, what: str) -> bool:
+    """Start `sinko <args>` so that it outlives the restart of this service, which the installer causes: as its own
+    transient systemd unit, and if systemd refuses, as a detached process."""
+    argv = [sys.executable, os.path.abspath(__file__)] + args
     # systemd-run does not pass the environment on. Forward the SINKO_* settings (test hooks, overrides), but never
     # anything that could be a secret: the command line of a unit is visible to every user and is logged.
     setenv = ["--setenv=%s=%s" % (k, v) for k, v in sorted(os.environ.items())
               if k.startswith("SINKO_") and not re.search(r"PASS|SECRET|TOKEN|KEY", k)]
-    cmd = ["systemd-run", "--unit", "sinko-update", "--collect", "--quiet", "--description=Sinko update"] + setenv + ["--"] + argv
+    cmd = ["systemd-run", "--unit", unit, "--collect", "--quiet", "--description=" + description] + setenv + ["--"] + argv
     try:
         done = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
         if done.returncode == 0:
@@ -2482,11 +2670,11 @@ def start_update_runner() -> bool:
         why = done.stderr.strip()
     except (OSError, subprocess.SubprocessError) as err:
         why = str(err)
-    if unit_active("sinko-update"):
+    if unit_active(unit):
         return True                           # a runner from an earlier attempt is still going; it owns the result
-    log.warning("systemd-run could not start the update (%s); starting it directly", short_text(why, 100))
+    log.warning("systemd-run could not start %s (%s); starting it directly", what, short_text(why, 100))
     ensure_state_dir()
-    fd = os.open(state_path("update.log"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = os.open(state_path(log_name), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         # A detached process stays in this service's control group, so a restart of the service may still end it;
         # the scheduler then marks the update as not finished. systemd-run is the dependable way.
@@ -2495,6 +2683,40 @@ def start_update_runner() -> bool:
         os.close(fd)
     threading.Thread(target=proc.wait, daemon=True).start()          # reaps it when it ends
     return True
+
+
+REPAIR_FILE = "repair.json"
+REPAIR_EVERY = 3600                         # at most one repair an hour, whatever restarts in between
+
+
+def repair_due(epoch: float) -> bool:
+    """No repair was started within the last hour (the note is in the state folder: the installer restarts the scheduler,
+    and a new process must not forget that it has just tried)."""
+    raw = read_json_file(state_path(REPAIR_FILE))
+    at = raw.get("at") if isinstance(raw, dict) else None
+    return not _is_number(at) or not 0 <= epoch - at < REPAIR_EVERY
+
+
+def note_repair(epoch: float) -> None:
+    ensure_state_dir()
+    atomic_write(state_path(REPAIR_FILE), json.dumps({"at": epoch}))
+
+
+def install_lock_held() -> bool:
+    """Is the installer running (it holds install.lock for as long as it runs)?"""
+    try:
+        fd = open_lock_file("install.lock")
+    except OSError:
+        return False                         # a lock that cannot even be opened is not held by an installer
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)                         # (closing also drops the lock just taken)
+    return False
 
 
 def run_power(action: str) -> None:
@@ -2602,7 +2824,7 @@ def _counter_post(url: str, path: str, body: str, timeout: float):
         raise TelemetryError("the counter could not be reached (%s)" % short_text(getattr(err, "reason", None) or err, 80))
     try:
         return json.loads(raw[:PING_RESPONSE_MAX].decode("utf-8")) if len(raw) <= PING_RESPONSE_MAX else None
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
 
 
@@ -2754,13 +2976,17 @@ class Maintenance:
     PING_RETRY = 1800
     BOXINFO_FIRST = 10                # box.json: first write soon after start, then every five minutes
     BOXINFO_EVERY = 300
+    CLOCK_STEP = 30                   # seconds: the box's clock moved this much more (or less) than time passed: it was set
     HEAL_CHECK_EVERY = 300            # looking for missing lists (missing groups are seen on every pass)
     HEAL_STREAK = 3                   # passes in a row that must see something missing (FTL may be rebuilding gravity)
     HEAL_EVERY = 3600                 # at most one repair an hour
+    PAGE_LOOK_EVERY = 60              # the page's version file is read this often (it needs pihole-FTL's settings: a job)
+    REPAIR_AFTER = 600                # the page and the program must have been of different versions this long (seconds)
 
     def __init__(self, api=None, config_path=None, monotonic=time.monotonic, job_factory=BackgroundJob, clock_ok=None,
                  check=None, start_runner=None, power=None, default_ip=None, apply_address=None, ping=None, body=None,
-                 jitter=None, box_info=None, forget=None, heal=None, recover=None, catalog=None):
+                 jitter=None, box_info=None, forget=None, heal=None, recover=None, catalog=None, page_version=None,
+                 start_repair=None):
         self.api = api
         self.config_path = config_path or CONFIG_FILE
         self.mono = monotonic
@@ -2779,6 +3005,10 @@ class Maintenance:
         self.heal = heal or run_self_heal
         self.recover = recover or recover_check
         self.catalog = catalog or load_catalog_safely
+        # The repair of a half-finished update (see _page) is off unless both are given: the scheduler gives the real ones,
+        # and a test that does not mean to start an installer cannot do it by accident.
+        self.page_version = page_version
+        self.start_repair = start_repair
         started = monotonic()
         self._next_check = started + self.CHECK_FIRST
         self._next_address = started + self.ADDRESS_FIRST
@@ -2787,10 +3017,14 @@ class Maintenance:
         self._next_boxinfo = started + self.BOXINFO_FIRST
         self._next_heal_check = started
         self._next_heal = started
+        self._next_page_look = started
+        self._mismatch_since = None       # when the page and the program were first seen to be of different versions
         self._heal_streak = 0
         self._lists_missing = []
         self._catalog = None
         self._was_trusted = None          # whether the clock was believed on the pass before (None: no pass yet)
+        self._last_pass = None            # (the box's clock, the monotonic clock) at the previous pass: a step shows as a difference
+        self._clock_stepped = False       # the clock was set since box.json was last written
         self._check_forced = False
         self._force_check = False
         self._jobs = {}
@@ -2809,10 +3043,12 @@ class Maintenance:
         """One pass of every side job. Never raises. Returns what it did, as text."""
         self._actions = []
         epoch = now.timestamp()
+        self._note_clock_step(epoch)
         self._state = None
         steps = (("jobs", self._collect), ("reconcile", self._reconcile), ("check", self._check),
                  ("update", self._update), ("power", self._power), ("address", self._address),
-                 ("box.json", self._boxinfo), ("telemetry", self._telemetry), ("self-repair", self._heal))
+                 ("box.json", self._boxinfo), ("telemetry", self._telemetry), ("self-repair", self._heal),
+                 ("page", self._page))
         try:
             self._cur()
         except LookupError:
@@ -2831,6 +3067,16 @@ class Maintenance:
         for line in self._actions:
             log.info(line)
         return self._actions
+
+    def _note_clock_step(self, epoch: float) -> None:
+        """Remember that the box's clock was set (by the time server, after a start with the last saved time): between two
+        passes it moved by another amount than the monotonic clock, which only ever counts real time. box.json carries the
+        box's clock and the page reads it as the scheduler's pulse; see _boxinfo."""
+        mono = self.mono()
+        last, self._last_pass = self._last_pass, (epoch, mono)
+        if last is not None and abs((epoch - last[0]) - (mono - last[1])) > self.CLOCK_STEP:
+            self._clock_stepped = True
+            log.debug("the box's clock was set (it moved %d s while %d s passed)", epoch - last[0], mono - last[1])
 
     def _complain(self, name: str, err) -> None:
         """Log a failure of a side job at most once every 30 minutes per job (a network that is down would otherwise
@@ -2961,7 +3207,9 @@ class Maintenance:
                 up["at"] = result["at"]
                 if result["status"] == "ok" and up["latest"] and result["to"] and not is_newer(up["latest"], result["to"]):
                     up["latest"] = up["notes"] = None
-                seen["result"] = result
+                # The retry rule (failure_is_transient) knows a failure by the release the STATE names. A run that stopped
+                # before it knew which release (no room on the card, say) says none, and the state keeps the one it had set.
+                seen["result"] = dict(result, to=up["to"])
             elif self._runner_gone(up, epoch):
                 seen["gone"] = up["at"]                                 # decided below, once the box has been looked at
         self._change(mutate)
@@ -3183,19 +3431,24 @@ class Maintenance:
         """Refresh /pb/box.json every five minutes, in a job of its own (it asks the web server's settings, systemd and
         the routing table: nothing the tick should wait for). Only while the rules are being applied (the file says
         "the scheduler works"), not while an update runs (the installer swaps the folder the file lives in), and
-        straight away once the clock is believed (the time in the file has to match it). A failure to write is logged
-        now and then and never reaches the tick."""
+        straight away once the clock is believed (the time in the file has to match it), and straight away when the clock
+        was set later on (a box that started on its last saved time and believed it after ten minutes without a time
+        server writes that time; when the internet comes back and the clock jumps, the file would be hours or days
+        behind for up to five minutes, and the page would call the scheduler dead and tell the parent to unplug a healthy
+        box). A failure to write is logged now and then and never reaches the tick."""
         trusted = bool(self.clock_ok())
         became_trusted, self._was_trusted = trusted and self._was_trusted is False, trusted
         if not self.tick_ok or not trusted:
             return
         if self._cur()["update"]["status"] == "running" or RunLock.is_held():
             return
-        if not became_trusted and self.mono() < self._next_boxinfo:
+        now_please = became_trusted or self._clock_stepped
+        if not now_please and self.mono() < self._next_boxinfo:
             return
         conf = self.conf()
-        if self._spawn("boxinfo", lambda: self.box_info(conf, force=became_trusted), self._boxinfo_done):
+        if self._spawn("boxinfo", lambda: self.box_info(conf, force=now_please), self._boxinfo_done):
             self._next_boxinfo = self.mono() + self.BOXINFO_EVERY
+            self._clock_stepped = False
 
     def _boxinfo_done(self, outcome, epoch) -> None:
         if outcome[0] == "error":
@@ -3286,6 +3539,62 @@ class Maintenance:
             self._next_heal_check = self.mono() + 60
             if self._gate_allows("heal-start"):
                 log.warning("Pi-hole lacks %s: setting Sinko up again (at most once an hour)", what)
+
+    # ----- the page and the program are of one version -----
+    def _page(self, now, epoch) -> None:
+        """An update that is cut off (the power goes) between the replacing of the program and the replacing of the page
+        leaves a box with a new program and the old page, or the other way round after a rollback. The box still filters
+        and keeps bedtime, but nothing else puts it right: the update says "already the newest version" (the program has
+        it), the check of the box says the versions differ, and a box nobody can log in to cannot be told to install
+        again. So: when the page and the program have been of different versions for ten minutes, with no update or
+        installation running and the box not removed on purpose, `sinko repair` installs this version again from the
+        copy on the box (nothing is downloaded), as a unit of its own because the installer restarts this scheduler. At
+        most once an hour, and the note of the last try is kept on disk, because the restart forgets everything here."""
+        if self.page_version is None or self.start_repair is None:
+            return
+        if self._repair_blocked():
+            self._mismatch_since = None
+            return
+        if self.mono() < self._next_page_look:
+            return
+        self._next_page_look = self.mono() + self.PAGE_LOOK_EVERY
+        self._spawn("page", self.page_version, self._page_seen)
+
+    def _repair_blocked(self) -> bool:
+        """Sinko was removed on purpose, or something is installing (the installer, an update, a rollback, a repair): the
+        two versions are then expected, and the ten minutes begin only when the box is quiet again."""
+        return os.path.exists(state_path("removed")) or install_lock_held() or self._update_going()
+
+    def _page_seen(self, outcome, epoch) -> None:
+        status, shown = outcome
+        if status == "error":
+            self._complain("version of the page", shown)
+            return
+        now = self.mono()
+        if shown == VERSION:
+            self._mismatch_since = None
+            return
+        if self._mismatch_since is None:
+            self._mismatch_since = now
+            return
+        if (now - self._mismatch_since < self.REPAIR_AFTER or not self.clock_ok() or self._repair_blocked()
+                or read_version_file(os.path.join(APP_DIR, "src")) != VERSION or not repair_due(epoch)):
+            return
+        log.warning("the page (%s) and the program (%s) have been of different versions for %d minutes (an update was "
+                    "probably cut short): installing this version again from the copy on the box (at most once an hour)",
+                    short_text(shown or "no version", 20), VERSION, (now - self._mismatch_since) // 60)
+        note_repair(epoch)
+        self._mismatch_since = None
+        self._actions.append("page and program differ: repairing")
+        if not self._spawn("repair", self.start_repair, self._repair_started):
+            self._repair_started(("ok", False), epoch)
+
+    def _repair_started(self, outcome, epoch) -> None:
+        status, value = outcome
+        if status == "error":
+            self._complain("repair", value)
+        elif not value:
+            self._complain("repair", "it could not be started")
 
     def _update_going(self) -> bool:
         """An update is being installed (the installer sets everything up itself, and may be in the middle of it)."""
@@ -3383,7 +3692,7 @@ def cmd_telemetry(args) -> int:
     try:
         api = Api()
         api.login()
-    except (ApiError, OSError, ValueError) as err:
+    except TRANSPORT_ERRORS as err:
         print("sinko: Pi-hole could not be reached (%s)" % short_text(err, 80), file=sys.stderr)
         return 2
     try:
@@ -3400,7 +3709,7 @@ def cmd_telemetry(args) -> int:
                     state["community"] = None             # an old number must not outlive the "no"
             patch_state(api, record)
         state = parse_state(api.group_map()[G_STATE].get("comment"))
-    except (ApiError, OSError, ValueError) as err:
+    except TRANSPORT_ERRORS as err:
         print("sinko: Pi-hole could not be read or written (%s)" % short_text(err, 80), file=sys.stderr)
         return 2
     finally:
@@ -3537,11 +3846,6 @@ def repair_catalog_files() -> list:
         return []
 
 
-# Errors that mean "Pi-hole (or the network to it) did not answer properly": the session is dropped and the pass is
-# tried again with a back-off. Anything else is a bug in this program or a state it did not foresee.
-TRANSPORT_ERRORS = (ApiError, OSError, ValueError, http.client.HTTPException)
-
-
 class Scheduler:
     """The loop of `sinko run`. One `step()` is one pass; it never raises an Exception whatever Pi-hole answered and
     whatever is in the shared state, and it gives every Pi-hole session back.
@@ -3556,7 +3860,8 @@ class Scheduler:
 
     def __init__(self, clock=None, maintenance=None, gate=None, repair=None, monotonic=time.monotonic):
         self.clock = clock or ClockGuard()
-        self.maintenance = maintenance if maintenance is not None else Maintenance(clock_ok=self.clock.trusted)
+        self.maintenance = maintenance if maintenance is not None else Maintenance(
+            clock_ok=self.clock.trusted, page_version=PageWatch().version, start_repair=start_repair_runner)
         self.gate = gate or LogGate()
         self.repair = repair or repair_catalog_files
         self.mono = monotonic
@@ -3838,7 +4143,7 @@ class SystemProbe:
         return temp if -50 <= temp <= 200 else None
 
     def clock_synchronized(self):
-        return ntp_synchronized()
+        return ntp_synchronized(timeout=5)             # someone is waiting for the doctor anyway; a slow answer is not "no"
 
     @staticmethod
     def _lines(env: str, default: str) -> list:
@@ -4119,8 +4424,8 @@ def cmd_doctor(args) -> int:
                     rep.check(resp.status == 200, "list server reachable (%s)" % base)
             except (OSError, urllib.error.URLError) as err:
                 rep.fix("list server reachable (%s: %s)" % (base, err))
-    except (ApiError, OSError, ValueError) as err:
-        rep.fix("Pi-hole API reachable (%s)" % err)
+    except TRANSPORT_ERRORS as err:
+        rep.fix("Pi-hole API reachable (%s)" % short_text(err, 100))
     finally:
         drop_session(api)
     health_checks(rep, state)
@@ -4730,12 +5035,12 @@ def note_rollback(undone: str, restored: str) -> None:
             patch_state(api, mark)
         finally:
             api.logout()
-    except (ApiError, OSError, ValueError) as err:
+    except TRANSPORT_ERRORS as err:
         log.warning("could not record the rollback in the shared state: %s", err)
 
 
 def cmd_update(args) -> int:
-    conf = read_config()
+    conf = read_config(CONFIG_FILE)               # (the name is looked up now: the file that keep_pin and settle_pin write)
     updater = Updater(conf)
     try:
         ref = args.ref or release_settings(conf)["ref"]
@@ -4764,6 +5069,7 @@ def cmd_update(args) -> int:
         else:
             print("Sinko %s is the newest version." % VERSION)
         return 0
+    saved_pin = conf.get("SINKO_REF")             # as the settings file has it now: what a failed run must leave
     asked = not (args.yes or args.from_panel)
     if asked and not sys.stdin.isatty():
         print("sinko: run 'sudo sinko update --yes' to update without being asked.", file=sys.stderr)
@@ -4788,8 +5094,36 @@ def cmd_update(args) -> int:
             settle_pin(args.ref)
         return 0
     print("sinko: the update failed. %s" % result["error"], file=sys.stderr)
+    if args.ref:
+        keep_pin(saved_pin, args.ref)
     print("To see what is wrong with this box: sudo sinko doctor", file=sys.stderr)    # for the person at the keyboard
     return 1
+
+
+def describe_ref(ref: str) -> str:
+    kind = classify_ref(ref)[0]
+    return ("the newest release" if kind == "latest" else "release %s" % ref if kind == "tag"
+            else "the development branch '%s'" % ref)
+
+
+def keep_pin(was, wanted: str, config_path=None) -> None:
+    """A failed `sinko update --ref X` leaves SINKO_REF as it was. Only a successful update saves the choice (settle_pin),
+    but the installer of the release that failed has already written X into the settings by the time it stops, and when the
+    old version could not be put back (or there was no copy of it) nothing writes it again. `was` is what the settings said
+    before the run (None: no such line, which means "latest")."""
+    path = config_path or CONFIG_FILE
+    before = was or "latest"
+    if (read_config(path).get("SINKO_REF") or "latest") != before:
+        try:
+            write_config_value("SINKO_REF", before, path)
+        except (OSError, ValueError) as err:
+            print("sinko: could not put the setting back to %s in %s (%s)" % (before, path, short_text(err, 80)), file=sys.stderr)
+            return
+    try:
+        follows = describe_ref(before)
+    except UpdateError:
+        return
+    print("The update failed, so the choice of %s was not kept: this box still follows %s." % (wanted, follows), file=sys.stderr)
 
 
 def settle_pin(ref: str, config_path=None) -> None:
@@ -4826,6 +5160,81 @@ def cmd_rollback(args) -> int:
     print("Sinko is back at version %s." % result["to"])
     note_rollback(result["from"], result["to"])
     return 0
+
+
+def note_repaired() -> None:
+    """The update that was cut short has been finished by the repair (or, when it was the way back that was cut short,
+    the previous version is back), and the shared state still says it failed (the scheduler wrote that when it found
+    the box in two versions): say what is true now. Never raises."""
+    def mark(state):
+        up = state["update"]
+        if up["status"] == "failed" and up["to"] == VERSION:
+            up.update(status="ok", error=None, rolledBack=None, at=time.time())
+        elif up["status"] == "failed" and up["from"] == VERSION and up["rolledBack"] is not True:
+            # The way back was cut off (the program had been put back, the page not yet): this version is what runs now.
+            up.update(rolledBack=True, at=time.time(),
+                      error="The update did not finish; the previous version (%s) was put back by the repair." % VERSION)
+        if up["latest"] and not is_newer(up["latest"], VERSION):
+            up["latest"] = up["notes"] = None
+    try:
+        api = Api()
+        api.login()
+        try:
+            patch_state(api, mark)
+        finally:
+            drop_session(api)
+    except TRANSPORT_ERRORS as err:
+        log.warning("could not record the repair in the shared state: %s", short_text(err, 100))
+
+
+def cmd_repair(args) -> int:
+    """`sinko repair`: the page and the program are of different versions (an update was cut short): install this version
+    again from the copy of it on the box, /opt/sinko/src. Nothing is downloaded, so it works without the internet. The
+    scheduler starts it by itself, as a unit of its own, after ten minutes of such a state."""
+    conf = read_config(CONFIG_FILE)
+    try:
+        lock = Updater._take_lock()                 # the update's lock: no update, rollback or repair runs at the same time
+    except UpdateError as err:
+        print("sinko: %s" % err, file=sys.stderr)
+        return 1
+    try:
+        if os.path.exists(removed_flag()):
+            print("sinko: Sinko was removed from this box on purpose, so nothing is repaired. To set it up again: sudo sinko setup",
+                  file=sys.stderr)
+            return 1
+        src = os.path.join(APP_DIR, "src")
+        have = read_version_file(src)
+        if have != VERSION:
+            print("sinko: there is no copy of version %s on this box to install again (%s holds %s)."
+                  % (VERSION, src, have or "no version"), file=sys.stderr)
+            return 1
+        shown = page_version()
+        if shown == VERSION:
+            print("The page and the program are both version %s: nothing to repair." % VERSION)
+            return 0
+        try:
+            Updater._require_free_space()
+            ref = release_settings(conf)["ref"]
+        except UpdateError as err:
+            print("sinko: %s" % err, file=sys.stderr)
+            return 1
+        print("The page is %s and the program is %s. Installing %s again from %s ..." % (shown or "missing", VERSION, VERSION, src))
+        sync_disks()
+        code = run_installer(src, ref)
+        if code != 0:
+            print("sinko: the installer stopped with an error (exit status %s)." % code, file=sys.stderr)
+            return 1
+        sync_disks()
+        ok, detail = run_installed_selfcheck()
+        if not ok:
+            print("sinko: it was installed again, but the box does not pass its own check (%s)." % (detail or "no reason given"),
+                  file=sys.stderr)
+            return 1
+        note_repaired()
+        print("Sinko %s is installed again, and the page and the program agree." % VERSION)
+        return 0
+    finally:
+        lock.release()
 
 
 def cmd_selfcheck(args) -> int:
@@ -4866,7 +5275,8 @@ def cmd_remove(args) -> int:
         Controller(api, load_catalog()).remove()
     finally:
         drop_session(api)
-    print("sinko: removed its groups, lists, rules and kid devices from Pi-hole")
+    print("sinko: removed its groups, lists and rules from Pi-hole, and the devices that were registered only for it "
+          "(a device that also has a group of yours stays, without Sinko's groups)")
     return 0
 
 
@@ -4876,7 +5286,8 @@ def main(argv=None) -> int:
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("setup", help="create/refresh Pi-hole objects")
-    p.add_argument("--no-gravity", action="store_true", help="skip 'pihole -g'")
+    p.add_argument("--no-gravity", action="store_true", help="skip 'pihole -g' (which otherwise runs one at a time: "
+                   "it waits up to 30 minutes for a run that is already going)")
     p.set_defaults(fn=cmd_setup)
     p = sub.add_parser("configure", help="apply required Pi-hole settings")
     p.add_argument("--hostname", default=None, help="local name for the parent page, e.g. family.lan")
@@ -4888,12 +5299,20 @@ def main(argv=None) -> int:
     p.add_argument("--check", action="store_true", help="only say whether a newer version exists")
     p.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     p.add_argument("--ref", default=None, help="latest, a release such as v3.1.0, or a branch (default from the settings). "
-                   "Giving one pins the box to it: updates from the page and at night follow it. "
+                   "Giving one pins the box to it once the update has worked: updates from the page and at night follow it "
+                   "(if the update fails, the box keeps following what it followed before). "
                    "--ref latest follows the newest release again")
-    p.add_argument("--force", action="store_true", help="install even if that version is not newer")
+    p.add_argument("--force", action="store_true", help="install even if that version is not newer (an update needs "
+                   "more than 200 MB of free space either way)")
     p.add_argument("--from-panel", action="store_true", help=argparse.SUPPRESS)      # started by the scheduler
     p.set_defaults(fn=cmd_update)
-    sub.add_parser("rollback", help="go back to the previous version stored on this box").set_defaults(fn=cmd_rollback)
+    sub.add_parser("rollback", help="go back to the previous version stored on this box (needs more than 200 MB free)",
+                   description="Go back to the previous version stored on this box. Needs more than 200 MB of free space "
+                   "(nothing is changed without it)."
+                   ).set_defaults(fn=cmd_rollback)
+    sub.add_parser("repair", help="install this version again from the copy on the box when the page and the program are of "
+                   "different versions (an update was cut short; the scheduler does it by itself after ten minutes)"
+                   ).set_defaults(fn=cmd_repair)
     p = sub.add_parser("selfcheck", help="check that the installation works (used after every update; the scheduler must have run for 20 seconds)")
     p.add_argument("--wait", type=float, default=0, help="keep trying for this many seconds while services start")
     p.set_defaults(fn=cmd_selfcheck)
@@ -4920,7 +5339,11 @@ def main(argv=None) -> int:
     p.add_argument("--write", action="store_true", help="write it into the page folder instead of printing it")
     p.set_defaults(fn=cmd_box_info)
     sub.add_parser("doctor", help="check the installation").set_defaults(fn=cmd_doctor)
-    sub.add_parser("remove", help="delete this add-on's Pi-hole objects").set_defaults(fn=cmd_remove)
+    sub.add_parser("remove", help="delete this add-on's Pi-hole objects (a device that also has a group of yours stays, "
+                   "without this add-on's groups)",
+                   description="Delete the groups, lists and rules this add-on made in Pi-hole, and the devices that were "
+                   "registered only for it. A device that also has a group of yours stays, without this add-on's groups."
+                   ).set_defaults(fn=cmd_remove)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(levelname)s %(message)s", stream=sys.stderr)
@@ -4931,6 +5354,12 @@ def main(argv=None) -> int:
         return args.fn(args)
     except ApiError as err:
         print("sinko: Pi-hole API error: %s" % err, file=sys.stderr)
+        return 2
+    except (OSError, ValueError, http.client.HTTPException) as err:
+        # Pi-hole did not answer properly (FTL restarting, a connection closed half way): one line, not a traceback.
+        log.debug("details", exc_info=True)
+        print("sinko: Pi-hole could not be reached or did not answer properly (%s: %s). Try again in a minute."
+              % (type(err).__name__, short_text(err, 100)), file=sys.stderr)
         return 2
 
 
