@@ -111,7 +111,10 @@ characters, no CORS, nothing logged about the request.
   with the same id would start a new row (the 10-minute repeat rule looks at the row, and the row is gone), but a box
   that was switched off does not ping.
 * The public numbers stop including the box at once: the remembered counts are dropped when, and only when, a row was
-  really deleted, so a stream of forget requests for ids nobody knows costs nothing and cannot force recounts.
+  really deleted, so a stream of forget requests for ids nobody knows costs nothing and cannot force recounts. (That is
+  two statements, the row first. If only the second fails, the box gets a `503`, asks again, gets `200` because the row
+  is already gone, and the public counts catch up within their 5 minutes. Do not turn it into one batch without teaching
+  the fake database in `test/support` the new statement.)
 * Anything other than `200 {"forgotten": true}` (an old Worker that has no `/v1/forget` answers `404`, a database
   that is down answers `503`) makes the box **keep its id, send no pings, and ask again about every 6 hours** until it
   is told. **Deploy this Worker before boxes with the new version reach families**, or a parent who switches the counter
