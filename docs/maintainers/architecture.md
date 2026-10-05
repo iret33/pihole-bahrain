@@ -117,8 +117,8 @@ Read and written by the page **and** by the scheduler. Both normalise with `pars
   "timer": null, "schedule": {...}, "scheduleActive": false,      // unchanged since 2.x
   "update": {
     "auto": false,            // page: install updates by itself, 03:00–05:00 box time
-    "request": null,          // page: opaque marker (Date.now()) of "Update now"
-    "checkRequest": null,     // page: opaque marker of "Check again"
+    "request": null,          // page: marker of "Update now": the time of the request, ms on the box's clock
+    "checkRequest": null,     // page: marker of "Check again" (the same kind of marker)
     "latest": null,           // scheduler: newer version available ("3.1.0") or null
     "notes": null,            // scheduler: https://github.com/<slug>/releases/tag/v3.1.0 (the page only links this)
     "checked": 0,             // scheduler: epoch seconds of the last successful check
@@ -127,18 +127,27 @@ Read and written by the page **and** by the scheduler. Both normalise with `pars
     "at": 0,                  // epoch seconds of the last status change
     "error": null             // short reason when failed (≤ 200 chars, no secrets)
   },
-  "power": {"request": null, "action": null},   // page: "reboot" | "poweroff" with a request marker
+  "power": {"request": null, "action": null},   // page: "reboot" | "poweroff" with a request marker (a time, as above)
   "telemetry": {"on": null},                    // null = not asked, true/false = the parent's answer (authoritative)
   "community": null,                            // scheduler: {"online": n, "at": epoch} after a successful ping
   "setup": {"done": false}                      // page: first-run checklist dismissed
 }
 ```
 
-**Request protocol.** A request marker is opaque. The scheduler acts when it is non-null and different from the
-value stored in `/var/lib/sinko/handled.json`; it first stores the marker there, then clears it in the state, then acts
-(so a reboot request cannot repeat after the box comes back). The page never decides anything: it only asks.
-Nothing in the state is ever used as a URL, path or command; updates always come from the repo configured in
-`/etc/sinko/config`.
+**Request protocol.** A request marker is the time of the request in milliseconds on the **box's** clock: the page takes
+the box's time from the `Date` header of Pi-hole's answers, so a phone with a wrong clock is no problem. The scheduler acts
+when it is non-null and different from the value stored in `/var/lib/sinko/handled.json`; it first stores the marker there,
+then clears it in the state, then acts (so a reboot request cannot repeat after the box comes back). The page never decides
+anything: it only asks. Nothing in the state is ever used as a URL, path or command; updates always come from the repo
+configured in `/etc/sinko/config`.
+
+**A request is for now.** While the box's clock is believed, a marker that is a time (10^11 or more) and lies more than 15
+minutes before or after the box's clock is dropped like a handled one (cleared from the state, never acted on; the log says so). A
+marker that is not a time stays opaque and is acted on once, as before. The case this exists for is a restored backup: the
+restore puts the backup's `pb-state` back, with every request that was waiting when the backup was made, until the page writes
+today's fields over it again (`keepBoxFields`), and a scheduler pass can land in between. A request this box never handled
+(a backup from another box, or from before later requests) looks new to the "different from handled" rule; its age tells it
+apart. `tests/test_page_scheduler.py` makes a pass land in exactly that window.
 
 The scheduler writes the state only when something changed (a write makes Pi-hole reload), and re-reads right
 before writing (existing pattern in `Controller.tick`) so it never overwrites what the page just wrote.
