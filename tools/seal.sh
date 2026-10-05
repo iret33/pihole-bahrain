@@ -161,6 +161,13 @@ preflight() {
   done
   [[ -n "$unit" ]] \
     || problem "no time service (systemd-timesyncd, chrony, ntp) is switched on: the boxes have no battery-backed clock, so their time would be wrong after every power cut (run the installer again with internet; it installs systemd-timesyncd)"
+  # What every box follows. A unit pinned to a version, or installed from a branch (the developer path), sends out boxes that are
+  # never offered an update: the page offers nothing newer on a pinned box, and nothing at all on one that follows a branch.
+  value="$(sed -n 's/^SINKO_REF=//p' "$CONF_FILE" 2>/dev/null | tail -n1 || true)"
+  value="${value//[\'\"]/}"
+  if [[ -n "$value" && "$value" != latest ]]; then
+    problem "this unit follows '$value' (SINKO_REF in $CONF_FILE), so no box made from it would ever be offered an update: set SINKO_REF=latest there (or run: sudo sinko update --ref latest --force)"
+  fi
   # The wizard of Armbian's first login makes a user (with sudo) from what the seller types; the seal locks root, not that
   # account, and a box would let anybody with a keyboard in with the seller's password. Not with --keep-ssh-access (a test unit).
   if (( ! KEEP_SSH )); then
