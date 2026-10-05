@@ -136,8 +136,9 @@ than once a day. A box that was pinned to one version on purpose (`sudo sinko up
 not ask which version is the latest, and one that follows a development branch asks nothing.
 
 **Updating.** When you update (the page's *Update now*, the automatic update at night, or `sudo sinko update`), the box
-downloads the new version from GitHub: the program file and its checksum, from `github.com`, which hands the file on from
-one of its own download servers. Then the update runs Sinko's installer again on the box, and the installer reaches out
+asks `api.github.com` once more which version is the latest (a pinned box does not), and downloads the new version from
+GitHub: the program file and its checksum, from `github.com`, which hands the file on from one of its own download
+servers. Then the update runs Sinko's installer again on the box, and the installer reaches out
 twice more. It refreshes the block lists: Pi-hole downloads each list from where it is published, which for Sinko's
 twenty or so small lists is `raw.githubusercontent.com`, and for any list you added yourself is wherever that one lives.
 And it ends with the same check as `sudo sinko doctor`, which fetches one small public file from the block-list address
@@ -317,9 +318,10 @@ something new, this statement changes first, with the release that does it.
 واحد (`sudo sinko update --ref v3.0.1` على صندوقك الذي بنيته بنفسك) فلا يسأل عن أحدث إصدار، والذي يتبع فرعًا تطويريًا لا
 يسأل عن شيء.
 
-**التحديث.** عندما تحدّث («حدّث الآن» في الصفحة، أو التحديث التلقائي في الليل، أو الأمر `sudo sinko update`) ينزّل
-الصندوق الإصدار الجديد من GitHub: ملف البرنامج وملف التحقق الخاص به، من `github.com`، الذي يحوّل الملف إلى أحد خوادم
-التنزيل التابعة له. ثم يعيد التحديث تشغيل برنامج تثبيت سينكو على الصندوق، ويتصل هذا بالإنترنت مرتين أخريين. فهو يحدّث
+**التحديث.** عندما تحدّث («حدّث الآن» في الصفحة، أو التحديث التلقائي في الليل، أو الأمر `sudo sinko update`) يسأل
+الصندوق `api.github.com` مرة أخرى عن أحدث إصدار (إلا الصندوق المثبَّت على إصدار بعينه)، ثم ينزّل الإصدار الجديد من
+GitHub: ملف البرنامج وملف التحقق الخاص به، من `github.com`، الذي يحوّل الملف إلى أحد خوادم التنزيل التابعة له. ثم يعيد
+التحديث تشغيل برنامج تثبيت سينكو على الصندوق، ويتصل هذا بالإنترنت مرتين أخريين. فهو يحدّث
 قوائم الحظر: ينزّل Pi-hole كل قائمة من المكان الذي تُنشر فيه، فقوائم سينكو الصغيرة، وعددها نحو عشرين، من
 `raw.githubusercontent.com`، وأي قائمة أضفتها أنت من موضعها هي. ثم يختم بالفحص نفسه الذي يجريه الأمر `sudo sinko doctor`،
 فيجلب ملفًا عامًّا صغيرًا من عنوان قوائم الحظر (الملف `lists/guard.txt` على `raw.githubusercontent.com`) ليتأكد من إمكان
