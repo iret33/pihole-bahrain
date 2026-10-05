@@ -28,12 +28,13 @@ The installer downloads the newest release (`sinko.tar.gz`), checks it against t
 go on if they differ. Then it:
 
 1. installs Pi-hole v6 if it is missing;
-2. asks for a **parent password** (8 or more characters). If nobody can be asked, it generates one and shows it on the
+2. asks for a **parent password** (8 or more characters) when Pi-hole has none yet; a password that Pi-hole already has is
+   kept, unless you give `SINKO_PASSWORD`. If nobody can be asked, it generates one and shows it on the
    screen only; with no screen at all it saves it in `/etc/sinko/initial-password` (readable by root only: read it, then
    delete the file). The password is never written to the install log. An *update* never chooses a password. How the
    password reaches Pi-hole depends on Pi-hole: one that has no password yet (a new Pi-hole) is given it through its API,
-   in the body of a request on the box itself; one that already has a password (an existing Pi-hole, or a second run with
-   `SINKO_PASSWORD`) refuses to have it changed that way, so the installer uses Pi-hole's own `pihole setpassword`, which
+   in the body of a request on the box itself; one that already has a password (an existing Pi-hole, or a second run, with
+   `SINKO_PASSWORD` given) refuses to have it changed that way, so the installer uses Pi-hole's own `pihole setpassword`, which
    takes the password as an argument: for a moment it is in that program's arguments, which any user on the box can read
    in the process list. On a box that other people log in to, change the password afterwards on the page instead
    (*My box*, *Change password*, which does not go through a command line). If this copy of Sinko has a counter address, the
