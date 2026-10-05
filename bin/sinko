@@ -2039,11 +2039,15 @@ def read_uptime():
         return None
 
 
-def ntp_synchronized():
-    """True / False as `timedatectl` says, None when it cannot say (no systemd, no answer within a second)."""
+def ntp_synchronized(timeout: float = 1, on_timeout=None):
+    """True / False as `timedatectl` says, None when it cannot say (no systemd, an answer that makes no sense).
+    `on_timeout` is what a command that has not answered within `timeout` seconds counts as: None, unless the caller
+    knows better (the clock guard counts it as "not yet")."""
     try:
         done = subprocess.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"], capture_output=True,
-                              text=True, timeout=1)
+                              text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return on_timeout
     except (OSError, subprocess.SubprocessError):
         return None
     answer = done.stdout.strip().lower() if done.returncode == 0 else ""
@@ -2056,14 +2060,16 @@ class ClockGuard:
     The Orange Pi has no real-time clock: after a power cut it starts with the time it last saved, hours or days
     ago, until it has reached an internet time server. Acting on that time would switch bedtime off in the middle
     of the night, or end a timer that has not run out. So while the box has been up less than ten minutes and
-    timedatectl says the clock is NOT synchronised, the current state is held. Only an explicit "no" holds: a machine
-    that cannot tell (no systemd) is believed, and so is every box after ten minutes, because a home without
-    internet must still get its bedtime.
+    timedatectl says the clock is NOT synchronised, the current state is held. A timedatectl that does not answer in
+    time counts as "no" as well: right after a boot it has to be started by systemd (it exits when idle) on a card that
+    FTL is also reading, and a second can be too little; asked again five seconds later, it answers. A machine that
+    cannot tell at all (no systemd, no such command) is believed, and so is every box after ten minutes, because a home
+    without internet must still get its bedtime.
     """
 
-    def __init__(self, uptime=read_uptime, synchronized=ntp_synchronized, monotonic=time.monotonic):
+    def __init__(self, uptime=read_uptime, synchronized=None, monotonic=time.monotonic):
         self._uptime = uptime
-        self._probe = synchronized
+        self._probe = synchronized or (lambda: ntp_synchronized(on_timeout=False))
         self._mono = monotonic
         self._synced = False
         self._asked = None             # (monotonic time, answer) of the last "no"
@@ -3970,7 +3976,7 @@ class SystemProbe:
         return temp if -50 <= temp <= 200 else None
 
     def clock_synchronized(self):
-        return ntp_synchronized()
+        return ntp_synchronized(timeout=5)             # someone is waiting for the doctor anyway; a slow answer is not "no"
 
     @staticmethod
     def _lines(env: str, default: str) -> list:

@@ -2004,6 +2004,60 @@ class ClockGuardTests(unittest.TestCase):
             with mock.patch.object(pb.subprocess, "run", side_effect=error):
                 self.assertIsNone(pb.ntp_synchronized())
 
+    def test_a_timedatectl_that_does_not_answer_in_time_counts_as_not_yet_for_the_guard_but_not_for_the_doctor(self):
+        timeout = subprocess.TimeoutExpired("timedatectl", 1)
+        with mock.patch.object(pb.subprocess, "run", side_effect=timeout):
+            self.assertIsNone(pb.ntp_synchronized(), "by default: it could not say")
+            self.assertIs(pb.ntp_synchronized(on_timeout=False), False)
+            self.assertIsNone(pb.SystemProbe().clock_synchronized(), "the doctor does not warn about a slow answer")
+        with mock.patch.object(pb.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "yes\n", "")) as run:
+            self.assertIs(pb.SystemProbe().clock_synchronized(), True)
+            self.assertEqual(run.call_args[1]["timeout"], 5, "and gives it longer than the scheduler does")
+            pb.ntp_synchronized(timeout=3)
+            self.assertEqual(run.call_args[1]["timeout"], 3)
+
+    def real_guard(self, uptime, mono=None):
+        self.clock = [0.0] if mono is None else mono
+        return pb.ClockGuard(uptime=lambda: uptime[0], monotonic=lambda: self.clock[0])
+
+    def test_with_the_real_probe_a_slow_timedatectl_in_the_first_ten_minutes_is_not_a_trusted_clock(self):
+        # After a power cut the clock is the last one saved, up to an hour old. If a slow timedatectl read as "believe it",
+        # bedtime would end at 02:00 on a clock that says 21:30, with the children's internet back until it got synchronised.
+        uptime = [40.0]
+        guard = self.real_guard(uptime)
+        with mock.patch.object(pb.subprocess, "run", side_effect=subprocess.TimeoutExpired("timedatectl", 1)) as run, \
+                self.assertLogs("sinko", level="INFO") as logs:
+            self.assertFalse(guard.trusted(), "the first question timed out: not believed")
+            self.assertFalse(guard.trusted())
+            self.assertEqual(run.call_count, 1, "and it is not asked again at once")
+            self.clock[0] += 6
+            uptime[0] += 6
+            self.assertFalse(guard.trusted())
+            self.assertEqual(run.call_count, 2, "but again after five seconds")
+        self.assertIn("not synchronised", logs.output[0])
+
+    def test_with_the_real_probe_the_hold_ends_when_timedatectl_does_answer_and_by_itself_after_ten_minutes(self):
+        uptime = [40.0]
+        guard = self.real_guard(uptime)
+        timeout = subprocess.TimeoutExpired("timedatectl", 1)
+        with mock.patch.object(pb.subprocess, "run", side_effect=[timeout, subprocess.CompletedProcess([], 0, "yes\n", "")]), \
+                self.assertLogs("sinko", level="INFO"):
+            self.assertFalse(guard.trusted())
+            self.clock[0] += 6
+            self.assertTrue(guard.trusted(), "synchronised at the second question")
+        late = self.real_guard([599.0])
+        with mock.patch.object(pb.subprocess, "run", side_effect=timeout), self.assertLogs("sinko", level="INFO"):
+            self.assertFalse(late.trusted())
+        later = self.real_guard([600.0])
+        with mock.patch.object(pb.subprocess, "run", side_effect=AssertionError("must not be asked")):
+            self.assertTrue(later.trusted(), "a home without internet still gets its bedtime after ten minutes")
+
+    def test_with_the_real_probe_a_machine_that_cannot_be_asked_at_all_is_believed(self):
+        for error in (FileNotFoundError("timedatectl"), PermissionError("no"), OSError("exec format error")):
+            guard = self.real_guard([40.0])
+            with mock.patch.object(pb.subprocess, "run", side_effect=error):
+                self.assertTrue(guard.trusted(), repr(error))
+
     def test_uptime_is_read_from_proc_uptime_or_the_override(self):
         with tempfile.NamedTemporaryFile("w", delete=False) as fh:
             fh.write("123.45 678.9\n")
