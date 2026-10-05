@@ -1910,8 +1910,11 @@ def referenced_page_files(index_html: str) -> list:
 
 def page_file_problems(root: str, src_web=None) -> list:
     """What is missing (or empty) among the page's files: a page that lacks one of its scripts shows nothing at all.
-    `root` is the web root. Checked: index.html, version.txt, every /pb/ file index.html names, and every file the
-    installed release's web folder (`src_web`, when it is there) ships."""
+    `root` is the web root. Checked: index.html, version.txt, every /pb/ file index.html names, and every file of the
+    installed release's web folder (`src_web`, when it is there) that the installer copies: the files directly in it
+    (index.html goes to the web root, the others into pb/) and the files directly in fonts/, nothing deeper and no
+    file whose name starts with a dot, exactly the installer's own rule (install_files in install.sh: web/* and
+    web/fonts/*). A file the installer leaves out is not missing."""
     wanted = ["index.html", "pb/app.js", "pb/version.txt", "pb/services.json"]       # the page cannot start without these
     try:
         with open(os.path.join(root, "index.html"), encoding="utf-8", errors="replace") as fh:
@@ -1919,10 +1922,15 @@ def page_file_problems(root: str, src_web=None) -> list:
     except OSError:
         pass
     if src_web and os.path.isdir(src_web):
-        for here, _dirs, names in os.walk(src_web):
+        for folder, prefix in ((src_web, ""), (os.path.join(src_web, "fonts"), "fonts/")):
+            try:
+                names = sorted(os.listdir(folder))
+            except OSError:
+                continue
             for name in names:
-                rel = os.path.relpath(os.path.join(here, name), src_web).replace(os.sep, "/")
-                wanted.append(rel if rel == "index.html" else "pb/" + rel)
+                if name.startswith(".") or not os.path.isfile(os.path.join(folder, name)):
+                    continue
+                wanted.append("index.html" if prefix + name == "index.html" else "pb/" + prefix + name)
     problems = []
     for name in dict.fromkeys(wanted):
         try:

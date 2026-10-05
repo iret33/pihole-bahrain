@@ -2216,6 +2216,58 @@ class PageFilesTests(unittest.TestCase):
         self.put("pb/fonts/a.woff2")
         self.assertEqual(pb.page_file_problems(self.root, src), [])
 
+    def src_tree(self, *names):
+        src = os.path.join(os.path.dirname(self.root), "src-web")
+        for name in names:
+            path = os.path.join(src, name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write("x")
+        return src
+
+    def test_only_what_the_installer_copies_is_required_not_everything_below_the_web_folder(self):
+        # install_files: web/* (the files, not the folders; index.html to the web root) and web/fonts/*. A release that adds
+        # web/img/a.png would otherwise make every update to it fail its check and be rolled back, for a file nobody copies.
+        self.complete()
+        src = self.src_tree("index.html", "app.js", "img/a.png", "img/deeper/b.png", "docs/readme.txt", "fonts/sub/c.woff2",
+                            ".DS_Store", "fonts/.hidden", ".github/x.yml")
+        self.assertEqual(pb.page_file_problems(self.root, src), [])
+
+    def test_the_files_the_installer_does_copy_are_required(self):
+        self.complete()
+        src = self.src_tree("index.html", "app.js", "style.css", "links.json", "fonts/a.woff2", "fonts/OFL.txt")
+        self.assertEqual(pb.page_file_problems(self.root, src), ["pb/links.json", "pb/fonts/OFL.txt", "pb/fonts/a.woff2"])
+        self.put("pb/links.json")
+        self.put("pb/fonts/a.woff2")
+        self.put("pb/fonts/OFL.txt", "")
+        self.assertEqual(pb.page_file_problems(self.root, src), ["pb/fonts/OFL.txt (empty)"])
+
+    def test_a_missing_fonts_folder_in_the_source_is_not_a_problem_of_the_check(self):
+        self.complete()
+        self.assertEqual(pb.page_file_problems(self.root, self.src_tree("app.js")), [])
+
+    def test_the_real_web_folder_holds_only_what_the_installer_copies(self):
+        # The rule of page_file_problems is the installer's. If this fails, a file was added to web/ below a folder other
+        # than fonts/: install.sh would not copy it. Teach install_files (and then this check) about the new folder.
+        web = os.path.join(ROOT, "web")
+        for here, dirs, names in os.walk(web):
+            rel = os.path.relpath(here, web)
+            self.assertIn(rel, (".", "fonts"), "web/%s has files the installer does not copy" % rel)
+            if rel == "fonts":
+                self.assertEqual(dirs, [], "web/fonts/ holds a folder: `install web/fonts/*` would fail on it")
+        installed = os.path.join(os.path.dirname(self.root), "installed")
+        os.makedirs(os.path.join(installed, "pb", "fonts"))
+        for name in os.listdir(web):                       # what install_files puts where
+            path = os.path.join(web, name)
+            if os.path.isfile(path) and not name.startswith("."):
+                shutil.copy(path, os.path.join(installed, name if name == "index.html" else os.path.join("pb", name)))
+        for name in os.listdir(os.path.join(web, "fonts")):
+            shutil.copy(os.path.join(web, "fonts", name), os.path.join(installed, "pb", "fonts", name))
+        for name in ("version.txt", "services.json", "domains.json"):
+            with open(os.path.join(installed, "pb", name), "w") as fh:
+                fh.write("x")
+        self.assertEqual(pb.page_file_problems(installed, web), [])
+
     def test_the_source_tree_counts_only_when_it_is_the_installed_version(self):
         app = os.path.join(os.path.dirname(self.root), "app")
         os.makedirs(os.path.join(app, "src", "web"))
