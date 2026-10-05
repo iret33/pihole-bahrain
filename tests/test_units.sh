@@ -48,6 +48,19 @@ for blocking in ProtectSystem ReadWritePaths ReadOnlyPaths InaccessiblePaths Pri
   [[ -z "$(active "$blocking")" ]] || fail "$blocking is set: it can stop systemd-run, pihole-FTL, the installer fallback or the writes to /etc/sinko and /var/lib/sinko"
   grep -q "^#.*$blocking" "$svc" || fail "$blocking is not set, and the unit does not say why"
 done
+echo "--- sinko-lists.service: gravity runs behind the lock every Sinko-started gravity run takes (Pi-hole's gravity.sh has none)"
+ls="$UNITS/sinko-lists.service"
+[[ "$(grep -E '^ExecStart=' "$ls")" == "ExecStart=/usr/bin/flock -w 1800 /var/lib/sinko/gravity.lock @PIHOLE@ -g" ]] || fail "sinko-lists.service does not run 'pihole -g' under flock -w 1800 on /var/lib/sinko/gravity.lock"
+grep -q '^Type=oneshot$' "$ls" || fail "the list refresh is not a oneshot (a waiting lock must not time out the start)"
+grep -q '^TimeoutStartSec=' "$ls" && fail "a start timeout would end a run that waits for the lock"
+grep -q '^StateDirectory=sinko$' "$ls" || fail "the folder of the lock file is not made by the unit (flock cannot open a lock file in a folder that is not there)"
+grep -q '^StateDirectoryMode=0700$' "$ls" || fail "the state folder would not be root only"
+echo "--- bin/sinko takes the same lock (the box program's gravity runs and the unit's must be serialised by one file)"
+if grep -q 'gravity.lock' "$REPO/bin/sinko"; then
+  grep -q 'flock' "$REPO/bin/sinko" || fail "bin/sinko names the gravity lock but does not use flock"
+else
+  echo "    NOTE: bin/sinko does not mention gravity.lock in this tree (the box engineer's change is not merged here)"
+fi
 echo "--- sinko-firstboot.service: only while the flag exists, before SSH and the scheduler, after the network, a clean exit is a success"
 fb="$UNITS/sinko-firstboot.service"
 grep -q '^ConditionPathExists=/var/lib/sinko/firstboot$' "$fb" || fail "the first-start unit is not guarded by the flag file"

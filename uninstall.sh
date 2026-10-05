@@ -65,7 +65,13 @@ EOF
   fi
   "$BIN" configure --remove-hostname --disable-web || true
   echo "==> Updating Pi-hole's block lists"
-  pihole -g >/dev/null 2>&1 || true
+  # Behind the same lock as every other gravity run Sinko starts (sinko-lists.service, `sinko setup`): the timer is still on
+  # at this point and may be in the middle of one.
+  if install -d -m 700 "$STATE_DIR" 2>/dev/null; then
+    flock -w 1800 "$STATE_DIR/gravity.lock" pihole -g >/dev/null 2>&1 || true
+  else
+    pihole -g >/dev/null 2>&1 || true
+  fi
 else
   echo "==> Nothing to take out of Pi-hole (the Sinko program or Pi-hole is not installed)"
 fi
