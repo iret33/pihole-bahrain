@@ -641,15 +641,22 @@ class PageAndSchedulerTests(unittest.TestCase):
         self.assertEqual(box.state()["community"]["online"], 1, "the answer is in the state")
         self.assertTrue(self.wait(lambda: box.store.state()["setup"] == {"done": True}), "(the page also ticked the whole list off, which survived the scheduler's writes)")
         self.open_box(page)
-        self.assertTrue(self.wait(lambda: page.is_visible("#boxCounterOnline") and page.inner_text("#boxCounterOnline") == T("en", "boxCounterOnline", n="1")),
-                        "the page says that this is one of 1 boxes online")
-        self.assertTrue(page.is_checked("#boxCounter"))
+        self.assertTrue(self.wait(lambda: page.is_checked("#boxCounter")))
+        page.wait_for_timeout(800)
+        self.assertTrue(page.is_hidden("#boxCounterOnline"), "the counter counts the box itself: one box online is nobody else yet, and the page does not say 'one of 1'")
+        # another box joins; the next ping (about every six hours) brings the number two, which the page says in its own words
+        other = "ab" * 16
+        counter.known.add(other)
+        box.tick(3, advance=7 * 3600)
+        self.assertEqual((counter.pings, box.state()["community"]["online"]), ([ident, ident], 2))
+        self.assertTrue(self.wait(lambda: page.is_visible("#boxCounterOnline") and page.inner_text("#boxCounterOnline") == T("en", "boxCounterOnlineTwo")),
+                        "the page says that this box and one other are online: %r" % page.inner_text("#boxCounterOnline"))
         page.click("#boxCounterCard label.box-switch-row")              # No
         self.assertTrue(self.wait(lambda: box.store.state()["telemetry"] == {"on": False}), "the page stores the No")
         box.tick(2)
         self.assertEqual(counter.forgotten, [ident], "the scheduler's forget request reached the counter")
-        self.assertEqual(json.loads(counter.requests[1][2]), {"id": ident})
-        self.assertEqual(counter.known, set(), "which deleted the id")
+        self.assertEqual(json.loads(counter.requests[2][2]), {"id": ident})
+        self.assertEqual(counter.known, {other}, "which deleted the id (and only that one)")
         for name in ("install-id", "counter-sent", "forget-pending"):
             self.assertFalse(os.path.exists(pb.state_path(name)), name + " is gone from the box too")
         st = box.state()
@@ -657,7 +664,7 @@ class PageAndSchedulerTests(unittest.TestCase):
         self.assertTrue(self.wait(lambda: page.is_hidden("#boxCounterOnline") and not page.is_checked("#boxCounter")))
         box.tick(3, advance=7 * 3600)
         box.tick(3, advance=7 * 3600)
-        self.assertEqual((len(counter.requests), counter.pings, counter.forgotten), (2, [ident], [ident]), "and nothing more is ever sent")
+        self.assertEqual((len(counter.requests), counter.pings, counter.forgotten), (3, [ident, ident], [ident]), "and nothing more is ever sent")
         self.assertEqual(st["setup"], {"done": True})
         self.finish(box, page)
 
@@ -713,7 +720,10 @@ class PageAndSchedulerTests(unittest.TestCase):
     def test_a_box_json_that_is_25_minutes_old_by_the_box_clock_says_the_scheduler_is_not_running(self):
         box = Box(self)
         page = self.open(box)
-        page.evaluate("() => { PBBox.timing.heartbeatGrace = 1500; }")
+        # (The test cannot wait 25 minutes, so it moves the box's clock in one step. The page waits out a step for the scheduler's next pass,
+        # which test_a_step_of_the_boxs_clock_is_not_a_stopped_scheduler covers; here the wait is switched off, as it is the stopped scheduler
+        # that is tested.)
+        page.evaluate("() => { PBBox.timing.heartbeatGrace = 1500; PBBox.timing.clockStepHold = 0; }")
         self.look_again(page)
         page.wait_for_timeout(1800)
         self.look_again(page)
@@ -731,6 +741,31 @@ class PageAndSchedulerTests(unittest.TestCase):
         box.tick(2, advance=301)
         self.look_again(page)
         self.assertTrue(self.wait(lambda: not self.banner(page), seconds=5), "the banner goes away by itself once the box writes the file again")
+        self.finish(box, page)
+
+    def test_a_step_of_the_boxs_clock_is_not_a_stopped_scheduler(self):
+        """The box has no real-time clock: after hours without internet its clock steps forward when it reaches a time server, and the box.json
+        it wrote before looks hours old until the scheduler's next pass writes it again by the new time. The page waits that pass out."""
+        box = Box(self)
+        page = self.open(box)
+        page.evaluate("() => { PBBox.timing.heartbeatGrace = 1200; PBBox.timing.clockStepHold = 4500; }")
+        self.look_again(page)
+        page.wait_for_timeout(1500)
+        self.assertFalse(self.banner(page))
+        box.store.clock_skew = 3 * 3600                  # the clock steps three hours; nobody has ticked since
+        self.look_again(page)
+        page.wait_for_timeout(2500)                      # longer than the grace, shorter than the wait after a step
+        self.look_again(page)
+        page.wait_for_timeout(300)
+        info = box.box_json()
+        self.assertGreater(box.box_clock() - info["at"], 3 * 3600 - 120, "(set-up: by the box's new clock the file is three hours old)")
+        self.assertFalse(self.banner(page), "a file that looks hours old right after the clock stepped is not called silence yet")
+        box.tick(2, advance=301)                         # the scheduler's pass: the real writer, by the box's clock
+        self.assertLess(box.box_clock() - box.box_json()["at"], 600, "(the real writer wrote it afresh)")
+        for _ in range(8):                               # through and past the end of the wait: the banner never shows
+            self.look_again(page)
+            page.wait_for_timeout(700)
+            self.assertFalse(self.banner(page), "and the banner never shows")
         self.finish(box, page)
 
     def test_the_scheduler_writes_box_json_often_enough_for_the_pages_twenty_minute_limit(self):
