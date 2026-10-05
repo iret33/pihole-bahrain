@@ -10,9 +10,14 @@ OpenAPI specs: a password that can be changed (PATCH /api/config with webserver.
 like FTL) or absent ("open" mode), the Teleporter archive (GET and POST /api/teleporter, honouring the "import" JSON),
 /api/info/system, sensors, version and host, and GET/PATCH /api/config.
 
+It also serves /pb/box.json the way the box program writes it (`Store.box_info`, `None` = an older box with no such file) and answers
+POST /api/action/gravity like FTL: 200 and a text stream first, the run itself after, no matter how it ends.
+
 Test-only switches (set on the Store, no HTTP needed): clock_skew, outage_until, info_fail, max_sessions, totp_code, version,
-and `scheduler`, a SchedulerSim that plays the scheduler's side of the request protocol in docs/maintainers/architecture.md
-whenever the page writes the pb-state group (so a browser test can watch "Update now" become running and then ok or failed).
+box_info (the content of /pb/box.json, or None), box_info_age (seconds the file is behind the box's clock), gravity_seconds and
+gravity_fail, and `scheduler`, a SchedulerSim that plays the scheduler's side of the request protocol in
+docs/maintainers/architecture.md whenever the page writes the pb-state group (so a browser test can watch "Update now" become
+running and then ok or failed; a power request that arrives while an update runs is dropped and cleared, as bin/sinko does).
 
 Run standalone to develop the web page without a Raspberry Pi:
     python3 tests/mock_pihole.py --web web --port 8080   (password: test; --open starts without a password)
@@ -35,9 +40,17 @@ import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PASSWORD = "test"
+HERE = os.path.dirname(os.path.abspath(__file__))
+with open(os.path.join(HERE, "..", "VERSION"), encoding="utf-8") as _fh:
+    VERSION = _fh.read().strip()
 # The gravity tables FTL's Teleporter can export and import (the names of its "gravity" import options).
 GRAVITY_TABLES = ("group", "adlist", "adlist_by_group", "domainlist", "domainlist_by_group", "client", "client_by_group")
 DOMAIN_TYPES = {("allow", "exact"): 0, ("deny", "exact"): 1, ("allow", "regex"): 2, ("deny", "regex"): 3}
+
+
+def default_box_info():
+    """A box as 3.0 describes itself: its address, time zone, and what it can do. `at` is added when the file is served."""
+    return {"v": 1, "version": VERSION, "ip": "192.168.1.50", "tz": "Asia/Bahrain", "utcOffset": "+03:00", "counter": True, "mdns": True}
 
 
 def mock_hash(password: str) -> str:
@@ -103,6 +116,14 @@ class Store:
         self.clock_skew = 0               # seconds added to the Date header: the box's clock is wrong by this much
         self.outage_until = 0.0           # until this time the server drops every connection (services restarting)
         self.version = None               # when set, /pb/version.txt answers this instead of the VERSION file
+        # What `sinko box-info` writes to /pb/box.json (architecture.md, "Amendments"). `at` is left out here: it is the box's clock at
+        # the moment of the request, minus box_info_age. None = an older box, which has no such file (the page must cope).
+        self.box_info = default_box_info()
+        self.box_info_age = 0             # seconds the file's `at` is behind the box's clock (a scheduler that stopped writing it)
+        self.box_raw = None               # bytes served as /pb/box.json instead of the above (to test garbage)
+        self.gravity_runs = 0             # POST /api/action/gravity calls
+        self.gravity_seconds = 0.0        # how long a run takes
+        self.gravity_fail = False         # the run ends with a failure line
         self.scheduler = None             # a SchedulerSim
         self.power_log = []               # actions the scheduler simulation carried out ("reboot", "poweroff")
 
@@ -273,7 +294,8 @@ class SchedulerSim:
     """
 
     def __init__(self, store, version="3.0.0", latest=None, notes=None, run_seconds=1.0, outcome="ok",
-                 error="The download did not match its checksum.", outage=0.0, check_seconds=0.2, power_outage=0.0, offline=False):
+                 error="The download did not match its checksum.", outage=0.0, check_seconds=0.2, power_outage=0.0, offline=False,
+                 rolled_back=None):
         self.store = store
         self.version = version            # what the box runs now
         self.latest = latest              # what a check finds (None: up to date)
@@ -285,8 +307,9 @@ class SchedulerSim:
         self.check_seconds = check_seconds
         self.power_outage = power_outage
         self.offline = offline            # a check cannot reach GitHub: nothing changes
+        self.rolled_back = rolled_back    # what a failed run reports: True (the old version is back), False, or None (not known)
         self.handled = {"update": None, "check": None, "power": None}
-        self.log = []                     # ("update", "3.1.0"), ("check", None), ("power", "reboot") in the order they happened
+        self.log = []                     # ("update", "3.1.0"), ("check", None), ("power", "reboot"), ("power-dropped", "reboot") in order
         store.scheduler = self
 
     def _later(self, seconds, fn, *args):
@@ -306,7 +329,7 @@ class SchedulerSim:
             self.handled["update"] = marker                    # 1. remember it
             up["request"] = None                               # 2. clear it
             to = up.get("latest") or self.latest or self.version
-            up.update({"status": "running", "from": self.version, "to": to, "at": now, "error": None})
+            up.update({"status": "running", "from": self.version, "to": to, "at": now, "error": None, "rolledBack": None})
             todo.append(("update", to))                        # 3. act
         marker = up.get("checkRequest")
         if marker not in (None, "") and marker != self.handled["check"]:
@@ -318,7 +341,11 @@ class SchedulerSim:
             self.handled["power"] = marker
             action = power.get("action")
             power.update({"request": None, "action": None})
-            if action in ("reboot", "poweroff"):
+            if up.get("status") == "running":
+                # bin/sinko Maintenance._power: never cut the power in the middle of an installation, and never keep the request for
+                # later either. It is taken (so it cannot repeat) and dropped.
+                todo.append(("power-dropped", action))
+            elif action in ("reboot", "poweroff"):
                 todo.append(("power", action))
         if not todo:
             return
@@ -334,6 +361,8 @@ class SchedulerSim:
                     self._later(self.run_seconds, self._finish_update, arg)
             elif kind == "check":
                 self._later(self.check_seconds, self._finish_check)
+            elif kind == "power-dropped":
+                pass
             else:
                 self.store.power_log.append(arg)
                 if self.power_outage:
@@ -345,11 +374,11 @@ class SchedulerSim:
                 up = st.setdefault("update", {})
                 now = int(time.time())
                 if self.outcome == "ok":
-                    up.update({"status": "ok", "to": to, "at": now, "error": None, "checked": now})
+                    up.update({"status": "ok", "to": to, "at": now, "error": None, "checked": now, "rolledBack": None})
                     if up.get("latest") == to:                 # it is installed now
                         up["latest"], up["notes"] = None, None
                 else:
-                    up.update({"status": "failed", "at": now, "error": self.error})
+                    up.update({"status": "failed", "at": now, "error": self.error, "rolledBack": self.rolled_back})
             self.store.edit_state(done, locked=True)
             if self.outcome == "ok":
                 self.version = to
@@ -465,6 +494,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.static(path)
         parts = [urllib.parse.unquote(p) for p in path.split("/")[2:]]
         s = self.store
+        if parts == ["action", "gravity"] and method == "POST":
+            with s.lock:
+                allowed = self.authed()
+                if allowed:
+                    s.gravity_runs += 1
+                    delay, fail = s.gravity_seconds, s.gravity_fail
+            return self.gravity(delay, fail) if allowed else self.err(401, "unauthorized", "Unauthorized")
         with s.lock:
             if parts == ["auth"]:
                 if method == "GET":
@@ -541,6 +577,23 @@ class Handler(BaseHTTPRequestHandler):
             if parts and parts[0] == "clients":
                 return self.clients(method, parts[1:])
         return self.err(404, "not_found", "Not found")
+
+    def gravity(self, delay, fail):
+        """POST /api/action/gravity: FTL sends 200 and streams the output of `pihole -g` BEFORE the run is over, so the status says nothing
+        about how it ended: a failed run is told only in the text. (api/action.c adds an error object after the last chunk.)"""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        self.wfile.write("[i] Neutrino emissions detected...\n\n[\u2713] Pulling blocklist source list into range\n".encode())
+        self.wfile.flush()
+        time.sleep(delay)
+        if fail:
+            # gravity.sh redraws a status line with OVER="\r\033[K": the failure mark is not at the start of a line in the raw stream
+            self.wfile.write("\n  [i] Target: https://example.invalid/list.txt\r\x1b[K  [\u2717] Status: Connection Refused\n".encode())
+        else:
+            self.wfile.write("\n  [i] Target: https://example.invalid/list.txt\r\x1b[K  [\u2713] Status: Retrieval successful\n[\u2713] Swapping databases\n[\u2713] Pi-hole blocking is enabled\n".encode())
 
     # ---------- the box itself (shapes from FTL's info.yaml) ----------
     def info_version(self):
@@ -650,7 +703,8 @@ class Handler(BaseHTTPRequestHandler):
             processed = s.import_zip(fields["file"], wanted)
         except ValueError:
             return self.err(400, "invalid_zip", "Invalid ZIP file uploaded")
-        return self.send(200, {"processed": processed, "took": 0.012})
+        # FTL's own code answers {"files": [...]} (its OpenAPI text says "processed", the C code never writes it).
+        return self.send(200, {"files": processed, "took": 0.012})
 
     # ---------- statistics (same JSON shapes as FTL's api/stats.c, api/history.c, api/queries.c) ----------
     def recent(self, seconds=86400):
@@ -880,12 +934,28 @@ class Handler(BaseHTTPRequestHandler):
             s.clients.remove(row)
             return self.send(204, {})
 
+    def box_json(self):
+        s = self.store
+        if s.box_raw is not None:
+            data = s.box_raw
+        elif s.box_info is None:
+            return self.err(404, "not_found", "Not found")
+        else:
+            data = json.dumps(dict({"at": int(time.time() + s.clock_skew - s.box_info_age)}, **s.box_info), separators=(",", ":")).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def static(self, path):
         if not self.web_dir:
             return self.err(404, "not_found", "Not found")
         rel = "index.html" if path in ("/", "") else path.lstrip("/")
         if rel.startswith("pb/"):
             rel = rel[3:]
+        if rel == "box.json":                                   # written by the box program, not part of the page's files
+            return self.box_json()
         base = self.web_dir
         if rel == "version.txt" and self.store.version:        # an update "installed" a new version
             return self.send_raw(200, "text/plain; charset=utf-8", (self.store.version + "\n").encode())
@@ -923,7 +993,6 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
-HERE = os.path.dirname(os.path.abspath(__file__))
 _CLI = []
 
 
@@ -1023,6 +1092,7 @@ if __name__ == "__main__":
     ap.add_argument("--setup", action="store_true", help="run sinko setup against the mock first")
     ap.add_argument("--live", action="store_true", help="generate demo DNS traffic in the background")
     ap.add_argument("--open", action="store_true", help="start with no password set, like a fresh Pi-hole (the page offers to choose one)")
+    ap.add_argument("--old-box", action="store_true", help="serve no /pb/box.json, like a box from before 3.0")
     ap.add_argument("--update", metavar="VERSION", default=None,
                     help="play the scheduler: a newer version (e.g. 3.1.0) is available and 'Update now' really runs")
     a = ap.parse_args()
@@ -1047,6 +1117,8 @@ if __name__ == "__main__":
         if store.state_group() is not None:        # needs --setup: the state lives in a group that setup creates
             store.edit_state(lambda st: st.setdefault("update", {}).update(
                 {"latest": a.update, "notes": notes, "checked": int(time.time()) - 3 * 3600}))
+    if a.old_box:
+        store.box_info = None
     if a.open:
         store.pwhash = ""
     if a.live:

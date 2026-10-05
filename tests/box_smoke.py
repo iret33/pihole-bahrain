@@ -3,8 +3,9 @@ branding, on the real parent page against the mock Pi-hole (tests/mock_pihole.py
 
     python3 tests/box_smoke.py [--shots DIR] [--only PART]        (needs: pip install playwright && playwright install chromium)
 
-Parts: structure, update, health, network, password, backup, power, counter, about, firstrun, banner, branding, motion, screenshots. The scheduler on
-the box is played by mock_pihole.SchedulerSim, which handles the request markers the page writes the way the architecture says.
+Parts: structure, update, health, network, help, heartbeat, password, backup, power, counter, about, firstrun, banner, branding, contrast, narrow,
+motion, screenshots. The scheduler on the box is played by mock_pihole.SchedulerSim, which handles the request markers the page writes the way the architecture
+says (and drops a power request that arrives while an update runs, as bin/sinko does); /pb/box.json is served by the mock (`store.box_info`).
 """
 import argparse
 import importlib.machinery
@@ -79,9 +80,23 @@ def eventually(fn, seconds=8.0, step=0.12):
     return None
 
 
+FINITE_ANIMATIONS = """() => Promise.all(document.getAnimations().filter(a => { const t = a.effect && a.effect.getComputedTiming(); return t && isFinite(t.endTime); })
+    .map(a => a.finished.catch(() => {})))"""
+
+
+def settle(page):
+    """Waits until every animation that ends has ended. On a phone a sheet slides in over 0.22 s at partly see-through opacity: a picture taken
+    in that moment shows the page behind the sheet (a capture artefact, not a defect: the sheet is opaque once it has opened)."""
+    try:
+        page.evaluate(FINITE_ANIMATIONS)
+    except Exception:
+        pass
+
+
 def shot(page, name, full=False):
     if args.shots:
         os.makedirs(args.shots, exist_ok=True)
+        settle(page)
         page.screenshot(path=os.path.join(args.shots, name), full_page=full)
 
 
@@ -134,6 +149,7 @@ def open_box(page):
     page.click(".topbar [data-act=box]")
     page.wait_for_selector("#boxDialog[open]")
     page.wait_for_selector("#boxUpdLive .box-status")
+    settle(page)
 
 
 ISOLATES = re.compile("[\u2066-\u2069]")      # the invisible marks that keep a version or a number whole inside Arabic text
@@ -164,6 +180,11 @@ def active_id(page):
 def confirm_text(page):
     page.wait_for_selector("#confirmDialog[open]")
     return page.inner_text("#confirmText")
+
+
+def dialog_overflow(page):
+    """How far the My box dialog itself can scroll (it must not: only the scroller inside it does)."""
+    return page.evaluate("() => { const d = document.getElementById('boxDialog'); return d.scrollHeight - d.clientHeight; }")
 
 
 def sim_for(store, **kw):
@@ -198,6 +219,8 @@ def part_structure(browser):
                "[%s] the sheet has its eight cards in order: %s" % (lang, ids))
         titles = page.evaluate("() => [...document.querySelectorAll('#boxBody > section > h3')].map(h => h.textContent)")
         expect(all(titles), "[%s] every card has a heading" % lang)
+        expect(page.is_visible("#boxCounterCard"), "[%s] the counter card is there on a box whose box.json says it has a counter" % lang)
+        expect(dialog_overflow(page) <= 1, "[%s] the sheet itself has nothing to scroll (only its inside does), so dragging at the end cannot slide it away: %s px" % (lang, dialog_overflow(page)))
         expect(page.get_attribute("#boxDialog", "aria-labelledby") == "boxTitle", "[%s] the dialog is named by its title" % lang)
         expect(page.get_attribute("#boxUpdLive", "aria-live") == "polite", "[%s] the update status is a polite live region" % lang)
         # touch targets: 44 px
@@ -222,7 +245,27 @@ def part_structure(browser):
         outline = page.evaluate("() => { const s = getComputedStyle(document.activeElement); return [s.outlineStyle, parseFloat(s.outlineWidth)]; }")
         expect(outline[0] != "none" and outline[1] >= 2, "[%s] the focused control has a visible outline: %s" % (lang, outline))
         shot(page, "box-top-%s.png" % lang)
+        # the end of the sheet: more dragging must not move the sheet, its title or its close button
+        page.keyboard.press("Escape")
+        open_box(page)
+        page.evaluate("() => { const b = document.getElementById('boxBody'); b.scrollTop = b.scrollHeight; }")
+        page.mouse.move(195, 500)
+        for _ in range(10):
+            page.mouse.wheel(0, 500)
+            page.wait_for_timeout(30)
+        moved = page.evaluate("() => { const d = document.getElementById('boxDialog'); return [d.scrollTop, Math.round(document.querySelector('#boxDialog .sheet-head').getBoundingClientRect().top)]; }")
+        expect(moved[0] == 0 and moved[1] >= 0, "[%s] dragging past the end of the sheet leaves its title and close button where they are (scrollTop %s, head top %s)" % (lang, moved[0], moved[1]))
+        shot(page, "box-bottom-%s.png" % lang)
         ctx.close()
+        # and on the smallest phones
+        for width, height in ((320, 568), (568, 320)):
+            url, store = make_site()
+            ctx, page = open_page(browser, url, lang, viewport={"width": width, "height": height})
+            open_box(page)
+            expect(dialog_overflow(page) <= 1, "[%s] %dx%d: the sheet itself has nothing to scroll (%s px)" % (lang, width, height, dialog_overflow(page)))
+            if (width, height) == (320, 568):
+                shot(page, "box-top-320-%s.png" % lang)
+            ctx.close()
 
 
 def part_update(browser):
@@ -265,9 +308,29 @@ def part_update(browser):
         shot(page, "box-update-done-%s.png" % lang)
         ctx.close()
 
-        # --- an update that fails: the reason, and the previous version is back
+        # --- an update that fails: what the box says about the previous version decides what the card says (never more than that)
+        why = "The installer stopped with an error (exit status 1). The previous version (3.0.0) was put back."
+        for rolled, key, error in ((False, "boxFailedNotBack", "Going back to 3.0.0 did not work either (exit status 1): run sudo sinko doctor."),
+                                   (None, "boxFailedUnknown", "The update could not be started.")):
+            url, store = make_site()
+            sim = sim_for(store, outcome="failed", error=error, rolled_back=rolled, run_seconds=1.0)
+            offer_update(store)
+            ctx, page = open_page(browser, url, lang)
+            open_box(page)
+            page.click("#boxUpdateBtn")
+            expect(eventually(lambda: T(lang, "boxFailedTitle") in live(page), 10), "[%s] a failed update says so (rolledBack %s): %r" % (lang, rolled, live(page)))
+            text = box_text(page)
+            expect(T(lang, key) in text and T(lang, "boxFailedBack") not in text,
+                   "[%s] and does NOT claim the previous version is back when the box did not say so (rolledBack %s)" % (lang, rolled))
+            expect("unplug" in T("en", key).lower() and T(lang, key) in text, "[%s] it says what to do instead (rolledBack %s)" % (lang, rolled))
+            expect("sudo" not in text and "sinko doctor" not in text and "exit status" not in text, "[%s] and shows no command and no technical text (rolledBack %s): %r" % (lang, rolled, text))
+            if rolled is False:
+                expect(page.locator("#boxUpdates details").count() == 0, "[%s] a reason that reads like a command is not shown at all, not even collapsed" % lang)
+            shot(page, "box-update-failed-%s-%s.png" % ("notback" if rolled is False else "unknown", lang))
+            ctx.close()
+
         url, store = make_site()
-        sim = sim_for(store, outcome="failed", error="The download did not match its checksum.", run_seconds=1.0)
+        sim = sim_for(store, outcome="failed", error=why, rolled_back=True, run_seconds=1.0)
         offer_update(store)
         ctx, page = open_page(browser, url, lang)
         page.evaluate("() => { window.__before = 1; }")
@@ -275,8 +338,16 @@ def part_update(browser):
         page.click("#boxUpdateBtn")
         expect(eventually(lambda: T(lang, "boxFailedTitle") in live(page), 10), "[%s] a failed update says so: %r" % (lang, live(page)))
         text = box_text(page)
-        expect(T(lang, "boxFailedBack") in text, "[%s] and that the previous version is back" % lang)
-        expect("The download did not match its checksum." in page.inner_text("#boxUpdates .box-reason"), "[%s] and why" % lang)
+        expect(T(lang, "boxFailedBack") in text, "[%s] and, because the box said so (rolledBack true), that the previous version is back" % lang)
+        expect(T(lang, "boxFailedNotBack") not in text and T(lang, "boxFailedUnknown") not in text, "[%s] and nothing about it not being back" % lang)
+        expect(why not in text and "exit status" not in text, "[%s] the technical reason is not part of what the parent reads: %r" % (lang, text))
+        det = page.locator("#boxUpdates details.box-details")
+        expect(det.count() == 1 and det.get_attribute("open") is None and clean(det.locator("summary").inner_text()) == T(lang, "boxDetailsTitle"),
+               "[%s] it waits behind a collapsed 'details for whoever helps you'" % lang)
+        det.locator("summary").click()
+        reason = page.locator("#boxUpdates details.box-details .box-reason")
+        expect(why in reason.inner_text() and reason.get_attribute("dir") == "ltr" and reason.get_attribute("lang") == "en",
+               "[%s] opened, it is the English text, left to right, so it cannot jumble with Arabic around it" % lang)
         expect(page.locator("#boxUpdateBtn").count() == 1 and page.locator("#boxCheckBtn").count() == 1, "[%s] and it can be tried again" % lang)
         expect(not reloaded(page), "[%s] no reload: the page is still the old version, which is the version that is installed" % lang)
         shot(page, "box-update-failed-%s.png" % lang)
@@ -316,8 +387,12 @@ def part_update(browser):
         page.click("#boxUpdateBtn")
         expect(eventually(lambda: T(lang, "boxRunningNote") in box_text(page)), "[%s] the calm note explains the wait" % lang)
         eventually(lambda: store.state()["update"]["status"] == "running")
-        store.edit_state(lambda st: st["update"].update({"at": int(time.time()) - 3600}))
-        expect(eventually(lambda: T(lang, "boxStalled") in live(page), 8), "[%s] a run that has said 'running' for over half an hour is called stuck" % lang)
+        store.edit_state(lambda st: st["update"].update({"at": int(time.time()) - 600}))
+        time.sleep(5)
+        expect(T(lang, "boxStalled") not in live(page), "[%s] ten minutes of 'running' is slow, not stuck (the box calls a run dead after three minutes with nobody running it)" % lang)
+        store.edit_state(lambda st: st["update"].update({"at": int(time.time()) - 20 * 60}))
+        expect(eventually(lambda: T(lang, "boxStalled") in live(page), 8), "[%s] a run that has said 'running' for over a quarter of an hour is called stuck" % lang)
+        expect(page.locator("#boxUpdateBtn").count() == 1 and "unplug" not in live(page).lower(), "[%s] with a Try again button and no talk of unplugging" % lang)
         ctx.close()
 
         # --- nobody on the box listens (the scheduler is not running): the request is withdrawn and the parent is told what to do
@@ -413,7 +488,7 @@ def part_update(browser):
 def part_health(browser):
     for lang in ("en", "ar"):
         url, store = make_site()
-        ctx, page = open_page(browser, url, lang)
+        ctx, page = open_page(browser, url, lang, timezone_id="Asia/Bahrain")
         open_box(page)
         rows = lambda: page.evaluate("() => [...document.querySelectorAll('#boxHealth .box-row')].map(r => [r.querySelector('.box-label').textContent, r.querySelector('.box-value').textContent, r.querySelector('.box-note').textContent])")
         eventually(lambda: "…" not in [r[1] for r in rows()][0])
@@ -425,10 +500,60 @@ def part_health(browser):
         expect("38" in r[3][1], "[%s] memory: %r" % (lang, r[3][1]))
         expect("Sara-iPad" in r[4][1], "[%s] the last device seen: %r" % (lang, r[4][1]))
         expect(r[5][2] == T(lang, "boxClockOk"), "[%s] the box clock agrees with this phone: %r" % (lang, r[5]))
-        expect(page.inner_text("#boxClockZone") == T(lang, "boxClockZone"), "[%s] and the card says bedtime follows the box's own time zone, which the box does not report" % lang)
+        expect(clean(page.inner_text("#boxClockZone")) == T(lang, "boxClockZoneKnown", z="Asia/Bahrain, UTC+03:00"),
+               "[%s] and the card says which time zone bedtime follows (the box's own, from box.json): %r" % (lang, page.inner_text("#boxClockZone")))
         expect("same" not in r[5][2].lower(), "[%s] without claiming the clocks show the same local time" % lang)
+        if lang == "en":
+            box_now = time.gmtime(time.time() + 3 * 3600)
+            wanted = {"%02d:%02d" % (box_now.tm_hour, box_now.tm_min), time.strftime("%H:%M", time.gmtime(time.time() + 3 * 3600 - 60))}
+            expect(r[5][1] in wanted, "[en] the clock row shows the time on the box's own wall clock (box.json says +03:00), not this phone's conversion: %r" % r[5][1])
         expect(not ARABIC_INDIC_DIGITS.search(" ".join(x[1] for x in r)), "[%s] Latin digits" % lang)
         shot(page, "box-health-%s.png" % lang)
+        ctx.close()
+
+        # the box's time zone against the phone's, universal time, and a box that does not say
+        for what, change, ctx_opts, check in (
+                ("a phone in another time zone", {}, {"timezone_id": "Asia/Dubai"}, lambda z: T(lang, "boxClockZoneKnown", z="Asia/Bahrain, UTC+03:00") in z and T(lang, "boxClockZoneDiffers") in z),
+                ("a box on universal time", {"tz": "UTC", "utcOffset": "+00:00"}, {"timezone_id": "Asia/Bahrain"}, lambda z: z == T(lang, "boxClockZoneUtc")),
+                ("a box in London in winter (+00:00 is not universal time)", {"tz": "Europe/London", "utcOffset": "+00:00"}, {"timezone_id": "Asia/Bahrain"},
+                 lambda z: T(lang, "boxClockZoneUtc") not in z and "Europe/London" in z),
+                ("a box that cannot tell its zone", {"tz": None, "utcOffset": None}, {"timezone_id": "Asia/Bahrain"}, lambda z: z == T(lang, "boxClockZone"))):
+            url, store = make_site()
+            store.box_info.update(change)
+            ctx, page = open_page(browser, url, lang, **ctx_opts)
+            open_box(page)
+            zone = clean(page.inner_text("#boxClockZone"))
+            expect(check(zone), "[%s] %s: %r" % (lang, what, zone))
+            if change.get("tz") == "UTC":
+                expect(page.get_attribute("#boxClockZone", "class") == "box-warn", "[%s] the universal-time warning is drawn as a warning" % lang)
+                expect("ask whoever" not in zone and "timedatectl" not in zone, "[%s] and offers no fix the page cannot give" % lang)
+                shot(page, "box-health-utc-%s.png" % lang)
+            ctx.close()
+        url, store = make_site()
+        store.box_info = None
+        ctx, page = open_page(browser, url, lang)
+        open_box(page)
+        expect(page.inner_text("#boxClockZone") == T(lang, "boxClockZone"), "[%s] an older box (no box.json) keeps the general note about the time zone" % lang)
+        expect(eventually(lambda: "…" not in page.inner_text("#boxHealth")), "[%s] and the health card works as before" % lang)
+        ctx.close()
+        errors[:] = [e for e in errors if "status of 404" not in e]        # the missing box.json is the point of this case
+
+        # the box stops answering while the sheet is open: its old readings are not shown as if they were true
+        url, store = make_site()
+        ctx, page = open_page(browser, url, lang)
+        page.evaluate("() => { PBBox.timing.healthDown = 1200; }")
+        open_box(page)
+        eventually(lambda: "…" not in page.inner_text("#boxHealth"))
+        expect(T(lang, "boxFilterOn") in page.inner_text("#boxHealth"), "[%s] (set-up: the card shows 'Filtering: On')" % lang)
+        store.outage_until = time.time() + 9
+        expect(eventually(lambda: page.is_visible("#boxHealthDown"), 12), "[%s] when the box goes silent the health card says it is not answering" % lang)
+        card = clean(page.inner_text("#boxHealth"))
+        expect(T(lang, "boxHealthDown") in card and T(lang, "boxFilterOn") not in card and T(lang, "boxUptimeLabel") not in card,
+               "[%s] and shows none of the old readings (no 'Filtering: On', no uptime): %r" % (lang, card))
+        shot(page, "box-health-down-%s.png" % lang)
+        expect("did not work" not in page.inner_text("#toast"), "[%s] with no error shown for it" % lang)
+        expect(eventually(lambda: page.is_hidden("#boxHealthDown") and T(lang, "boxFilterOn") in page.inner_text("#boxHealth"), 25),
+               "[%s] and the readings are back, read afresh, once the box answers again" % lang)
         ctx.close()
 
         # filtering off, hot box, no sensor, a wrong clock, and one reading that fails
@@ -459,17 +584,17 @@ def part_network(browser):
     for lang in ("en", "ar"):
         url, store = make_site()
         port = url.rstrip("/").rsplit(":", 1)[1]
-        store.config["dns"]["hosts"] = ["127.0.0.1 family.lan", "192.168.1.60 printer.lan"]
+        store.config["dns"]["hosts"] = ["192.168.1.50 family.lan", "192.168.1.60 printer.lan"]
         ctx, page = open_page(browser, url, lang)
         open_box(page)
         rows = lambda: page.evaluate("() => [...document.querySelectorAll('#boxNet .box-addr-row')].map(r => [r.querySelector('.box-label').textContent, r.querySelector('.box-addr-value').textContent])")
         eventually(lambda: len(rows()) == 3)
         r = rows()
-        expect(r == [[T(lang, "boxNetIp"), "127.0.0.1"], [T(lang, "boxNetName"), "family.lan:" + port], [T(lang, "boxNetLocal"), "sinko.local:" + port]],
-               "[%s] number address, the name Pi-hole holds for it, and the .local name: %s" % (lang, r))
+        expect(r == [[T(lang, "boxNetIp"), "192.168.1.50"], [T(lang, "boxNetName"), "family.lan:" + port], [T(lang, "boxNetLocal"), "sinko.local:" + port]],
+               "[%s] the number the box reports for itself (the page was opened at 127.0.0.1), the name Pi-hole holds for it, and the .local name: %s" % (lang, r))
         expect("printer" not in box_text(page), "[%s] another device's record is not shown as the box" % lang)
         page.click("#boxNet .box-addr-row >> nth=0 >> .box-copy")
-        copied = eventually(lambda: page.evaluate("() => navigator.clipboard.readText()") == "127.0.0.1")
+        copied = eventually(lambda: page.evaluate("() => navigator.clipboard.readText()") == "192.168.1.50")
         expect(copied, "[%s] the copy button puts the number on the clipboard" % lang)
         expect(T(lang, "boxCopied") in page.inner_text("#boxNet .box-addr-row >> nth=0"), "[%s] and says so" % lang)
         shot(page, "box-network-%s.png" % lang)
@@ -485,6 +610,120 @@ def part_network(browser):
     ctx.close()
 
 
+def part_help(browser):
+    """The router sentence: always a number, never a name; and the address rows when the page was opened by the .local name."""
+    for lang in ("en", "ar"):
+        url, store = make_site()
+        port = url.rstrip("/").rsplit(":", 1)[1]
+        by_name = "http://sinko.local:%s/" % port                 # the quick-start card tells the parent to open this (see the browser's resolver rules)
+        store.config["dns"]["hosts"] = ["192.168.1.50 family.lan"]
+        ctx, page = open_page(browser, by_name, lang)
+        help_text = lambda: clean(page.evaluate("() => document.getElementById('help').querySelector('p').textContent"))
+        expect(eventually(lambda: "192.168.1.50" in help_text()), "[%s] opened as sinko.local: the router help gives the box's number from box.json: %r" % (lang, help_text()))
+        expect("sinko.local" not in help_text() and "family.lan" not in help_text() and "{ip}" not in help_text(), "[%s] and puts no name in the router sentence" % lang)
+        open_box(page)
+        rows = lambda: page.evaluate("() => [...document.querySelectorAll('#boxNet .box-addr-row')].map(r => [r.querySelector('.box-label').textContent, r.querySelector('.box-addr-value').textContent])")
+        eventually(lambda: len(rows()) == 3)
+        expect(rows() == [[T(lang, "boxNetIp"), "192.168.1.50"], [T(lang, "boxNetName"), "family.lan:" + port], [T(lang, "boxNetLocal"), "sinko.local:" + port]],
+               "[%s] and My box shows the number address even when the page was opened by the .local name: %s" % (lang, rows()))
+        shot(page, "box-network-by-name-%s.png" % lang)
+        ctx.close()
+
+        # the box moved to another network: the next reading of box.json is the new address
+        store.box_info["ip"] = "192.168.1.77"
+        ctx, page = open_page(browser, by_name, lang)
+        expect(eventually(lambda: "192.168.1.77" in help_text()) and "192.168.1.50" not in help_text(), "[%s] a changed address in box.json is the one the help gives" % lang)
+        ctx.close()
+
+        # an older box (no box.json): the number the page was opened by, if it is one; otherwise honest words that name no host
+        store.box_info = None
+        for opened, what in ((by_name, "a name"), ("http://127.0.0.1:%s/" % port, "a loopback number")):
+            ctx, page = open_page(browser, opened, lang)
+            eventually(lambda: page.is_visible(".tile"))
+            expect(help_text() == T(lang, "helpBodyNoIp"), "[%s] no box.json and the page opened by %s: the no-number wording: %r" % (lang, what, help_text()))
+            expect("sinko.local" not in help_text() and "127.0.0.1" not in help_text() and "{ip}" not in help_text(), "[%s] with no host name and no loopback number in it" % lang)
+            if what == "a name":
+                page.evaluate("() => { const h = document.getElementById('help'); h.open = true; h.scrollIntoView({ block: 'center' }); }")
+                shot(page, "help-no-number-%s.png" % lang)
+            ctx.close()
+        # box.json is garbage, or hostile: the page works and believes none of it
+        for raw in (b"{not json", b'{"v":1,"ip":"sinko.local","counter":"true","at":"now"}', b'{"v":2,"ip":"192.168.1.50","at":1790000000}', b"[]", b"null"):
+            store.box_raw = raw
+            ctx, page = open_page(browser, by_name, lang)
+            eventually(lambda: page.is_visible(".tile"))
+            expect(help_text() == T(lang, "helpBodyNoIp") and page.is_hidden("#banner"), "[%s] box.json %r changes nothing for the worse: no name in the help, no banner" % (lang, raw[:24]))
+            open_box(page)
+            expect(page.is_hidden("#boxCounterCard"), "[%s] and offers no counter" % lang)
+            ctx.close()
+        store.box_raw = None
+        errors[:] = [e for e in errors if "status of 404" not in e]        # the missing box.json is the point of this part
+
+
+def part_heartbeat(browser):
+    """box.json's `at` is the scheduler's pulse: more than 20 minutes behind the box's own clock means the scheduler is not running."""
+    for lang in ("en", "ar"):
+        def banner(page):
+            return page.is_visible("#banner") and clean(page.inner_text("#banner"))
+
+        def look_again(page):
+            page.evaluate("() => document.dispatchEvent(new Event('visibilitychange'))")
+
+        url, store = make_site()
+        store.box_info_age = 25 * 60
+        ctx, page = open_page(browser, url, lang)
+        time.sleep(0.8)
+        expect(not banner(page), "[%s] a pulse that is late is not believed at the first look (a corrected clock leaves the file a few seconds behind)" % lang)
+        page.evaluate("() => { PBBox.timing.heartbeatGrace = 1500; }")
+        time.sleep(2.0)
+        look_again(page)
+        expect(eventually(lambda: banner(page) == T(lang, "schedulerDown")), "[%s] seen late for a while: the helper-is-not-running banner: %r" % (lang, banner(page)))
+        expect(not re_command(banner(page)), "[%s] and it asks for no command" % lang)
+        shot(page, "banner-scheduler-down-%s.png" % lang)
+        store.box_info_age = 0
+        look_again(page)
+        expect(eventually(lambda: not banner(page)), "[%s] and it goes away by itself once the box writes the file again" % lang)
+        ctx.close()
+
+        # not late: ten minutes is the box's own rhythm; a missing file is an older box; a wrong phone clock does not matter
+        for what, setup in (("a file ten minutes old", lambda st: setattr(st, "box_info_age", 10 * 60)),
+                            ("a box with no box.json", lambda st: setattr(st, "box_info", None)),
+                            ("a box whose own clock is three hours ahead of the phone", lambda st: (setattr(st, "clock_skew", 3 * 3600), setattr(st, "box_info_age", 60)))):
+            url, store = make_site()
+            setup(store)
+            ctx, page = open_page(browser, url, lang)
+            page.evaluate("() => { PBBox.timing.heartbeatGrace = 1; }")
+            time.sleep(1.2)
+            look_again(page)
+            time.sleep(1.0)
+            expect(not banner(page), "[%s] %s: no banner" % (lang, what))
+            ctx.close()
+        errors[:] = [e for e in errors if "status of 404" not in e]
+
+        # an update is running: the box does not write the file meanwhile, so a late pulse says nothing
+        url, store = make_site()
+        sim = sim_for(store, run_seconds=None)
+        offer_update(store)
+        store.box_info_age = 40 * 60
+        ctx, page = open_page(browser, url, lang)
+        page.evaluate("() => { PBBox.timing.heartbeatGrace = 1; }")
+        open_box(page)
+        page.click("#boxUpdateBtn")
+        eventually(lambda: store.state()["update"]["status"] == "running")
+        time.sleep(1.2)
+        page.keyboard.press("Escape")
+        time.sleep(1.0)
+        look_again(page)
+        time.sleep(1.0)
+        expect(not banner(page), "[%s] a late pulse during a running update is not 'the helper is not running'" % lang)
+        store.edit_state(lambda st: st["update"].update({"status": "ok", "at": int(time.time())}))
+        expect(eventually(lambda: (look_again(page), banner(page) == T(lang, "schedulerDown"))[1], 8), "[%s] and once the update is over a pulse that is still late is" % lang)
+        ctx.close()
+
+
+def re_command(text):
+    return bool(re.search(r"(?i)\b(sudo|systemctl|ssh|terminal)\b|sinko [a-z]+", text or ""))
+
+
 def part_password(browser):
     for lang in ("en", "ar"):
         url, store = make_site()
@@ -494,6 +733,8 @@ def part_password(browser):
         page.fill("#boxPwNew", "abc")
         page.click("#boxPwBtn")
         expect(active_id(page) == "boxPwCur", "[%s] the first empty field gets the focus" % lang)
+        expect(err() == T(lang, "boxPwNeedCurrent"), "[%s] and an alert says what is missing, for a screen reader too: %r" % (lang, err()))
+        expect(page.get_attribute("#boxPwForm .form-error", "role") == "alert", "[%s] (the error line is an alert)" % lang)
         page.fill("#boxPwCur", mock_pihole.PASSWORD)
         page.click("#boxPwBtn")
         expect(err() == T(lang, "boxPwShort"), "[%s] a short new password is refused: %r" % (lang, err()))
@@ -560,6 +801,15 @@ def make_backup_zip(tables=None, pwhash=None):
     return buf.getvalue()
 
 
+def make_plain_zip(files):
+    """A zip with whatever files are named (no Teleporter tables unless the caller makes them)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name, data in files.items():
+            z.writestr(name, data)
+    return buf.getvalue()
+
+
 def part_backup(browser):
     for lang in ("en", "ar"):
         url, store = make_site()
@@ -594,6 +844,9 @@ def part_backup(browser):
         expect(page.is_disabled("#boxRestoreBtn"), "[%s] Restore waits for a file" % lang)
         page.set_input_files("#boxRestoreFile", {"name": "my-backup.zip", "mimeType": "application/zip", "buffer": old_zip})
         expect(page.inner_text("#boxRestoreName") == "my-backup.zip" and not page.is_disabled("#boxRestoreBtn"), "[%s] the chosen file is named" % lang)
+        expect(page.get_attribute("#boxRestoreName", "role") == "status" and page.get_attribute("#boxRestoreFile", "aria-hidden") == "true"
+               and page.get_attribute("#boxRestorePick", "aria-describedby") == "boxRestoreName",
+               "[%s] the name is announced (a status), and a screen reader meets one 'choose file' control, not a second hidden one" % lang)
         page.click("#boxRestoreBtn")
         expect("my-backup.zip" in confirm_text(page), "[%s] the confirmation names the file: %r" % (lang, confirm_text(page)))
         shot(page, "box-restore-confirm-%s.png" % lang)
@@ -602,8 +855,16 @@ def part_backup(browser):
         expect(store.last_import is None, "[%s] cancelling imports nothing" % lang)
         page.click("#boxRestoreBtn")
         confirm_text(page)
+        store.gravity_seconds = 2.0
         page.click("#confirmYes")
-        expect(eventually(lambda: T(lang, "boxRestoreDone") in box_text(page), 12), "[%s] restore finishes" % lang)
+        expect(eventually(lambda: T(lang, "boxRestoreGravity") in box_text(page), 12),
+               "[%s] once the import is in, the page says the box is rebuilding its block lists and how long it takes" % lang)
+        expect(page.is_disabled("#boxRestoreBtn"), "[%s] and Restore waits" % lang)
+        expect(T(lang, "boxRestoreDone") not in box_text(page), "[%s] and does not say 'ready' yet" % lang)
+        shot(page, "box-restore-rebuilding-%s.png" % lang)
+        expect(eventually(lambda: T(lang, "boxRestoreDone") in box_text(page), 25), "[%s] restore finishes, and says filtering is ready" % lang)
+        expect(store.gravity_runs == 1, "[%s] after one rebuild of the block lists (Pi-hole keys them by the numbers the restored lists have now): %d" % (lang, store.gravity_runs))
+        expect(store.last_import["processed"] and store.last_import["import"]["gravity"]["adlist"] is True, "[%s] (the import itself came first)" % lang)
         li = store.last_import
         expect(li and li["import"] == {"config": False, "dhcp_leases": False, "gravity": {t: True for t in mock_pihole.GRAVITY_TABLES}},
                "[%s] only the seven gravity tables were asked for (config and DHCP leases explicitly off): %s" % (lang, li and li["import"]))
@@ -630,6 +891,19 @@ def part_backup(browser):
         page.click("#confirmYes")
         expect(eventually(lambda: T(lang, "boxRestoreBad") in box_text(page)), "[%s] a file that is not a backup is refused plainly" % lang)
         expect(json.dumps(store.tables(), sort_keys=True) == before, "[%s] and nothing changed" % lang)
+        # a real zip with nothing in it that Pi-hole can use (settings only, or somebody's photos): Pi-hole says 200 and processed nothing
+        for what, data in (("a settings-only export", make_plain_zip({"etc/pihole/pihole.toml": "[dns]\n"})),
+                           ("an unrelated zip", make_plain_zip({"IMG_0001.jpg": "x", "notes.txt": "y"}))):
+            store.last_import = None
+            page.set_input_files("#boxRestoreFile", {"name": "other.zip", "mimeType": "application/zip", "buffer": data})
+            page.click("#boxRestoreBtn")
+            confirm_text(page)
+            page.click("#confirmYes")
+            expect(eventually(lambda: T(lang, "boxRestoreBad") in box_text(page) and not page.is_disabled("#boxRestoreBtn"), 12), "[%s] %s is not called a restore" % (lang, what))
+            expect(T(lang, "boxRestoreDone") not in box_text(page) and json.dumps(store.tables(), sort_keys=True) == before,
+                   "[%s] and nothing is said to be restored, and nothing changed (%s)" % (lang, what))
+            expect(store.gravity_runs == 0, "[%s] and no rebuild of the block lists is started for it" % lang)
+            expect(store.last_import and store.last_import["processed"] == [], "[%s] and no safety copy had to be put back (%s)" % (lang, what))
         # a real archive that has no Sinko in it: Pi-hole accepts it, so the page puts everything back
         only_default = make_backup_zip({"group": [{"id": 0, "name": "Default", "enabled": 1, "description": "The default group"}]})
         page.set_input_files("#boxRestoreFile", {"name": "other-box.zip", "mimeType": "application/zip", "buffer": only_default})
@@ -640,8 +914,26 @@ def part_backup(browser):
         expect(eventually(lambda: T(lang, "boxRestoreBad") in box_text(page), 15), "[%s] a Pi-hole backup without Sinko is refused too" % lang)
         expect(eventually(lambda: json.dumps(store.tables(), sort_keys=True) == before, 10), "[%s] and the box is exactly as it was: parental controls were not broken" % lang)
         expect("pb-kids" in [g["name"] for g in store.groups], "[%s] Sinko's groups are back" % lang)
+        expect(store.gravity_runs == 0, "[%s] and nothing was rebuilt for a file that was refused" % lang)
         ctx.close()
         errors[:] = [e for e in errors if "status of 400" not in e]            # Pi-hole refusing a file is the point of this part
+
+        # the rebuild fails (the box cannot reach the internet): the restore stands, and the page says honestly what is not sure
+        url, store = make_site()
+        store.gravity_fail = True
+        ctx, page = open_page(browser, url, lang)
+        open_box(page)
+        own = store.export_zip()
+        page.set_input_files("#boxRestoreFile", {"name": "same-box.zip", "mimeType": "application/zip", "buffer": own})
+        page.click("#boxRestoreBtn")
+        confirm_text(page)
+        page.click("#confirmYes")
+        expect(eventually(lambda: T(lang, "boxRestorePartial") in box_text(page), 20), "[%s] a rebuild that fails is said plainly, not called ready: %r" % (lang, box_text(page)[-200:]))
+        expect(T(lang, "boxRestoreDone") not in box_text(page) and T(lang, "boxRestoreFail", e="") not in box_text(page),
+               "[%s] and the restore itself is not called a failure" % lang)
+        expect(page.locator("#boxBackup .box-msg.is-warn").count() == 1 and not page.is_disabled("#boxRestorePick"), "[%s] drawn as a warning, and the sheet is usable again" % lang)
+        shot(page, "box-restore-partial-%s.png" % lang)
+        ctx.close()
 
 
 def part_power(browser):
@@ -691,6 +983,117 @@ def part_power(browser):
         page.click("#confirmYes")
         expect(eventually(lambda: page.inner_text("#boxPowerMsg") == T(lang, "boxPowerStuck"), 10), "[%s] a box that does not react is told to be unplugged and plugged in: %r" % (lang, page.inner_text("#boxPowerMsg")))
         expect(eventually(lambda: store.state()["power"] == {"request": None, "action": None}), "[%s] and the request is withdrawn, so it cannot fire later by surprise" % lang)
+        expect(not page.is_disabled("#boxRestartBtn") and not page.is_disabled("#boxShutdownBtn"), "[%s] and the buttons work again (a parent can try once more)" % lang)
+        shot(page, "box-power-stuck-%s.png" % lang)
+        page.click("#boxDialog [data-act=boxClose]")
+        open_box(page)
+        expect(page.inner_text("#boxPowerMsg") == "", "[%s] the 'did not react' message is gone when the sheet is opened again" % lang)
+        ctx.close()
+
+        # an update is running (or on its way): Restart and Shut down wait, with a calm note, and never say 'unplug'
+        url, store = make_site()
+        sim = sim_for(store, run_seconds=None)
+        offer_update(store)
+        ctx, page = open_page(browser, url, lang)
+        open_box(page)
+        expect(not page.is_disabled("#boxRestartBtn") and page.inner_text("#boxPowerMsg") == "", "[%s] with no update the buttons are open and say nothing" % lang)
+        page.click("#boxUpdateBtn")
+        expect(eventually(lambda: page.is_disabled("#boxRestartBtn") and page.is_disabled("#boxShutdownBtn")), "[%s] the moment an update is asked for, both buttons wait" % lang)
+        expect(eventually(lambda: clean(page.inner_text("#boxPowerMsg")) == T(lang, "boxPowerWaitUpdate")), "[%s] and a calm note says why: %r" % (lang, page.inner_text("#boxPowerMsg")))
+        eventually(lambda: store.state()["update"]["status"] == "running")
+        time.sleep(1.5)
+        note = clean(page.inner_text("#boxPowerMsg"))
+        expect(page.is_disabled("#boxRestartBtn") and note == T(lang, "boxPowerWaitUpdate") and "unplug" not in note.lower(), "[%s] it stays that way while the update runs, with no word about unplugging" % lang)
+        shot(page, "box-power-wait-update-%s.png" % lang)
+        page.evaluate("() => document.getElementById('boxRestartBtn').click()")
+        time.sleep(0.5)
+        expect(page.locator("#confirmDialog[open]").count() == 0 and store.state()["power"]["request"] is None and store.power_log == [],
+               "[%s] and a press that gets through anyway asks nothing of the box" % lang)
+        store.edit_state(lambda st: st["update"].update({"status": "ok", "at": int(time.time())}))
+        expect(eventually(lambda: not page.is_disabled("#boxRestartBtn") and page.inner_text("#boxPowerMsg") == "", 8), "[%s] when the update has finished the buttons are open again" % lang)
+        ctx.close()
+        # an update that another phone started, or one the scheduler has not picked up yet, counts too (this page never saw it begin)
+        for what, change in (("running, started elsewhere", {"status": "running", "from": VERSION, "to": "3.1.0", "at": int(time.time())}),
+                             ("asked for, not picked up yet", {"request": 1700000000000})):
+            url, store = make_site()
+            store.edit_state(lambda st: st.setdefault("update", {}).update(change))
+            ctx, page = open_page(browser, url, lang)
+            open_box(page)
+            expect(page.is_disabled("#boxRestartBtn") and page.is_disabled("#boxShutdownBtn") and clean(page.inner_text("#boxPowerMsg")) == T(lang, "boxPowerWaitUpdate"),
+                   "[%s] an update %s: the buttons wait" % (lang, what))
+            ctx.close()
+
+        # the update starts while a restart request waits: the page takes its request back, and says nothing about unplugging (not even later)
+        url, store = make_site()                                                 # nobody takes the request, like a scheduler that is busy
+        ctx, page = open_page(browser, url, lang)
+        page.evaluate("() => { PBBox.timing.powerStuck = 2500; }")
+        open_box(page)
+        page.click("#boxRestartBtn")
+        confirm_text(page)
+        page.click("#confirmYes")
+        expect(eventually(lambda: store.state()["power"]["request"] is not None), "[%s] (set-up: the request waits in the state)" % lang)
+        store.edit_state(lambda st: st.setdefault("update", {}).update({"status": "running", "from": VERSION, "to": "3.1.0", "at": int(time.time())}))
+        store.outage_until = time.time() + 2.5                                   # the installer restarts the box's services
+        expect(eventually(lambda: store.state()["power"] == {"request": None, "action": None}, 10), "[%s] the update started: the page takes the request back (the box would only drop it)" % lang)
+        time.sleep(3.5)                                                          # longer than the page's wait for an answer, and than the outage
+        msg = clean(page.inner_text("#boxPowerMsg"))
+        expect(msg == T(lang, "boxPowerWaitUpdate"), "[%s] the note says to wait for the update, not 'the box did not react' or 'restarting': %r" % (lang, msg))
+        expect("unplug" not in msg.lower() and page.is_hidden("#login"), "[%s] no instruction to unplug, and no sign-in screen saying the box restarted" % lang)
+        store.edit_state(lambda st: st["update"].update({"status": "ok", "at": int(time.time())}))
+        expect(eventually(lambda: clean(page.inner_text("#boxPowerMsg")) == T(lang, "boxPowerDropped"), 10), "[%s] afterwards it says the box was updating, did not restart, and to try again" % lang)
+        expect(not page.is_disabled("#boxRestartBtn") and store.power_log == [], "[%s] with the buttons open and nothing ever restarted" % lang)
+        shot(page, "box-power-dropped-%s.png" % lang)
+        ctx.close()
+
+        # the box took the request out of the state while an update ran: that is a drop, not 'restarting'
+        url, store = make_site()
+        ctx, page = open_page(browser, url, lang)
+        open_box(page)
+        page.click("#boxShutdownBtn")
+        confirm_text(page)
+        page.click("#confirmYes")
+        eventually(lambda: store.state()["power"]["request"] is not None)
+        store.edit_state(lambda st: (st.setdefault("update", {}).update({"status": "running", "from": VERSION, "to": "3.1.0", "at": int(time.time())}),
+                                     st["power"].update({"request": None, "action": None})))
+        time.sleep(2.0)
+        msg = clean(page.inner_text("#boxPowerMsg"))
+        expect(msg not in (T(lang, "boxPowerOff"), T(lang, "boxPowerRestarting")), "[%s] a request that vanished while an update runs is not reported as the box shutting down: %r" % (lang, msg))
+        ctx.close()
+
+        # closing the sheet takes back a request nobody has answered: it must not wait for the next time the scheduler looks
+        url, store = make_site()
+        ctx, page = open_page(browser, url, lang)
+        open_box(page)
+        page.click("#boxRestartBtn")
+        confirm_text(page)
+        page.click("#confirmYes")
+        expect(eventually(lambda: store.state()["power"]["request"] is not None), "[%s] (set-up: nobody answers)" % lang)
+        page.click("#boxDialog [data-act=boxClose]")
+        expect(eventually(lambda: store.state()["power"] == {"request": None, "action": None}, 6), "[%s] closing the sheet withdraws it, so it cannot fire when the box is next switched on" % lang)
+        ctx.close()
+        # a request left behind by a phone that went away is withdrawn by the main page after it has watched it for a minute (shortened here)
+        url, store = make_site()
+        store.edit_state(lambda st: st["power"].update({"request": 1700000000000, "action": "reboot"}))
+        ctx, page = open_page(browser, url, lang)
+        page.evaluate("() => { PBBox.timing.powerStale = 1500; }")
+        time.sleep(2.0)
+        expect(eventually(lambda: (page.evaluate("() => document.dispatchEvent(new Event('visibilitychange'))"), store.state()["power"]["request"] is None)[1], 8),
+               "[%s] a restart request nobody takes is withdrawn by the main page, without My box ever being opened" % lang)
+        ctx.close()
+
+        # the page's picture of the update can be a few seconds old: the write itself refuses
+        url, store = make_site()
+        ctx, page = open_page(browser, url, lang)
+        open_box(page)
+        page.evaluate("() => Object.defineProperty(document, 'visibilityState', { get: () => 'hidden', configurable: true })")
+        time.sleep(0.6)                                                          # polling stops while the page is hidden: nothing refreshes what it knows
+        store.edit_state(lambda st: st.setdefault("update", {}).update({"status": "running", "from": VERSION, "to": "3.1.0", "at": int(time.time())}))
+        page.click("#boxRestartBtn")
+        confirm_text(page)
+        page.click("#confirmYes")
+        expect(eventually(lambda: clean(page.inner_text("#boxPowerMsg")) == T(lang, "boxPowerWaitUpdate")), "[%s] a press the page could not know was too late ends in the same calm note: %r" % (lang, page.inner_text("#boxPowerMsg")))
+        expect(store.state()["power"]["request"] is None and store.power_log == [], "[%s] and nothing was asked of the box" % lang)
+        expect("did not work" not in page.inner_text("#boxToast"), "[%s] and no error toast" % lang)
         ctx.close()
 
 
@@ -701,7 +1104,7 @@ def part_counter(browser):
         ctx, page = open_page(browser, url, lang)
         open_box(page)
         text = box_text(page)
-        for key in ("boxCounterLead", "boxCounterSent1", "boxCounterSent2", "boxCounterSent3", "boxCounterKept", "boxCounterNot"):
+        for key in ("boxCounterLead", "boxCounterSent1", "boxCounterSent2", "boxCounterSent3", "boxCounterKept", "boxCounterForget", "boxCounterNot"):
             expect(T(lang, key) in text, "[%s] the card says %s" % (lang, key))
         expect(not page.is_checked("#boxCounter") and page.is_hidden("#boxCounterOnline"), "[%s] the counter is off until the parent says yes, and nothing about others is shown" % lang)
         page.click("#boxCounterCard label.box-switch-row")
@@ -712,7 +1115,22 @@ def part_counter(browser):
         shot(page, "box-counter-%s.png" % lang)
         page.click("#boxCounterCard label.box-switch-row")
         expect(eventually(lambda: store.state()["telemetry"] == {"on": False}) and eventually(lambda: page.is_hidden("#boxCounterOnline")), "[%s] switching it off records false and hides the number" % lang)
+        expect(T(lang, "boxCounterOffToast") in page.inner_text("#boxToast"), "[%s] and says plainly that the box now asks the counter service to forget it: %r" % (lang, page.inner_text("#boxToast")))
+        expect(T(lang, "boxCounterForget") in box_text(page), "[%s] (the card says so before the switch is touched, too)" % lang)
         ctx.close()
+        # a box with no counter address (or an older box) offers no counter: better silent than a promise nothing keeps
+        for what, change in (("box.json says no counter address is set", {"counter": False}), ("an older box with no box.json", None)):
+            url, store = make_site()
+            if change is None:
+                store.box_info = None
+            else:
+                store.box_info.update(change)
+            ctx, page = open_page(browser, url, lang)
+            open_box(page)
+            expect(page.is_hidden("#boxCounterCard") and page.locator("#boxCounterCard").count() == 1, "[%s] %s: the counter card is not shown" % (lang, what))
+            expect(T(lang, "boxCounterLead") not in box_text(page) and T(lang, "boxUpdTitle") in box_text(page), "[%s] and the rest of the sheet is there" % lang)
+            ctx.close()
+        errors[:] = [e for e in errors if "status of 404" not in e]
 
 
 def part_about(browser):
@@ -805,6 +1223,34 @@ def part_firstrun(browser):
         expect(eventually(lambda: store.state()["setup"] == {"done": True}), "[%s] and is remembered, so it does not come back" % lang)
         ctx.close()
 
+        # a box with no counter address (or no box.json): three steps, and the list can finish without a question nothing keeps
+        for what, change in (("box.json says no counter address is set", {"counter": False}), ("an older box with no box.json", None)):
+            url, store = make_site(setup_done=False, kids=False)
+            if change is None:
+                store.box_info = None
+            else:
+                store.box_info.update(change)
+            store.devices[:] = [store.devices[0]]
+            ctx, page = open_page(browser, url, lang)
+            page.wait_for_selector("#setup:not([hidden])")
+            three = lambda: page.evaluate("() => [...document.querySelectorAll('#setupList .setup-item')].map(i => [i.dataset.item, i.classList.contains('is-done')])")
+            expect(three() == [["pw", True], ["router", False], ["child", False]], "[%s] %s: three steps, no counter question: %s" % (lang, what, three()))
+            expect(page.inner_text("#setupProgress") == T(lang, "setupProgress", n=1, t=3) and T(lang, "setupCounterText") not in page.inner_text("#setup"),
+                   "[%s] and the progress counts three" % lang)
+            page.click("#setupList [data-act=openAdd]")
+            page.wait_for_selector("#addDialog[open]")
+            page.click("#addForm .manual summary")
+            page.fill("#manualAddr", "AA:BB:CC:00:00:78")
+            page.click("[data-act=addDevice]")
+            store.devices.append({"id": 9, "hwaddr": "aa:bb:cc:00:00:05", "macVendor": "", "lastQuery": int(time.time()) - 20, "numQueries": 5,
+                                  "ips": [{"ip": "192.168.1.33", "name": "TV"}]})
+            page.reload()
+            page.wait_for_selector(".tile")
+            expect(eventually(lambda: page.is_hidden("#setup")) and eventually(lambda: store.state()["setup"] == {"done": True}),
+                   "[%s] the list finishes by itself once the three steps are done, and stays finished" % lang)
+            ctx.close()
+        errors[:] = [e for e in errors if "status of 404" not in e]
+
         # dismiss writes setup.done
         url, store = make_site(setup_done=False, kids=False)
         store.devices[:] = [store.devices[0]]
@@ -869,12 +1315,219 @@ def part_branding(browser):
     expect(icon == ["/pb/icon.svg", "image/svg+xml"], "the page links its icon: %s" % (icon,))
     expect(touch == "/pb/apple-touch-icon.png", "and the iPhone icon: %s" % (touch,))
     expect(page.get_attribute("meta[name=generator]", "content") == "sinko", "the generator marker stays 'sinko' (the installer looks for it)")
+    marks = page.evaluate("() => [...document.querySelectorAll('.brand-mark use')].map(u => u.getAttribute('href'))")
+    expect(marks == ["#i-sinko", "#i-sinko", "#i-sinko"], "the sign-in card, the claim card and the top bar all draw the Sinko mark (the house with two sound arcs), not the old outline house: %s" % marks)
+    expect(page.evaluate("() => !!document.querySelector('symbol#i-sinko path[stroke-linecap=round]')"), "and the symbol has the arcs")
     shot(page, "login-en.png")
     page.click("#login .lang-toggle")
     expect(page.inner_text("#login h1") == "سينكو" and page.inner_text("#login .tagline") == "إنترنت العائلة", "Arabic: the name is سينكو, the tagline إنترنت العائلة")
     expect(page.title() == "سينكو", "and the title follows the language (%r)" % page.title())
     shot(page, "login-ar.png")
     ctx.close()
+
+
+# WCAG 2.x contrast of every piece of text in the given parts of the page: its computed colour (blended over what is behind it) against the first
+# opaque background behind it. Text on a gradient is left out (the hero, the page's own wash): there is no single background to measure. Disabled
+# controls, anything see-through (a toast that is not showing) and decorative text that is hidden from screen readers (the app monograms) are exempt.
+CONTRAST_JS = """(roots) => {
+  const num = (s) => (s.match(/-?[\\d.]+/g) || []).map(Number);
+  const parse = (c) => { const n = num(c); return n.length >= 3 ? { r: n[0], g: n[1], b: n[2], a: n.length > 3 ? n[3] : 1 } : null; };
+  const over = (f, b) => ({ r: f.r * f.a + b.r * (1 - f.a), g: f.g * f.a + b.g * (1 - f.a), b: f.b * f.a + b.b * (1 - f.a), a: 1 });
+  const chan = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+  const lum = (c) => 0.2126 * chan(c.r) + 0.7152 * chan(c.g) + 0.0722 * chan(c.b);
+  const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+  const background = (el) => {
+    const layers = [];
+    for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+      const cs = getComputedStyle(n);
+      if (cs.backgroundImage && cs.backgroundImage !== 'none') return null;
+      const c = parse(cs.backgroundColor);
+      if (c && c.a > 0) { layers.push(c); if (c.a >= 1) break; }
+    }
+    let base = layers.length && layers[layers.length - 1].a >= 1 ? layers.pop() : null;
+    if (!base) return null;
+    while (layers.length) base = over(layers.pop(), base);
+    return base;
+  };
+  const failures = [], seen = [];
+  for (const sel of roots) {
+    for (const root of document.querySelectorAll(sel)) {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      for (let t = walker.nextNode(); t; t = walker.nextNode()) {
+        if (!/\\S/.test(t.nodeValue)) continue;
+        const el = t.parentElement;
+        if (!el || el.closest('script,style,.sr-only,[aria-hidden="true"]') || !el.getClientRects().length) continue;
+        const cs = getComputedStyle(el);
+        if (cs.visibility === 'hidden' || el.closest('button:disabled,[disabled]')) continue;
+        let faded = false;
+        for (let n = el; n && n.nodeType === 1; n = n.parentElement) if (parseFloat(getComputedStyle(n).opacity) < 0.99) faded = true;
+        if (faded) continue;
+        const bg = background(el);
+        if (!bg) continue;
+        const fg0 = parse(cs.color);
+        if (!fg0) continue;
+        const fg = over(fg0, bg);
+        const px = parseFloat(cs.fontSize), large = px >= 24 || (px >= 18.66 && parseInt(cs.fontWeight, 10) >= 700);
+        const r = ratio(fg, bg), need = large ? 3 : 4.5;
+        seen.push(1);
+        if (r < need) failures.push({ text: t.nodeValue.trim().slice(0, 40), ratio: Math.round(r * 100) / 100, need, cls: (el.className && el.className.baseVal === undefined ? el.className : '') || el.tagName,
+          fg: cs.color, bg: 'rgb(' + [bg.r, bg.g, bg.b].map(Math.round).join(',') + ')' });
+      }
+    }
+  }
+  return { checked: seen.length, failures };
+}"""
+
+
+def contrast(page, roots, label, minimum=3):
+    settle(page)                                   # a sheet that is still sliding in is see-through, and exempt from the measurement below
+    got = page.evaluate(CONTRAST_JS, roots)
+    expect(got["checked"] >= minimum, "%s: %d pieces of text were measured (so the check is not empty)" % (label, got["checked"]))
+    expect(not got["failures"], "%s: all %d pieces of text have at least 4.5:1 (3:1 when large) %s" % (label, got["checked"], got["failures"][:4] if got["failures"] else ""))
+
+
+def part_contrast(browser):
+    """Every component that was added or changed for My box, the first run and the update banner, measured in light and dark, in both languages."""
+    main_roots = ["#updateBanner", "#setup", "#banner", "#devices", "#services", ".help", ".foot"]
+    for scheme in ("light", "dark"):
+        for lang in ("en", "ar"):
+            tag = "[%s %s]" % (scheme, lang)
+            # --- the main page: update banner, setup list, scheduler banner, a blocked app, a paused device
+            url, store = make_site(setup_done=False)
+            offer_update(store)
+            store.box_info_age = 25 * 60
+            ctx, page = open_page(browser, url, lang, color_scheme=scheme)
+            page.click("[data-id=youtube]")
+            page.wait_for_selector("[data-id=youtube].tile-blocked")
+            page.click("[data-act=pause]")
+            page.wait_for_selector(".device .tag")
+            page.evaluate("() => { PBBox.timing.heartbeatGrace = 1; }")
+            eventually(lambda: (page.evaluate("() => document.dispatchEvent(new Event('visibilitychange'))"), page.is_visible("#banner"))[1], 8)
+            contrast(page, main_roots, tag + " main page (update banner, setup list, banner, blocked app, paused tag)", 12)
+            shot(page, "contrast-main-%s-%s.png" % (scheme, lang), full=True)
+            store.edit_state(lambda st: st["update"].update({"status": "failed", "to": "3.1.0", "latest": "3.1.0", "at": int(time.time()), "error": "x", "rolledBack": False}))
+            page.evaluate("() => document.dispatchEvent(new Event('visibilitychange'))")
+            eventually(lambda: page.is_visible("#updateBanner") and page.get_attribute("#updateBanner", "data-phase") == "failed")
+            contrast(page, ["#updateBanner"], tag + " the 'last update did not work' banner", 1)
+            ctx.close()
+
+            # --- My box in its different states
+            url, store = make_site()
+            offer_update(store)
+            store.blocking = "disabled"
+            store.cpu_temp = 80.0
+            store.clock_skew = 3 * 3600
+            store.box_info.update({"tz": "UTC", "utcOffset": "+00:00"})
+            store.edit_state(lambda st: st.update({"community": {"online": 1234, "at": int(time.time())}, "telemetry": {"on": True}}))
+            ctx, page = open_page(browser, url, lang, color_scheme=scheme)
+            open_box(page)
+            eventually(lambda: "…" not in page.inner_text("#boxHealth"))
+            contrast(page, ["#boxDialog"], tag + " My box: update on offer, filtering off, hot box, 3 hours off, universal time, counter online", 25)
+            shot(page, "contrast-box-%s-%s.png" % (scheme, lang))
+            for rolled in (False, None, True):
+                store.edit_state(lambda st: st["update"].update({"status": "failed", "to": "3.1.0", "latest": "3.1.0", "at": int(time.time()) - 5,
+                                                                  "error": "The installer stopped with an error (exit status 1).", "rolledBack": rolled}))
+                page.keyboard.press("Escape")
+                open_box(page)
+                if rolled is True:
+                    page.click("#boxUpdates details summary")
+                contrast(page, ["#boxUpdates"], tag + " a failed update (rolledBack %s)" % rolled, 4)
+                shot(page, "contrast-failed-%s-%s-%s.png" % (str(rolled).lower(), scheme, lang))
+            store.edit_state(lambda st: st["update"].update({"status": "running", "to": "3.1.0", "at": int(time.time()), "error": None, "rolledBack": None}))
+            page.keyboard.press("Escape")
+            open_box(page)
+            contrast(page, ["#boxUpdates", "#boxPower"], tag + " an update running, with the power buttons waiting", 6)
+            shot(page, "contrast-running-%s-%s.png" % (scheme, lang))
+            store.edit_state(lambda st: st["update"].update({"status": "idle", "at": 0}))
+            page.keyboard.press("Escape")
+            open_box(page)
+            # an error under the password form, a refused restore, a restore whose rebuild failed, an error toast, the confirm button
+            page.fill("#boxPwNew", "abc")
+            page.click("#boxPwBtn")
+            page.set_input_files("#boxRestoreFile", {"name": "photo.zip", "mimeType": "application/zip", "buffer": b"not a zip"})
+            page.click("#boxRestoreBtn")
+            confirm_text(page)
+            contrast(page, ["#confirmDialog"], tag + " the confirm question and its red button", 2)
+            shot(page, "contrast-confirm-%s-%s.png" % (scheme, lang))
+            page.click("#confirmYes")
+            eventually(lambda: T(lang, "boxRestoreBad") in box_text(page))
+            contrast(page, ["#boxPw", "#boxBackup"], tag + " the password error and a refused restore", 6)
+            store.gravity_fail = True
+            page.set_input_files("#boxRestoreFile", {"name": "same.zip", "mimeType": "application/zip", "buffer": store.export_zip()})
+            page.click("#boxRestoreBtn")
+            confirm_text(page)
+            page.click("#confirmYes")
+            eventually(lambda: T(lang, "boxRestorePartial") in box_text(page), 20)
+            contrast(page, ["#boxBackup"], tag + " a restore whose rebuild did not finish", 4)
+            page.evaluate("""() => { const t = document.getElementById('boxToast'); t.textContent = 'x'; t.className = 'toast toast-error show'; }""")
+            page.wait_for_timeout(300)
+            contrast(page, ["#boxToast"], tag + " an error toast", 1)
+            shot(page, "contrast-toast-%s-%s.png" % (scheme, lang))
+            ctx.close()
+            errors[:] = [e for e in errors if "status of 400" not in e]
+
+            # --- the claim and sign-in screens
+            url, store = make_site(password=False, setup_done=False, kids=False)
+            ctx, page = open_page(browser, url, lang, sign_in=False, color_scheme=scheme)
+            page.wait_for_selector("#claim:not([hidden])")
+            if lang == "ar":
+                page.click("#claim .lang-toggle")
+            page.fill("#claimPw", "short")
+            page.fill("#claimPw2", "short")
+            page.click("#claimBtn")
+            contrast(page, ["#claim"], tag + " the claim screen with its error", 5)
+            shot(page, "contrast-claim-%s-%s.png" % (scheme, lang))
+            ctx.close()
+            url, store = make_site()
+            ctx, page = open_page(browser, url, lang, sign_in=False, color_scheme=scheme)
+            page.wait_for_selector("#login:not([hidden])")
+            page.evaluate("() => { const n = document.getElementById('loginNote'); n.textContent = 'x'; n.hidden = false; document.getElementById('loginErr').textContent = 'x'; }")
+            contrast(page, ["#login"], tag + " the sign-in screen with a note and an error", 4)
+            shot(page, "contrast-login-%s-%s.png" % (scheme, lang))
+            ctx.close()
+
+
+def part_narrow(browser):
+    """The new screens on the smallest phones (320 and 390 wide), in both languages and in dark mode: nothing sideways, and a picture of each."""
+    for width in (320, 390):
+        for lang in ("en", "ar"):
+            for scheme in ("light", "dark"):
+                tag = "[%dpx %s %s]" % (width, lang, scheme)
+                url, store = make_site()
+                offer_update(store)
+                store.config["dns"]["hosts"] = ["192.168.1.50 family.lan"]
+                store.box_info.update({"tz": "UTC", "utcOffset": "+00:00"})
+                ctx, page = open_page(browser, url, lang, viewport={"width": width, "height": 844}, color_scheme=scheme)
+
+                def sideways():
+                    return page.evaluate("() => [document.documentElement.scrollWidth - document.documentElement.clientWidth, document.getElementById('boxBody').scrollWidth - document.getElementById('boxBody').clientWidth]")
+                tall = page.evaluate("() => [...document.querySelectorAll('.topbar .brand, .topbar-actions .link')].map(e => Math.round(e.getBoundingClientRect().height)).filter(h => h > 48)")
+                expect(not tall and page.evaluate("() => document.documentElement.scrollWidth <= document.documentElement.clientWidth"),
+                       "%s the top bar keeps each word of its buttons on one line and nothing scrolls sideways (heights over 48 px: %s)" % (tag, tall))
+                shot(page, "narrow-main-%d-%s-%s.png" % (width, scheme, lang))
+                open_box(page)
+                eventually(lambda: "…" not in page.inner_text("#boxHealth"))
+                expect(max(sideways()) <= 1, "%s My box has nothing to scroll sideways %s" % (tag, sideways()))
+                shot(page, "narrow-box-top-%d-%s-%s.png" % (width, scheme, lang))
+                page.evaluate("() => document.getElementById('boxNet').scrollIntoView()")
+                shot(page, "narrow-box-addresses-%d-%s-%s.png" % (width, scheme, lang))
+                page.evaluate("() => document.getElementById('boxHealth').scrollIntoView()")
+                shot(page, "narrow-box-health-%d-%s-%s.png" % (width, scheme, lang))
+                for rolled in (True, False, None):
+                    store.edit_state(lambda st: st["update"].update({"status": "failed", "to": "3.1.0", "latest": "3.1.0", "at": int(time.time()) - 5,
+                                                                      "error": "The installer stopped with an error (exit status 1).", "rolledBack": rolled}))
+                    page.keyboard.press("Escape")
+                    open_box(page)
+                    if rolled is True:
+                        page.click("#boxUpdates details summary")
+                    expect(max(sideways()) <= 1, "%s a failed update (rolledBack %s) has nothing to scroll sideways" % (tag, rolled))
+                    shot(page, "narrow-failed-%s-%d-%s-%s.png" % (str(rolled).lower(), width, scheme, lang))
+                store.edit_state(lambda st: st["update"].update({"status": "running", "to": "3.1.0", "at": int(time.time()), "error": None, "rolledBack": None}))
+                page.keyboard.press("Escape")
+                open_box(page)
+                page.evaluate("() => document.getElementById('boxPower').scrollIntoView()")
+                shot(page, "narrow-power-wait-%d-%s-%s.png" % (width, scheme, lang))
+                ctx.close()
 
 
 def part_motion(browser):
@@ -920,12 +1573,15 @@ def part_screenshots(browser):
         expect(sorted(os.listdir(out)) == sorted(list(want) + ["live-en.png"]), "and nothing else is written: %s" % sorted(os.listdir(out)))
 
 
-PARTS = [("structure", part_structure), ("update", part_update), ("health", part_health), ("network", part_network), ("password", part_password),
+PARTS = [("structure", part_structure), ("update", part_update), ("health", part_health), ("network", part_network), ("help", part_help),
+         ("heartbeat", part_heartbeat), ("password", part_password),
          ("backup", part_backup), ("power", part_power), ("counter", part_counter), ("about", part_about), ("firstrun", part_firstrun),
-         ("banner", part_banner), ("branding", part_branding), ("motion", part_motion), ("screenshots", part_screenshots)]
+         ("banner", part_banner), ("branding", part_branding), ("contrast", part_contrast), ("narrow", part_narrow), ("motion", part_motion),
+         ("screenshots", part_screenshots)]
 
 with sync_playwright() as p:
-    browser = p.chromium.launch()
+    # sinko.local is what the quick-start card tells a parent to open: the browser is told where it is (the mock listens on the loopback address)
+    browser = p.chromium.launch(args=["--host-resolver-rules=MAP sinko.local 127.0.0.1"])
     for name, fn in PARTS:
         if args.only and args.only != name:
             continue

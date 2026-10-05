@@ -111,3 +111,15 @@ test('editState: re-reads what is stored now, changes only what the mutator touc
   assert.deepEqual(bad.state.power, { request: null, action: null });
   assert.equal(bad.state.update.status, 'idle');
 });
+
+test('update.rolledBack: only a real boolean is kept, and a write about something else keeps what the scheduler said', () => {
+  const parse = (raw) => C.parseState(JSON.stringify({ update: { status: 'failed', rolledBack: raw } })).update.rolledBack;
+  for (const [raw, want] of [[true, true], [false, false], [null, null], ['true', null], ['false', null], [1, null], [0, null], [[], null], [{}, null]]) {
+    assert.equal(parse(raw), want, JSON.stringify(raw));
+  }
+  assert.equal(C.parseState('{}').update.rolledBack, null, 'a state with no such key is "not known"');
+  assert.equal(C.defaultState().update.rolledBack, null);
+  const stored = JSON.stringify({ update: { status: 'failed', error: 'x', rolledBack: false } });
+  assert.equal(C.editState(stored, (st) => { st.setup.done = true; st.update.request = 5; }).state.update.rolledBack, false, 'the page writing the state keeps it');
+  assert.equal(C.editState(stored, (st) => { st.update.rolledBack = 'yes'; }).state.update.rolledBack, null, 'a bug in a caller cannot store a claim of recovery');
+});

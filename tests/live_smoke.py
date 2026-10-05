@@ -60,6 +60,9 @@ def make_site(live=False, blocked=("youtube", "tiktok"), privacy=0, history=True
     if live:
         mock_pihole.start_live(store)
     store.privacy = privacy
+    # These tests are about the picture, which only moves while it is on screen: the first-run checklist (tests/box_smoke.py) is dismissed,
+    # so it does not push the picture below the fold of the 390x844 phone.
+    store.edit_state(lambda st: st.setdefault("setup", {}).update({"done": True}))
     return "http://127.0.0.1:%d/" % httpd.server_port, store
 
 
@@ -81,6 +84,7 @@ def open_page(browser, url, **opts):
 def shot(page, name, full=False):
     if args.shots:
         os.makedirs(args.shots, exist_ok=True)
+        page.evaluate("() => Promise.all(document.getAnimations().filter(a => { const t = a.effect && a.effect.getComputedTiming(); return t && isFinite(t.endTime); }).map(a => a.finished.catch(() => {})))")   # a sheet still sliding in is see-through
         page.screenshot(path=os.path.join(args.shots, name), full_page=full)
 
 
