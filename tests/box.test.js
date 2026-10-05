@@ -256,6 +256,11 @@ test('a rebuild of the block lists is "ok" only when its own text shows success 
   assert.equal(B.gravityVerdict('[i] only information\n'), 'partial');
   assert.equal(B.gravityVerdict('\u001b[32m[\u2713]\u001b[0m Swapping databases'), 'ok', 'colour codes are ignored');
   assert.equal(B.gravityVerdict('[\u2713] a list says [\u2717] in the middle of a line'), 'ok', 'only a line that starts with the mark is a failure');
+  // The raw stream of a real `pihole -g`: status lines are redrawn with carriage return + erase-line, so the mark is not at a line start.
+  const raw = '  [i] Target: https://example.invalid/a.txt\r\u001b[K  [\u2713] Status: Retrieval successful\n  [i] Target: https://example.invalid/b.txt\r\u001b[K  [\u2717] Status: Connection Refused\n[\u2713] Swapping databases\n';
+  assert.equal(B.gravityVerdict(raw), 'partial', 'a failed list after \\r and an erase-line code is still a failure');
+  assert.equal(B.gravityVerdict(raw.replace('[\u2717] Status: Connection Refused', '[\u2713] Status: Retrieval successful')), 'ok', 'and the same stream without the failure is ok');
+  assert.equal(B.gravityVerdict('\u001b[1;31m\r\u001b[2K[\u2717] Unable to\n[\u2713] rest'), 'partial', 'other erase and colour sequences too');
 });
 
 test('new password: 8 characters, typed twice, different from the old one', () => {

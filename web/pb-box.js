@@ -204,7 +204,7 @@
       boxRestartAsk: 'إعادة تشغيل الصندوق؟ سيتوقف الإنترنت عن الأطفال، وعن الجميع في البيت، لنحو دقيقة.',
       boxShutdownAsk: 'إيقاف تشغيل الصندوق؟ سيتوقف الإنترنت عن الأطفال، وعن الجميع في البيت، إلى أن تفصل الصندوق عن الكهرباء وتعيد توصيله.',
       boxPowerWaitUpdate: 'يجري تحديث الآن. يبقى «إعادة التشغيل» و«إيقاف التشغيل» بانتظار انتهائه، حتى لا يُطفأ الصندوق في منتصفه.',
-      boxPowerDropped: 'كان الصندوق يجري تحديثًا، فلم يعد التشغيل ولم يتوقف. حاول مجددًا بعد انتهاء التحديث.',
+      boxPowerDropped: 'كان الصندوق يجري تحديثًا، لذلك لم تُنفَّذ إعادة التشغيل أو الإيقاف. حاول مجددًا بعد انتهاء التحديث.',
       boxPowerSent: 'جارٍ إبلاغ الصندوق…', boxPowerRestarting: 'الصندوق يعيد التشغيل. ستطلب منك هذه الصفحة تسجيل الدخول عند عودته.',
       boxPowerOff: 'الصندوق يُوقف التشغيل. يمكنك فصله عن الكهرباء بعد نصف دقيقة تقريبًا. لتشغيله مجددًا افصله ثم أعد توصيله.',
       boxPowerStuck: 'لم يستجب الصندوق. إذا لم يعد التشغيل، افصله عن الكهرباء وانتظر عشر ثوانٍ ثم أعد توصيله.',
@@ -464,10 +464,12 @@
   /**
    * How a rebuild of the block lists ended, from the text FTL streamed (POST /api/action/gravity answers 200 and streams the output of the run
    * before it is over, so only the text tells): 'ok' when it shows at least one success mark and no failure line, else 'partial' (a failure
-   * line, or nothing that confirms it).
+   * line, or nothing that confirms it). gravity.sh redraws a status line with OVER="\r\033[K" (carriage return, erase line) whether or not
+   * anything is a terminal, so a failed list arrives as "...Target: url\r\x1b[K  [x] Status: ...": every escape sequence goes, and a carriage
+   * return counts as a line break, before the lines are read.
    */
   function gravityVerdict(text) {
-    var s = String(text === undefined || text === null ? '' : text).replace(/\u001b\[[0-9;]*m/g, '');
+    var s = String(text === undefined || text === null ? '' : text).replace(/\u001b\[[0-9;?]*[ -\/]*[@-~]/g, '').replace(/\r/g, '\n');
     if (/^[ \t]*\[(✗|x|X)\]/m.test(s) || /gravity failed/i.test(s)) return 'partial';
     return /\[✓\]/.test(s) ? 'ok' : 'partial';
   }

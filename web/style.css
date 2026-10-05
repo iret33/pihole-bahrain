@@ -88,7 +88,11 @@ body.is-busy .app button{cursor:progress}
 .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 0 14px}
 .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:1.05rem}
 .brand-mark{display:inline-grid;place-items:center;width:34px;height:34px;border-radius:11px;background:var(--lagoon);color:#fff}
+.brand-mark svg{width:24px;height:24px}
+.login-card .brand-mark svg{width:30px;height:30px}
 .topbar-actions{display:flex;gap:4px}
+.topbar-actions .link{white-space:nowrap}
+@media (max-width:380px){.topbar{flex-wrap:wrap}.topbar-actions{width:100%;justify-content:space-between}}
 
 /* ---------- hero: the one loud element ---------- */
 .hero{position:relative;overflow:hidden;border-radius:var(--radius-xl);padding:26px 22px 22px;color:#fff;
@@ -542,6 +546,7 @@ body.is-busy .app button{cursor:progress}
 .box-addr{list-style:none;margin:0;padding:0;display:grid;gap:8px}
 .box-addr-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:1px 10px;align-items:center;padding:10px 12px;border-radius:var(--radius);background:var(--surface);border:1px solid var(--line)}
 .box-addr-row .box-copy{grid-column:2;grid-row:1 / span 3;min-height:44px}
+@media (max-width:420px){.box-addr-row{grid-template-columns:minmax(0,1fr)}.box-addr-row .box-copy{grid-column:1;grid-row:auto;justify-self:start;margin-top:6px}}
 .box-addr-value{display:block;direction:ltr;unicode-bidi:isolate;text-align:start;font-weight:700;font-size:1.05rem;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
 [dir="rtl"] .box-addr-value{text-align:right}
 

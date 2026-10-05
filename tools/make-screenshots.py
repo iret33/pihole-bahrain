@@ -70,7 +70,8 @@ def demo_box():
 
 def sign_in(browser, lang, **view):
     proxy = {"server": "http://127.0.0.1:%d" % httpd.server_port}
-    ctx = browser.new_context(**dict(dict(locale="en-GB", device_scale_factor=2, proxy=proxy), **view))
+    # The demo box says it is on Asia/Bahrain time: the phone is too, so the pictures carry no "your phone is in another time zone" note.
+    ctx = browser.new_context(**dict(dict(locale="en-GB", device_scale_factor=2, proxy=proxy, timezone_id="Asia/Bahrain"), **view))
     page = ctx.new_page()
     page.set_default_timeout(20000)
     page.goto(HOME_URL)
@@ -92,6 +93,14 @@ def settle(page):
             break
         time.sleep(0.25)
     time.sleep(0.4)
+
+
+def sheet_settled(page):
+    """Waits until every animation that ends has ended. A sheet slides in over a fifth of a second at partly see-through opacity: a picture taken
+    in that moment shows the page behind it. (Found in the My box pictures: a capture artefact, not a defect of the sheet.)"""
+    page.evaluate("""() => Promise.all(document.getAnimations().filter(a => { const t = a.effect && a.effect.getComputedTiming(); return t && isFinite(t.endTime); })
+        .map(a => a.finished.catch(() => {})))""")
+    time.sleep(0.15)
 
 
 def note(path):
@@ -127,7 +136,7 @@ try:
             page.click(".topbar [data-act=box]")
             page.wait_for_selector("#boxDialog[open]")
             page.wait_for_selector("#boxHealth .box-value:not(:text('…'))")
-            time.sleep(0.8)
+            sheet_settled(page)
             save(page, "box-%s.png" % lang)
             ctx.close()
         browser.close()

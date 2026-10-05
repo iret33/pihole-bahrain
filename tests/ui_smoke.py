@@ -40,6 +40,7 @@ failures = []
 def shot(page, name, full=False):
     if args.shots:
         os.makedirs(args.shots, exist_ok=True)
+        page.evaluate("() => Promise.all(document.getAnimations().filter(a => { const t = a.effect && a.effect.getComputedTiming(); return t && isFinite(t.endTime); }).map(a => a.finished.catch(() => {})))")   # a sheet still sliding in is see-through
         page.screenshot(path=os.path.join(args.shots, name), full_page=full)
 
 

@@ -590,9 +590,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
         time.sleep(delay)
         if fail:
-            self.wfile.write("\n[\u2717] DNS resolution is currently unavailable\n".encode())
+            # gravity.sh redraws a status line with OVER="\r\033[K": the failure mark is not at the start of a line in the raw stream
+            self.wfile.write("\n  [i] Target: https://example.invalid/list.txt\r\x1b[K  [\u2717] Status: Connection Refused\n".encode())
         else:
-            self.wfile.write("\n[\u2713] Preparing new gravity database\n[\u2713] Swapping databases\n[\u2713] Pi-hole blocking is enabled\n".encode())
+            self.wfile.write("\n  [i] Target: https://example.invalid/list.txt\r\x1b[K  [\u2713] Status: Retrieval successful\n[\u2713] Swapping databases\n[\u2713] Pi-hole blocking is enabled\n".encode())
 
     # ---------- the box itself (shapes from FTL's info.yaml) ----------
     def info_version(self):

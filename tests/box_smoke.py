@@ -3,8 +3,8 @@ branding, on the real parent page against the mock Pi-hole (tests/mock_pihole.py
 
     python3 tests/box_smoke.py [--shots DIR] [--only PART]        (needs: pip install playwright && playwright install chromium)
 
-Parts: structure, update, health, network, help, heartbeat, password, backup, power, counter, about, firstrun, banner, branding, contrast, motion,
-screenshots. The scheduler on the box is played by mock_pihole.SchedulerSim, which handles the request markers the page writes the way the architecture
+Parts: structure, update, health, network, help, heartbeat, password, backup, power, counter, about, firstrun, banner, branding, contrast, narrow,
+motion, screenshots. The scheduler on the box is played by mock_pihole.SchedulerSim, which handles the request markers the page writes the way the architecture
 says (and drops a power request that arrives while an update runs, as bin/sinko does); /pb/box.json is served by the mock (`store.box_info`).
 """
 import argparse
@@ -642,7 +642,8 @@ def part_help(browser):
             eventually(lambda: page.is_visible(".tile"))
             expect(help_text() == T(lang, "helpBodyNoIp"), "[%s] no box.json and the page opened by %s: the no-number wording: %r" % (lang, what, help_text()))
             expect("sinko.local" not in help_text() and "127.0.0.1" not in help_text() and "{ip}" not in help_text(), "[%s] with no host name and no loopback number in it" % lang)
-            if lang == "en" and what == "a name":
+            if what == "a name":
+                page.evaluate("() => { const h = document.getElementById('help'); h.open = true; h.scrollIntoView({ block: 'center' }); }")
                 shot(page, "help-no-number-%s.png" % lang)
             ctx.close()
         # box.json is garbage, or hostile: the page works and believes none of it
@@ -1325,6 +1326,210 @@ def part_branding(browser):
     ctx.close()
 
 
+# WCAG 2.x contrast of every piece of text in the given parts of the page: its computed colour (blended over what is behind it) against the first
+# opaque background behind it. Text on a gradient is left out (the hero, the page's own wash): there is no single background to measure. Disabled
+# controls, anything see-through (a toast that is not showing) and decorative text that is hidden from screen readers (the app monograms) are exempt.
+CONTRAST_JS = """(roots) => {
+  const num = (s) => (s.match(/-?[\\d.]+/g) || []).map(Number);
+  const parse = (c) => { const n = num(c); return n.length >= 3 ? { r: n[0], g: n[1], b: n[2], a: n.length > 3 ? n[3] : 1 } : null; };
+  const over = (f, b) => ({ r: f.r * f.a + b.r * (1 - f.a), g: f.g * f.a + b.g * (1 - f.a), b: f.b * f.a + b.b * (1 - f.a), a: 1 });
+  const chan = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+  const lum = (c) => 0.2126 * chan(c.r) + 0.7152 * chan(c.g) + 0.0722 * chan(c.b);
+  const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+  const background = (el) => {
+    const layers = [];
+    for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+      const cs = getComputedStyle(n);
+      if (cs.backgroundImage && cs.backgroundImage !== 'none') return null;
+      const c = parse(cs.backgroundColor);
+      if (c && c.a > 0) { layers.push(c); if (c.a >= 1) break; }
+    }
+    let base = layers.length && layers[layers.length - 1].a >= 1 ? layers.pop() : null;
+    if (!base) return null;
+    while (layers.length) base = over(layers.pop(), base);
+    return base;
+  };
+  const failures = [], seen = [];
+  for (const sel of roots) {
+    for (const root of document.querySelectorAll(sel)) {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      for (let t = walker.nextNode(); t; t = walker.nextNode()) {
+        if (!/\\S/.test(t.nodeValue)) continue;
+        const el = t.parentElement;
+        if (!el || el.closest('script,style,.sr-only,[aria-hidden="true"]') || !el.getClientRects().length) continue;
+        const cs = getComputedStyle(el);
+        if (cs.visibility === 'hidden' || el.closest('button:disabled,[disabled]')) continue;
+        let faded = false;
+        for (let n = el; n && n.nodeType === 1; n = n.parentElement) if (parseFloat(getComputedStyle(n).opacity) < 0.99) faded = true;
+        if (faded) continue;
+        const bg = background(el);
+        if (!bg) continue;
+        const fg0 = parse(cs.color);
+        if (!fg0) continue;
+        const fg = over(fg0, bg);
+        const px = parseFloat(cs.fontSize), large = px >= 24 || (px >= 18.66 && parseInt(cs.fontWeight, 10) >= 700);
+        const r = ratio(fg, bg), need = large ? 3 : 4.5;
+        seen.push(1);
+        if (r < need) failures.push({ text: t.nodeValue.trim().slice(0, 40), ratio: Math.round(r * 100) / 100, need, cls: (el.className && el.className.baseVal === undefined ? el.className : '') || el.tagName,
+          fg: cs.color, bg: 'rgb(' + [bg.r, bg.g, bg.b].map(Math.round).join(',') + ')' });
+      }
+    }
+  }
+  return { checked: seen.length, failures };
+}"""
+
+
+def contrast(page, roots, label, minimum=3):
+    settle(page)                                   # a sheet that is still sliding in is see-through, and exempt from the measurement below
+    got = page.evaluate(CONTRAST_JS, roots)
+    expect(got["checked"] >= minimum, "%s: %d pieces of text were measured (so the check is not empty)" % (label, got["checked"]))
+    expect(not got["failures"], "%s: all %d pieces of text have at least 4.5:1 (3:1 when large) %s" % (label, got["checked"], got["failures"][:4] if got["failures"] else ""))
+
+
+def part_contrast(browser):
+    """Every component that was added or changed for My box, the first run and the update banner, measured in light and dark, in both languages."""
+    main_roots = ["#updateBanner", "#setup", "#banner", "#devices", "#services", ".help", ".foot"]
+    for scheme in ("light", "dark"):
+        for lang in ("en", "ar"):
+            tag = "[%s %s]" % (scheme, lang)
+            # --- the main page: update banner, setup list, scheduler banner, a blocked app, a paused device
+            url, store = make_site(setup_done=False)
+            offer_update(store)
+            store.box_info_age = 25 * 60
+            ctx, page = open_page(browser, url, lang, color_scheme=scheme)
+            page.click("[data-id=youtube]")
+            page.wait_for_selector("[data-id=youtube].tile-blocked")
+            page.click("[data-act=pause]")
+            page.wait_for_selector(".device .tag")
+            page.evaluate("() => { PBBox.timing.heartbeatGrace = 1; }")
+            eventually(lambda: (page.evaluate("() => document.dispatchEvent(new Event('visibilitychange'))"), page.is_visible("#banner"))[1], 8)
+            contrast(page, main_roots, tag + " main page (update banner, setup list, banner, blocked app, paused tag)", 12)
+            shot(page, "contrast-main-%s-%s.png" % (scheme, lang), full=True)
+            store.edit_state(lambda st: st["update"].update({"status": "failed", "to": "3.1.0", "latest": "3.1.0", "at": int(time.time()), "error": "x", "rolledBack": False}))
+            page.evaluate("() => document.dispatchEvent(new Event('visibilitychange'))")
+            eventually(lambda: page.is_visible("#updateBanner") and page.get_attribute("#updateBanner", "data-phase") == "failed")
+            contrast(page, ["#updateBanner"], tag + " the 'last update did not work' banner", 1)
+            ctx.close()
+
+            # --- My box in its different states
+            url, store = make_site()
+            offer_update(store)
+            store.blocking = "disabled"
+            store.cpu_temp = 80.0
+            store.clock_skew = 3 * 3600
+            store.box_info.update({"tz": "UTC", "utcOffset": "+00:00"})
+            store.edit_state(lambda st: st.update({"community": {"online": 1234, "at": int(time.time())}, "telemetry": {"on": True}}))
+            ctx, page = open_page(browser, url, lang, color_scheme=scheme)
+            open_box(page)
+            eventually(lambda: "…" not in page.inner_text("#boxHealth"))
+            contrast(page, ["#boxDialog"], tag + " My box: update on offer, filtering off, hot box, 3 hours off, universal time, counter online", 25)
+            shot(page, "contrast-box-%s-%s.png" % (scheme, lang))
+            for rolled in (False, None, True):
+                store.edit_state(lambda st: st["update"].update({"status": "failed", "to": "3.1.0", "latest": "3.1.0", "at": int(time.time()) - 5,
+                                                                  "error": "The installer stopped with an error (exit status 1).", "rolledBack": rolled}))
+                page.keyboard.press("Escape")
+                open_box(page)
+                if rolled is True:
+                    page.click("#boxUpdates details summary")
+                contrast(page, ["#boxUpdates"], tag + " a failed update (rolledBack %s)" % rolled, 4)
+                shot(page, "contrast-failed-%s-%s-%s.png" % (str(rolled).lower(), scheme, lang))
+            store.edit_state(lambda st: st["update"].update({"status": "running", "to": "3.1.0", "at": int(time.time()), "error": None, "rolledBack": None}))
+            page.keyboard.press("Escape")
+            open_box(page)
+            contrast(page, ["#boxUpdates", "#boxPower"], tag + " an update running, with the power buttons waiting", 6)
+            shot(page, "contrast-running-%s-%s.png" % (scheme, lang))
+            store.edit_state(lambda st: st["update"].update({"status": "idle", "at": 0}))
+            page.keyboard.press("Escape")
+            open_box(page)
+            # an error under the password form, a refused restore, a restore whose rebuild failed, an error toast, the confirm button
+            page.fill("#boxPwNew", "abc")
+            page.click("#boxPwBtn")
+            page.set_input_files("#boxRestoreFile", {"name": "photo.zip", "mimeType": "application/zip", "buffer": b"not a zip"})
+            page.click("#boxRestoreBtn")
+            confirm_text(page)
+            contrast(page, ["#confirmDialog"], tag + " the confirm question and its red button", 2)
+            shot(page, "contrast-confirm-%s-%s.png" % (scheme, lang))
+            page.click("#confirmYes")
+            eventually(lambda: T(lang, "boxRestoreBad") in box_text(page))
+            contrast(page, ["#boxPw", "#boxBackup"], tag + " the password error and a refused restore", 6)
+            store.gravity_fail = True
+            page.set_input_files("#boxRestoreFile", {"name": "same.zip", "mimeType": "application/zip", "buffer": store.export_zip()})
+            page.click("#boxRestoreBtn")
+            confirm_text(page)
+            page.click("#confirmYes")
+            eventually(lambda: T(lang, "boxRestorePartial") in box_text(page), 20)
+            contrast(page, ["#boxBackup"], tag + " a restore whose rebuild did not finish", 4)
+            page.evaluate("""() => { const t = document.getElementById('boxToast'); t.textContent = 'x'; t.className = 'toast toast-error show'; }""")
+            page.wait_for_timeout(300)
+            contrast(page, ["#boxToast"], tag + " an error toast", 1)
+            shot(page, "contrast-toast-%s-%s.png" % (scheme, lang))
+            ctx.close()
+            errors[:] = [e for e in errors if "status of 400" not in e]
+
+            # --- the claim and sign-in screens
+            url, store = make_site(password=False, setup_done=False, kids=False)
+            ctx, page = open_page(browser, url, lang, sign_in=False, color_scheme=scheme)
+            page.wait_for_selector("#claim:not([hidden])")
+            if lang == "ar":
+                page.click("#claim .lang-toggle")
+            page.fill("#claimPw", "short")
+            page.fill("#claimPw2", "short")
+            page.click("#claimBtn")
+            contrast(page, ["#claim"], tag + " the claim screen with its error", 5)
+            shot(page, "contrast-claim-%s-%s.png" % (scheme, lang))
+            ctx.close()
+            url, store = make_site()
+            ctx, page = open_page(browser, url, lang, sign_in=False, color_scheme=scheme)
+            page.wait_for_selector("#login:not([hidden])")
+            page.evaluate("() => { const n = document.getElementById('loginNote'); n.textContent = 'x'; n.hidden = false; document.getElementById('loginErr').textContent = 'x'; }")
+            contrast(page, ["#login"], tag + " the sign-in screen with a note and an error", 4)
+            shot(page, "contrast-login-%s-%s.png" % (scheme, lang))
+            ctx.close()
+
+
+def part_narrow(browser):
+    """The new screens on the smallest phones (320 and 390 wide), in both languages and in dark mode: nothing sideways, and a picture of each."""
+    for width in (320, 390):
+        for lang in ("en", "ar"):
+            for scheme in ("light", "dark"):
+                tag = "[%dpx %s %s]" % (width, lang, scheme)
+                url, store = make_site()
+                offer_update(store)
+                store.config["dns"]["hosts"] = ["192.168.1.50 family.lan"]
+                store.box_info.update({"tz": "UTC", "utcOffset": "+00:00"})
+                ctx, page = open_page(browser, url, lang, viewport={"width": width, "height": 844}, color_scheme=scheme)
+
+                def sideways():
+                    return page.evaluate("() => [document.documentElement.scrollWidth - document.documentElement.clientWidth, document.getElementById('boxBody').scrollWidth - document.getElementById('boxBody').clientWidth]")
+                tall = page.evaluate("() => [...document.querySelectorAll('.topbar .brand, .topbar-actions .link')].map(e => Math.round(e.getBoundingClientRect().height)).filter(h => h > 48)")
+                expect(not tall and page.evaluate("() => document.documentElement.scrollWidth <= document.documentElement.clientWidth"),
+                       "%s the top bar keeps each word of its buttons on one line and nothing scrolls sideways (heights over 48 px: %s)" % (tag, tall))
+                shot(page, "narrow-main-%d-%s-%s.png" % (width, scheme, lang))
+                open_box(page)
+                eventually(lambda: "…" not in page.inner_text("#boxHealth"))
+                expect(max(sideways()) <= 1, "%s My box has nothing to scroll sideways %s" % (tag, sideways()))
+                shot(page, "narrow-box-top-%d-%s-%s.png" % (width, scheme, lang))
+                page.evaluate("() => document.getElementById('boxNet').scrollIntoView()")
+                shot(page, "narrow-box-addresses-%d-%s-%s.png" % (width, scheme, lang))
+                page.evaluate("() => document.getElementById('boxHealth').scrollIntoView()")
+                shot(page, "narrow-box-health-%d-%s-%s.png" % (width, scheme, lang))
+                for rolled in (True, False, None):
+                    store.edit_state(lambda st: st["update"].update({"status": "failed", "to": "3.1.0", "latest": "3.1.0", "at": int(time.time()) - 5,
+                                                                      "error": "The installer stopped with an error (exit status 1).", "rolledBack": rolled}))
+                    page.keyboard.press("Escape")
+                    open_box(page)
+                    if rolled is True:
+                        page.click("#boxUpdates details summary")
+                    expect(max(sideways()) <= 1, "%s a failed update (rolledBack %s) has nothing to scroll sideways" % (tag, rolled))
+                    shot(page, "narrow-failed-%s-%d-%s-%s.png" % (str(rolled).lower(), width, scheme, lang))
+                store.edit_state(lambda st: st["update"].update({"status": "running", "to": "3.1.0", "at": int(time.time()), "error": None, "rolledBack": None}))
+                page.keyboard.press("Escape")
+                open_box(page)
+                page.evaluate("() => document.getElementById('boxPower').scrollIntoView()")
+                shot(page, "narrow-power-wait-%d-%s-%s.png" % (width, scheme, lang))
+                ctx.close()
+
+
 def part_motion(browser):
     url, store = make_site()
     sim_for(store, run_seconds=None)
@@ -1371,7 +1576,8 @@ def part_screenshots(browser):
 PARTS = [("structure", part_structure), ("update", part_update), ("health", part_health), ("network", part_network), ("help", part_help),
          ("heartbeat", part_heartbeat), ("password", part_password),
          ("backup", part_backup), ("power", part_power), ("counter", part_counter), ("about", part_about), ("firstrun", part_firstrun),
-         ("banner", part_banner), ("branding", part_branding), ("motion", part_motion), ("screenshots", part_screenshots)]
+         ("banner", part_banner), ("branding", part_branding), ("contrast", part_contrast), ("narrow", part_narrow), ("motion", part_motion),
+         ("screenshots", part_screenshots)]
 
 with sync_playwright() as p:
     # sinko.local is what the quick-start card tells a parent to open: the browser is told where it is (the mock listens on the loopback address)
