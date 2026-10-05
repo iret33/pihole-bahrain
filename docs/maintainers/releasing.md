@@ -15,10 +15,11 @@ setup" further down are the details of steps 1, 4 and 5 here.
 | README badge **CI** (`actions/workflows/ci.yml/badge.svg`) | README | 3 (it stays empty until one CI run exists on `master`) |
 | README link **Website** (`https://iret33.github.io/sinko/`) and the website's own address; the website's "Full instructions on GitHub" link (README, `#install`) | README, `site/` | 4 (Pages) |
 | The **boxes online** badge and the counter numbers on the website | commented out in the README; `statsUrl` in `site/config.js` | 5 (counter deployed) |
-| README badges **Downloads** (`img.shields.io/github/downloads/iret33/sinko/total`) and **Latest release** (`img.shields.io/github/v/release/iret33/sinko`) | README | 7 (the first release with its files; before it they show an error, "no releases" or zero) |
+| README badges **Total downloads** (`img.shields.io/github/downloads/iret33/sinko/total`), **Downloads of the latest release** (`.../downloads/iret33/sinko/latest/total`) and **Latest release** (`img.shields.io/github/v/release/iret33/sinko`) | README | 7 (the first release with its files; before it they show an error, "no releases" or zero) |
+| README badges **Stars** and **Last commit** (`img.shields.io/github/stars/iret33/sinko`, `.../last-commit/iret33/sinko`) | README | 1 (rename) |
 | The install one-liner (`releases/latest/download/install.sh`), and every box's update check and download (`api.github.com/repos/iret33/sinko/releases/latest`, `releases/latest/download/sinko.tar.gz`) | README, `docs/install.md`, the website, `install.sh`, `bin/sinko` | 7 |
 | The security reporting link (`security/advisories/new`) and the *Issues* links | `SECURITY.md`, the issue templates, `web/links.json` | 1, with the settings of "One-time setup" step 4 switched on |
-| The **Licence** badge | README | already (it is a static image) |
+| The **Licence** badge (and the Pi-hole, Orange Pi, language and contributions badges) | README | already (it is a static image) |
 
 1. **Rename the repository to `sinko`**, detach it from the Pi-hole fork network, set the repository page and switch on the
    settings ("One-time setup", steps 1 to 4). Check: `https://github.com/iret33/sinko` opens, and the old
@@ -39,7 +40,7 @@ setup" further down are the details of steps 1, 4 and 5 here.
 6. **If there is a shop:** set `buyUrl` in `site/config.js` and change the sentence "Ready-made boxes are not on sale yet" in
    the README, `docs/install.md` and `docs/faq.md` (a test fails while those words and an empty `buyUrl` disagree).
 7. **Release:** replace `Unreleased` in the `CHANGELOG.md` heading with the date, make `VERSION` and `bin/sinko` agree, tag
-   `v3.0.0` and push it ("Cutting a release" below). Check: the Downloads and Latest release badges show the release, the
+   `v3.0.0` and push it ("Cutting a release" below). Check: the download badges and the Latest release badge show the release, the
    one-liner installs on a clean box, and a box on 2.x or on an older build updates from the page.
 8. **Walk every link in the table** once, with a phone and a computer, then do section G of
    [`../hardware-test-checklist.md`](../hardware-test-checklist.md). Upload the social preview by hand (Settings → General →

@@ -2126,7 +2126,12 @@ class SelfcheckTests(unittest.TestCase):
         """A systemctl that answers `show` for a scheduler that has been up for `up_seconds`, as pid `pid`."""
         folder = os.path.join(self.tmp, "fakebin")
         os.makedirs(folder, exist_ok=True)
-        entered = int((time.monotonic() - up_seconds) * 1e6)
+        # The monotonic clock is the machine's uptime: on a freshly started CI runner it can be younger than
+        # `up_seconds`, so wait until it is old enough for the unit to look as old as the check needs.
+        need = pb.SCHEDULER_PROOF_SECONDS + 2
+        if time.monotonic() < need:
+            time.sleep(need - time.monotonic())
+        entered = int((time.monotonic() - min(up_seconds, time.monotonic() - 1)) * 1e6)
         with open(os.path.join(folder, "systemctl"), "w") as fh:
             fh.write("#!/bin/sh\nif [ \"$1\" = show ]; then\n  echo ActiveState=active\n"
                      "  echo ActiveEnterTimestampMonotonic=%d\n  echo MainPID=%d\n  echo NRestarts=0\nfi\nexit 0\n" % (entered, pid))
