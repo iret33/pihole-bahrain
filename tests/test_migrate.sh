@@ -338,7 +338,14 @@ kill_installer_during_gravity KILL
 [[ -e "$WORK/units/pihole-bahrain.service.enabled" && -e "$WORK/units/pihole-bahrain-lists.timer.enabled" ]] \
   || fail "after kill -9 (no exit handler runs) the old scheduler is not enabled: a reboot would leave the box without one"
 [[ ! -e "$WORK/units/sinko.service.enabled" ]] || fail "the new scheduler was enabled by a killed run"
-for signal in TERM HUP; do
+# A shell started under nohup (or anything else that ignores SIGHUP) passes that on to everything it starts, and a signal that
+# is ignored on entry cannot be caught again: the HUP case would then test nothing and fail for a reason that is not the installer's.
+signals=(TERM HUP)
+if (( 0x$(awk '/^SigIgn:/ {print $2}' /proc/$$/status) & 1 )); then
+  echo "    (SIGHUP is ignored in this shell, probably because of nohup: the HUP case is skipped)"
+  signals=(TERM)
+fi
+for signal in "${signals[@]}"; do
   kill_installer_during_gravity "$signal"
   # Both old units, not only the first one: the output copy to the log (tee) is ended with the installer, and bash would
   # then die of SIGPIPE at the first note it writes ("Terminated"), in the middle of the function that starts them again.
