@@ -1339,7 +1339,7 @@
   // Coming back to the page: look at the version, but not while something is open or being typed, and not more than once a minute.
   function checkStaleLater() {
     var now = Date.now();
-    if (now - staleCheckedAt < 60000 || $('app').hidden || document.querySelector('dialog[open]') || bedDirty || busy) return;
+    if (now - staleCheckedAt < PBBox.timing.staleEvery || $('app').hidden || document.querySelector('dialog[open]') || bedDirty || busy) return;
     staleCheckedAt = now;
     checkStale().catch(function () {});
   }

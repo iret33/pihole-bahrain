@@ -21,7 +21,8 @@ running and then ok or failed; a power request that arrives while an update runs
 Two more switches play the box's web server and installer for the browser tests of "the page after an update": `static_cache` makes every
 page file answer the way Pi-hole's web server (civetweb) does, with `Cache-Control: max-age=3600`, an ETag and 304 for a revalidation, so a
 browser keeps old scripts and styles for an hour exactly as it does on a box; `stamp_pages` plays the installer: `@VERSION@` in index.html
-becomes the installed version, and every script says which release it belongs to (window.__pbAssets). `log_static` keeps the address
+becomes the installed version (or a fixed one when `stamp_pages` is a string), and every script says which release it belongs to
+(window.__pbAssets). `log_static` keeps the address
 (with its query) of every file the page asked for in `static_hits`, so a test can prove from the server's side that a file was fetched again.
 
 Run standalone to develop the web page without a Raspberry Pi:
@@ -124,6 +125,7 @@ class Store:
         self.version = None               # when set, /pb/version.txt answers this instead of the VERSION file
         self.static_cache = False         # page files answer with civetweb's Cache-Control: max-age=3600 + ETag (and 304 to a revalidation)
         self.stamp_pages = False          # the installer's work: @VERSION@ in index.html -> the installed version; scripts say which release they are
+                                          # (a string = always stamp that version, like a page that was stamped wrongly)
         self.log_static = False           # keep the address (with its query string) of every page file asked for in static_hits
         self.static_hits = []
         # What `sinko box-info` writes to /pb/box.json (architecture.md, "Amendments"). `at` is left out here: it is the box's clock at
@@ -991,7 +993,7 @@ class Handler(BaseHTTPRequestHandler):
         s = self.store
         if not s.stamp_pages:
             return data
-        version = (s.version or VERSION).encode()
+        version = (s.stamp_pages if isinstance(s.stamp_pages, str) else (s.version or VERSION)).encode()
         if rel == "index.html":
             return data.replace(b"@VERSION@", version)
         if rel.endswith(".js"):

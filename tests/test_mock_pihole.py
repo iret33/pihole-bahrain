@@ -572,6 +572,8 @@ class StaticFilesTests(MockCase):
         self.assertNotIn("__pbAssets", self.get("/pb/style.css")[1].decode())
         self.store.version = None
         self.assertIn('content="%s"' % mock_pihole.VERSION, self.get("/")[1].decode(), "without a set version it is the repository's VERSION")
+        self.store.stamp_pages, self.store.version = "2.9.9", "3.1.0"
+        self.assertIn('content="2.9.9"', self.get("/")[1].decode(), "a string stamps that version whatever the box has (a page that was stamped wrongly)")
 
     def test_what_the_page_asked_for_is_kept_when_asked(self):
         self.get("/pb/app.js?v=3.0.0")

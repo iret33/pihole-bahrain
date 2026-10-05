@@ -580,6 +580,7 @@
     startLost: 360000,                // the scheduler waits up to 5 minutes between runs
     healthDown: 6000,                 // how long the box is silent before the health card stops showing its old readings
     heartbeatGrace: 60000,            // how long box.json must have been late (seen by this page) before the main page says the scheduler is not running
+    staleEvery: 60000,                // the least time between two looks at the box's version when the phone comes back to the page
     clockStepHold: 6 * 60000 };       // after the box's clock was seen to jump: how long the scheduler gets to catch up (it refreshes box.json every 5 minutes) before it is judged
   var env = null;                    // what the page lends us, see init()
   var ui = null;                     // the elements, built on first open (and again after a language change)
