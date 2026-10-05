@@ -96,6 +96,11 @@ export function pingRequest(body = pingBody(), { headers = {}, raw, method = 'PO
   return new Request(`https://counter.test${path}`, init);
 }
 
+// "Forget this box": the same request builder, the other path and a body that holds only the id.
+export function forgetRequest(body = { id: ID_A }, options = {}) {
+  return pingRequest(body, { ...options, path: '/v1/forget' });
+}
+
 export function getRequest(path, { method = 'GET', headers = {} } = {}) {
   return new Request(`https://counter.test${path}`, { method, headers });
 }
@@ -119,6 +124,7 @@ export function makeWorld(backend, { snapshotTtl = 0, env = {}, cache = true } =
     db, clock, github, cache: fakeCache, log, worker, env: fullEnv,
     call: (request) => worker.fetch(request, fullEnv),
     ping: (body, options) => worker.fetch(pingRequest(body, options), fullEnv),
+    forget: (body, options) => worker.fetch(forgetRequest(body, options), fullEnv),
     get: (path, options) => worker.fetch(getRequest(path, options), fullEnv),
     stats: async () => (await worker.fetch(getRequest('/v1/stats'), fullEnv)).json(),
     purge: () => worker.scheduled({}, fullEnv),

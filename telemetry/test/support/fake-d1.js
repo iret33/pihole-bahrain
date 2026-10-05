@@ -24,6 +24,8 @@ export class FakeD1 {
       [SQL.hardware, (p) => this.#hardware(p)],
       [SQL.countries, (p) => this.#countries(p)],
       [SQL.purge, (p) => this.#purge(p)],
+      [SQL.forget, (p) => this.#forget(p)],
+      [SQL.dropSnapshot, (p) => this.#metaDelete(p)],
       [SQL.metaGet, (p) => this.#metaGet(p)],
       [SQL.metaSet, (p) => this.#metaSet(p)],
     ]);
@@ -108,6 +110,14 @@ export class FakeD1 {
       }
     }
     return { changes };
+  }
+
+  #forget([id]) {
+    return { changes: this.installs.delete(id) ? 1 : 0 };
+  }
+
+  #metaDelete([key]) {
+    return { changes: this.meta.delete(key) ? 1 : 0 };
   }
 
   #metaGet([key]) {
