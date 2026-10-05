@@ -415,11 +415,17 @@ EOF
 #!/usr/bin/env bash
 echo "journalctl $*" >>"$WORK/calls.log"
 EOF
-  # dd if=/dev/zero of=FILE: writes a little and "runs out of space", as dd does on a full disk.
+  # dd if=/dev/zero of=FILE: writes a little and "runs out of space", as dd does on a full disk (the way the free space gets
+  # filled). Switches: $WORK/dd-io-error (a worn card: "Input/output error"), $WORK/dd-readonly ("Read-only file system"),
+  # $WORK/dd-killed (ended by a signal: no message, status 137), $WORK/dd-no-end (writes everything: no message, status 0).
   cat >"$STUBS/dd" <<'EOF'
 #!/usr/bin/env bash
 echo "dd $*" >>"$WORK/calls.log"
 for a in "$@"; do case "$a" in of=*) head -c 4096 /dev/zero >"${a#of=}"; ;; esac; done
+if [[ -e "$WORK/dd-io-error" ]]; then echo "dd: error writing '/.sinko-zerofill': Input/output error" >&2; exit 1; fi
+if [[ -e "$WORK/dd-readonly" ]]; then echo "dd: failed to open '/.sinko-zerofill': Read-only file system" >&2; exit 1; fi
+if [[ -e "$WORK/dd-killed" ]]; then exit 137; fi
+if [[ -e "$WORK/dd-no-end" ]]; then exit 0; fi
 echo "dd: error writing: No space left on device" >&2
 exit 1
 EOF
@@ -529,7 +535,8 @@ fresh_start() {
     "$WORK/pihole-g-block" "$WORK/pihole-g-fail" "$WORK/pihole-g-started" "$WORK/pihole-g-pid" "$WORK/apt-update-fail" "$WORK/apt-nocandidate" \
     "$WORK/py-old" "$WORK/password-in-env" "$WORK/curl.log" "$WORK/ftl-makes-cert" "$WORK/ftl-cert-fail" \
     "$WORK/ip-static" "$WORK/ftl-stop-fails" "$WORK/credential-stuck" "$WORK/sched-crashloop" "$WORK/sched-starting" "$WORK/sched-age" \
-    "$WORK/run" "$WORK/setpassword-needs-stdin" "$WORK/df-free-kb" "$WORK/dpkg-configfiles" "$WORK/sshd-no-G" "$WORK/sshd-no-T-h"
+    "$WORK/run" "$WORK/setpassword-needs-stdin" "$WORK/df-free-kb" "$WORK/dpkg-configfiles" "$WORK/sshd-no-G" "$WORK/sshd-no-T-h" \
+    "$WORK/dd-io-error" "$WORK/dd-readonly" "$WORK/dd-killed" "$WORK/dd-no-end"
   mkdir -p "$ROOT/etc/pihole" "$ROOT/etc/ssh" "$ROOT/var/www/html" "$ROOT/var/log" "$WORK/units"
   touch "$ROOT/etc/pihole/pihole.toml" "$WORK/units/pihole-FTL.service.active" "$WORK/units/pihole-FTL.service.enabled"
   : >"$WORK/calls.log"
