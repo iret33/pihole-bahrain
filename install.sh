@@ -217,7 +217,7 @@ has_tty() { { : >>"$TTY_DEV"; } 2>/dev/null; }
 preflight() {
   OS_RELEASE="${SINKO_OS_RELEASE:-/etc/os-release}"       # SINKO_OS_RELEASE is a test hook
   step "Checking this device"
-  [[ "$(id -u)" -eq 0 ]] || die "Run as root: curl -fsSL <url> | sudo bash"
+  [[ "$(id -u)" -eq 0 ]] || die "Run as root: curl --proto '=https' --proto-redir '=https' -fsSL <url> | sudo bash"
   [[ -r "$OS_RELEASE" ]] || die "Unknown operating system (no /etc/os-release)."
   local id like pretty
   id="$(. "$OS_RELEASE" && echo "${ID:-}")"
