@@ -839,8 +839,9 @@ class PageAndSchedulerTests(unittest.TestCase):
         for label, act in script:
             act()
             scheduler_round(label)
+        # (these two guard the test itself: a scheduler that stopped writing, or a page that did not, would leave nothing interleaved to check)
         self.assertGreaterEqual(len(self.page_writes), len(script), "the page wrote at least once for every step")
-        self.assertGreaterEqual(len(box.sched_writes), len(script) * 3 // 2, "and the scheduler wrote half as often again")
+        self.assertGreaterEqual(len(box.sched_writes), len(script) * 3 // 2, "and the scheduler wrote half as often again in between")
         self.assertEqual(len(box.counter.forgotten), 2, "(the counter was told to forget the box each time the answer became no)")
         # what the page makes of it all: reloaded, it shows exactly the merged state
         main_page()

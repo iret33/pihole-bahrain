@@ -106,7 +106,7 @@ Use it together with Screen Time (iPhone) or Family Link (Android). More in the 
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -p "test_*.py"    # box program, updater, lists, doctor, diagnose, copy, release build
+python3 -m unittest discover -s tests -p "test_*.py"    # box program, updater, lists, doctor, diagnose, copy, release build; with playwright also the real page against the real scheduler
 node --test tests/*.test.js                              # the page's logic (state, live picture, My box)
 sudo bash tests/run_shell_tests.sh                       # installer, migration, seal, first start (stubbed system)
 python3 tests/ui_smoke.py --shots /tmp/shots             # the page in a real browser, English and Arabic (needs playwright)

@@ -80,6 +80,8 @@ jobs:
           for t in ui_smoke stage_smoke live_smoke box_smoke; do
             echo "::group::$t"; python tests/$t.py --shots screenshots; echo "::endgroup::"
           done
+      - name: The real page against the real scheduler (the unit job has no browser and skips this file)
+        run: python -m unittest discover -s tests -p "test_page_scheduler.py" -v
       - uses: actions/upload-artifact@v4
         if: always()
         with:

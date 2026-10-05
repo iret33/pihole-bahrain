@@ -23,7 +23,7 @@ Needs Python 3.9+, Node 20+, bash and, for browser tests, Playwright with Chromi
 
 ```bash
 pip install playwright && python -m playwright install chromium     # once
-python3 -m unittest discover -s tests -p "test_*.py"                # box program, lists, doctor, diagnose, copy
+python3 -m unittest discover -s tests -p "test_*.py"                # box program, lists, doctor, diagnose, copy, and (with Playwright) the real page against the real scheduler
 node --test tests/*.test.js                                          # page logic
 sudo bash tests/test_install.sh                                      # installer end to end, on a stubbed system
 shellcheck install.sh uninstall.sh tools/*.sh tests/*.sh            # shell lint
