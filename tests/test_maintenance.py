@@ -211,6 +211,10 @@ class Fixture(unittest.TestCase):
         self.now += dt.timedelta(seconds=seconds)
         self.mono += seconds
 
+    def stamp(self, seconds_ago=0):
+        """A request marker as the page writes it: the time of the request in ms on the box's clock."""
+        return int((self.now.timestamp() - seconds_ago) * 1000)
+
     def pass_(self):
         return self.m.run(self.now)
 
@@ -287,19 +291,20 @@ class JobIsolationTests(Fixture):
 class UpdateRequestTests(Fixture):
     def test_a_request_stores_the_marker_clears_it_and_only_then_starts_the_runner(self):
         self.found = self.release("3.1.0")
-        self.set_state(lambda s: s["update"].update(request=1700000000123, latest="3.1.0"))
+        marker = self.stamp()
+        self.set_state(lambda s: s["update"].update(request=marker, latest="3.1.0"))
         before = self.state()["update"]
         actions = self.pass_()
         self.assertIn("update requested by the page", actions)
         u = self.state()["update"]
         self.assertEqual((u["status"], u["from"], u["to"], u["request"], u["error"]), ("running", "3.0.0", "3.1.0", None, None))
         self.assertEqual(u["at"], self.now.timestamp())
-        self.assertEqual(pb.load_handled(), {"update": 1700000000123})
+        self.assertEqual(pb.load_handled(), {"update": marker})
         self.assertEqual(before["status"], "idle")
         state_at_launch, handled_at_launch = self.seen_at_call["runner"]
         self.assertEqual(state_at_launch["update"]["status"], "running", "the state said running before the runner started")
         self.assertIsNone(state_at_launch["update"]["request"], "and the request was already cleared")
-        self.assertEqual(handled_at_launch, {"update": 1700000000123}, "and the marker was already stored")
+        self.assertEqual(handled_at_launch, {"update": marker}, "and the marker was already stored")
         self.assertEqual(self.runner_calls, ["running"])
 
     def test_the_marker_is_durable_before_the_state_is_written(self):
@@ -941,12 +946,13 @@ class CheckTests(Fixture):
 
 class PowerTests(Fixture):
     def test_a_reboot_request_is_stored_and_cleared_before_the_reboot_is_issued(self):
-        self.set_state(lambda s: s["power"].update(request=1700000000999, action="reboot"))
+        marker = self.stamp()
+        self.set_state(lambda s: s["power"].update(request=marker, action="reboot"))
         actions = self.pass_()
         self.assertIn("power request: reboot", actions)
         state_then, handled_then = self.seen_at_call["power"]
         self.assertEqual(state_then["power"], {"request": None, "action": None}, "cleared BEFORE the reboot")
-        self.assertEqual(handled_then, {"power": 1700000000999}, "stored BEFORE the reboot")
+        self.assertEqual(handled_then, {"power": marker}, "stored BEFORE the reboot")
         self.assertEqual(self.power_calls, ["reboot"])
 
     def test_poweroff(self):
@@ -1029,6 +1035,73 @@ class PowerTests(Fixture):
         self.assertEqual(pb.load_handled(), {})
         self.settle()
         self.assertEqual(self.power_calls, ["reboot"])
+
+
+class StaleRequestTests(Fixture):
+    """A request is for now (architecture.md, "Request protocol"): the page writes its time on the box's clock, and the scheduler does not
+    act on one that is much older (or from the future). The case it exists for is a restored backup, whose state holds the requests that
+    were waiting when it was made: a request this box never handled looks new to the "different from handled" rule."""
+
+    def test_old_requests_of_every_kind_are_dropped_and_never_acted_on(self):
+        old = self.stamp(3600)
+        self.found = self.release("3.1.0")
+        self.set_state(lambda s: s["update"].update(request=old, checkRequest=old + 1, latest="3.1.0"))
+        self.set_state(lambda s: s["power"].update(request=old + 2, action="reboot"))
+        with self.assertLogs("sinko", level="INFO") as logs:
+            self.settle()
+        messages = [r.getMessage() for r in logs.records]
+        for kind in ("update", "check", "power"):
+            self.assertIn("%s request ignored: it is too old to be a parent's" % kind, messages)
+        self.assertEqual((self.runner_calls, self.check_calls, self.power_calls), ([], [], []))
+        u = self.state()["update"]
+        self.assertEqual((u["request"], u["checkRequest"], self.state()["power"], u["status"]), (None, None, {"request": None, "action": None}, "idle"),
+                         "taken out of the state, not kept for later")
+        self.assertEqual(pb.load_handled(), {}, "the memory of what was handled is left as it was")
+        self.set_state(lambda s: s["update"].update(request=old))
+        self.settle()
+        self.assertEqual((self.runner_calls, self.state()["update"]["request"]), ([], None), "and putting one back changes nothing")
+
+    def test_a_request_made_a_moment_ago_is_acted_on_and_so_is_the_next_one_after_an_old_one(self):
+        self.found = self.release("3.1.0")
+        self.set_state(lambda s: s["update"].update(request=self.stamp(7200), latest="3.1.0"))
+        self.settle()
+        self.assertEqual(self.runner_calls, [])
+        self.set_state(lambda s: s["update"].update(request=self.stamp(20), checkRequest=self.stamp(25)))
+        self.settle()
+        self.assertEqual(self.runner_calls, ["running"])
+        self.assertEqual(len(self.check_calls), 1)
+        self.set_state(lambda s: s["update"].update(status="ok"))
+        self.set_state(lambda s: s["power"].update(request=self.stamp(10), action="poweroff"))
+        self.settle()
+        self.assertEqual(self.power_calls, ["poweroff"])
+
+    def test_a_request_from_the_future_is_dropped_too(self):
+        self.set_state(lambda s: s["power"].update(request=self.stamp(-3600), action="reboot"))
+        self.settle()
+        self.assertEqual(self.power_calls, [])
+        self.assertEqual(self.state()["power"], {"request": None, "action": None})
+
+    def test_the_limit_is_fifteen_minutes_either_way(self):
+        for index, (seconds, acted) in enumerate(((14 * 60, True), (16 * 60, False), (-14 * 60, True), (-16 * 60, False))):
+            self.power_calls.clear()
+            self.set_state(lambda s: s["power"].update(request=self.stamp(seconds) + index, action="reboot"))      # a different marker every time
+            self.settle()
+            self.assertEqual(bool(self.power_calls), acted, seconds)
+
+    def test_a_marker_that_is_not_a_time_is_opaque_and_acted_on_once(self):
+        for marker in ("abc", 42, 99999999999):
+            self.power_calls.clear()
+            self.set_state(lambda s: s["power"].update(request=marker, action="reboot"))
+            self.settle()
+            self.assertEqual(self.power_calls, ["reboot"], repr(marker))
+            self.assertEqual(self.state()["power"], {"request": None, "action": None})
+
+    def test_a_clock_that_is_not_believed_judges_nothing(self):
+        # No real-time clock, and the time server has not answered yet: the time of the request cannot be compared with anything.
+        self.clock_trusted = False
+        self.set_state(lambda s: s["power"].update(request=self.stamp(3600), action="reboot"))
+        self.settle()
+        self.assertEqual(self.power_calls, ["reboot"], "the parent's request is obeyed, as before")
 
 
 class AddressTests(Fixture):

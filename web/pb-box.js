@@ -560,6 +560,11 @@
   function el(tag, attrs, kids) { return env.el(tag, attrs, kids); }
   function iso(s) { return env.lang() === 'ar' ? '⁦' + s + '⁩' : String(s); }      // keeps "47 °C" and "3.1.0" whole inside Arabic text
   function nowMs() { return Date.now(); }
+  /** The time of a request for the box: milliseconds on the BOX's clock (from the Date header of its last answer), never this phone's, which can be
+   *  anywhere. The box acts on a request only when that time is close to its own clock, so the old requests inside a restored backup do not fire.
+   *  The Date header counts whole seconds, so the milliseconds are made up: without them two requests of one kind within a second (two phones)
+   *  would carry the same marker, and the second would look like the first, which the box has already handled. */
+  function requestTime() { return Math.round(env.serverNowSec() * 1000 + Math.random() * 1000); }
   function quiet(method, path, body, opts) { return env.call(method, path, body, Object.assign({ quiet401: true }, opts || {})); }
   function boxInfo() { return env.boxInfo ? env.boxInfo() : null; }          // /pb/box.json, parsed; null on a box that has none
   /** An update is running or on its way (this page's own, or asked for, or running): see updateBusy. */
@@ -1227,7 +1232,7 @@
     var mine = upd = { kind: 'update', since: nowMs(), seen: false, written: false };
     updNotice = ''; updSig = ''; renderUpdate();
     focusStatus();                                           // the button the parent pressed is gone now: focus moves to the status
-    env.writeState(function (s) { s.update.request = nowMs(); }).then(function () { mine.written = true; mine.writtenAt = nowMs(); pollSoon(); }, function (e) {
+    env.writeState(function (s) { s.update.request = requestTime(); }).then(function () { mine.written = true; mine.writtenAt = nowMs(); pollSoon(); }, function (e) {
       if (upd === mine) upd = null;
       updSig = ''; renderUpdate();
       env.toast(t('failed', { e: e && e.message ? e.message : String(e) }), true);
@@ -1238,7 +1243,7 @@
     if (upd) return;
     var mine = upd = { kind: 'check', since: nowMs(), checkedBefore: st ? st.update.checked : 0, written: false };
     updNotice = ''; updSig = ''; renderUpdate();
-    env.writeState(function (s) { s.update.checkRequest = nowMs(); }).then(function () { mine.written = true; mine.since = nowMs(); pollSoon(); }, function (e) {
+    env.writeState(function (s) { s.update.checkRequest = requestTime(); }).then(function () { mine.written = true; mine.since = nowMs(); pollSoon(); }, function (e) {
       if (upd === mine) upd = null;
       updSig = ''; renderUpdate();
       env.toast(t('failed', { e: e && e.message ? e.message : String(e) }), true);
@@ -1439,7 +1444,7 @@
       env.writeState(function (s) {
         // The write itself refuses, from what is stored now: the page's picture of the update may be a few seconds old.
         if (updateBusy(s)) { var busyErr = new Error('update'); busyErr.updateBusy = true; throw busyErr; }
-        mine.marker = nowMs();
+        mine.marker = requestTime();
         s.power = { request: mine.marker, action: action };
       }).then(function () {
         mine.written = true; mine.since = nowMs();

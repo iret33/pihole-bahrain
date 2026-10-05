@@ -2745,6 +2745,8 @@ class Maintenance:
     FAILED_BLOCKS_AUTO = 7 * 24 * 3600
     TRANSIENT_RETRY = 1800            # ... but after a failure of the network or the disk, the same release is tried again after this
     AUTO_WINDOW = (3, 5)              # box time, hours: 03:00 up to 05:00
+    REQUEST_MAX_AGE = 15 * 60         # a request is for now: one whose time is further than this from the box's clock is dropped
+    REQUEST_TIME_FROM = 10 ** 11      # markers from here up are times in milliseconds (what the page writes); any other marker is opaque
     COMPLAIN_EVERY = 1800
     PING_FIRST = 300
     PING_EVERY = 6 * 3600
@@ -2914,8 +2916,8 @@ class Maintenance:
         return seen
 
     def _clear_stale(self, kind: str, marker) -> None:
-        """A request this box already acted on is still in the state (it was cut off before the clearing, or the page
-        was slow): remove it, and do not act again."""
+        """A request that must not be acted on is in the state: one this box already acted on (it was cut off before the
+        clearing, or the page was slow), or one that is too old (see _request_is_old). Remove it, and do not act."""
         def clear(state):
             node, key = self._slot(state, kind)
             if node[key] == marker:
@@ -2923,6 +2925,16 @@ class Maintenance:
                 if kind == "power":
                     node["action"] = None
         self._change(clear)
+
+    def _request_is_old(self, marker, epoch: float) -> bool:
+        """A request is for now. The page writes its time in milliseconds on the box's clock, and a request whose time is more than
+        REQUEST_MAX_AGE away from the box's clock (before or after) was not made by a parent a moment ago. The one that matters is in a
+        backup: a restore puts the backup's description of the shared state back, and with it every request that was waiting when the backup
+        was made. The page puts today's fields back right after, but a pass of this scheduler can land in between, and a request that this
+        box never handled looks new to it. A marker that is not a time (the protocol keeps markers opaque) is never old, and neither is any
+        request while the box's clock is not believed: those are acted on as before."""
+        return (_is_number(marker) and marker >= self.REQUEST_TIME_FROM and self.clock_ok()
+                and abs(epoch - marker / 1000.0) > self.REQUEST_MAX_AGE)
 
     # ----- the update's result -----
     def _reconcile(self, now, epoch) -> None:
@@ -3010,6 +3022,9 @@ class Maintenance:
         if marker is not None:
             if load_handled().get("check") == marker:
                 self._clear_stale("check", marker)
+            elif self._request_is_old(marker, epoch):
+                self._clear_stale("check", marker)
+                self._actions.append("check request ignored: it is too old to be a parent's")
             elif self._take_marker("check", marker) is not None:
                 forced = True
                 self._actions.append("check requested by the page")
@@ -3053,6 +3068,10 @@ class Maintenance:
         marker = u["request"]
         if marker is not None and load_handled().get("update") == marker:
             self._clear_stale("update", marker)
+            return
+        if marker is not None and self._request_is_old(marker, epoch):
+            self._clear_stale("update", marker)
+            self._actions.append("update request ignored: it is too old to be a parent's")
             return
         too_soon = u["status"] in ("ok", "failed") and 0 <= epoch - u["at"] < self.MIN_RUN_GAP
         if marker is not None:
@@ -3116,6 +3135,10 @@ class Maintenance:
             return
         if load_handled().get("power") == marker:
             self._clear_stale("power", marker)
+            return
+        if self._request_is_old(marker, epoch):
+            self._clear_stale("power", marker)
+            self._actions.append("power request ignored: it is too old to be a parent's")
             return
         if st["update"]["status"] == "running":
             # Never cut the power in the middle of an installation, and never keep the request for later either: it

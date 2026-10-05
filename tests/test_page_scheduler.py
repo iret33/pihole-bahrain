@@ -284,9 +284,12 @@ class PageAndSchedulerTests(unittest.TestCase):
         return None
 
     # ----- the page -----
-    def open(self, box, lang="en", sign_in=True, host=None, **options):
+    def open(self, box, lang="en", sign_in=True, host=None, clock_offset=0, **options):
+        """A phone with the page open and the parent signed in. `clock_offset`: the phone's own clock is this many milliseconds off."""
         ctx = self.browser.new_context(**dict(dict(viewport={"width": 390, "height": 844}, locale="en-GB"), **options))
         self.addCleanup(ctx.close)
+        if clock_offset:
+            ctx.add_init_script("(() => { const real = Date.now; Date.now = () => real.call(Date) + %d; })();" % clock_offset)
         page = ctx.new_page()
         page.set_default_timeout(8000)
         # 401 (before sign-in) and 429 are expected; so is "no answer at all" while a box restarts its services.
@@ -489,6 +492,38 @@ class PageAndSchedulerTests(unittest.TestCase):
         box.tick(2)
         self.assertEqual((box.github.count("/api/latest"), box.state()["update"]["checkRequest"]), (2, None))
         self.finish(box, page)
+
+    def test_a_phone_with_a_wrong_clock_still_has_its_requests_obeyed(self):
+        """The page writes the time of a request on the BOX's clock (from the Date header of its answers), because the scheduler drops
+        a request whose time is far from its own clock (a restored backup's old requests): a phone that is hours off is no problem."""
+        box = Box(self, offer=NEW)
+
+        def check():
+            return "#boxCheckBtn", lambda s: s["update"]["checkRequest"], lambda: box.github.count("/api/latest") == 2
+
+        def restart():
+            return "#boxRestartBtn", lambda s: s["power"]["request"], lambda: [c["action"] for c in box.power_calls] == ["reboot"]
+
+        def update():
+            return "#boxUpdateBtn", lambda s: s["update"]["request"], lambda: len(box.runner_calls) == 1
+        for what, hours, ask in (("a phone 2 hours behind asks the box to check", -2, check), ("a phone 3 hours ahead asks it to restart", 3, restart),
+                                 ("a phone a day behind asks it to update", -24, update)):
+            with self.subTest(what):
+                button, read, obeyed = ask()
+                page = self.open(box, clock_offset=hours * 3600 * 1000)
+                self.assertGreater(abs(page.evaluate("() => Date.now()") / 1000.0 - time.time()), 3600, "(set-up: the phone's clock is wrong)")
+                self.open_box(page)
+                if button == "#boxRestartBtn":
+                    self.ask_to_power_off(page, button)
+                else:
+                    page.click(button)
+                marker = self.wait(lambda: read(box.store.state()))
+                self.assertTrue(marker, "the page asked")
+                self.assertLess(abs(marker / 1000.0 - time.time()), 60, "with the time on the box's clock, not the phone's")
+                box.tick(2)
+                self.assertTrue(obeyed(), "and the scheduler obeyed it")
+                self.assertEqual(read(box.state()), None, "and took it out of the state")
+        self.finish(box)
 
     # ----------------------------------------------------------------------------------------------------------------
     # (3) restart and shut down
@@ -845,8 +880,11 @@ class PageAndSchedulerTests(unittest.TestCase):
     def test_restoring_a_backup_with_old_requests_in_its_state_makes_the_scheduler_act_on_none_of_them(self):
         old = {"update": 1700000000001, "check": 1700000000002, "power": 1700000000003}
         for what, handled, in_the_middle in (
-                ("a backup of another box (none of its requests was ever handled here), and the scheduler looks when the restore is over", {}, False),
-                ("this box's own backup: its requests were handled long ago, and the scheduler looks in the middle of the restore", old, True)):
+                ("a backup of another box (none of its requests was ever handled here), and the scheduler looks in the middle of the restore", {}, True),
+                ("the same, and the scheduler looks when the restore is over", {}, False),
+                ("this box's own backup: its requests were handled long ago, and the scheduler looks in the middle of the restore", old, True),
+                ("this box's own backup, but later requests of every kind were handled since, and the scheduler looks in the middle of the restore",
+                 {kind: marker + 5000 for kind, marker in old.items()}, True)):
             with self.subTest(what):
                 box = Box(self, offer=NEW)
                 page = self.open(box)
