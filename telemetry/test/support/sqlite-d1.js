@@ -24,6 +24,7 @@ export class SqliteD1 {
     this.sqlite.exec(SCHEMA);
     this.sqlite.exec(SCHEMA);       // the deploy workflow applies it on every deploy: it must be idempotent
     this.broken = null;
+    this.failWrites = null;           // an Error: every statement that changes data throws it, reads still work
     this.calls = [];
   }
 
@@ -75,6 +76,7 @@ class SqliteStatement {
 
   runNow() {
     if (this.db.broken) throw this.db.broken;
+    if (this.db.failWrites && !/^\s*SELECT\b/i.test(this.sql)) throw this.db.failWrites;
     this.db.calls.push([this.sql, this.params]);
     if (/^\s*SELECT\b/i.test(this.sql)) {
       return { success: true, results: this.statement.all(...this.params).map((r) => ({ ...r })), meta: { changes: 0 } };

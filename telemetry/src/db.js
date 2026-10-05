@@ -120,7 +120,12 @@ export async function loadSnapshot(db, now, ttl) {
     if (kept && kept.at <= now && now - kept.at < ttl) return kept;
   }
   const fresh = await computeSnapshot(db, now);
-  await db.prepare(SQL.metaSet).bind('snapshot', JSON.stringify(fresh), now).run();
+  try {
+    await db.prepare(SQL.metaSet).bind('snapshot', JSON.stringify(fresh), now).run();
+  } catch {
+    // The stored copy is only an optimisation. The counts were read, so a write that fails (the daily write limit, a
+    // full database, a hiccup) must not hide them from the website, the badges or the box that is waiting for its answer.
+  }
   return fresh;
 }
 

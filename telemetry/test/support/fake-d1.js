@@ -16,6 +16,7 @@ export class FakeD1 {
     this.installs = new Map();     // id -> row
     this.meta = new Map();         // key -> {value, updated}
     this.broken = null;            // an Error: every call rejects with it
+    this.failWrites = null;        // an Error: every statement that changes data rejects with it, reads still work
     this.calls = [];               // [sql, params] of everything that ran
     this.handlers = new Map([
       [SQL.upsertPing, (p) => this.#upsert(p)],
@@ -149,6 +150,7 @@ class FakeStatement {
 
   async #run() {
     if (this.db.broken) throw this.db.broken;
+    if (this.db.failWrites && /^\s*(INSERT|UPDATE|DELETE)\b/i.test(this.sql)) throw this.db.failWrites;
     this.db.calls.push([this.sql, this.params]);
     const out = this.handler(this.params);
     return { success: true, results: out.rows || [], meta: { changes: out.changes || 0 } };

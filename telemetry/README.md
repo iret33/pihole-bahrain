@@ -140,7 +140,9 @@ Edges are inclusive (a box seen exactly 12 hours ago is online) except the purge
 than 180 days ago. The counts are worked out from one database statement, so `online <= active7d <= total` always
 holds, and they are kept for 5 minutes: recomputing them for every ping and every visit to the website would read the
 whole table each time. So a box that has just pinged may see a number that is a few minutes old, except that the
-answer to a ping always counts the box that is asking.
+answer to a ping always counts the box that is asking. If the counts were read but the database refuses to remember them
+(a write limit, a full database), they are still answered: the remembered copy is only an optimisation, so the website and
+the badges keep working while pings fail.
 
 ### Downloads
 
@@ -215,8 +217,8 @@ If the numbers ever look wrong, look at the table:
 
 ## Cost
 
-On the free plans one box costs about four pings a day, each a request, one row read and about three rows written
-(the row and its index). That is comfortable for a few thousand boxes (the limits are 100,000 requests and 100,000 rows
+On the free plans one box costs about four pings a day, each a request, one row read and about two rows written
+(the row and its index entry). That is comfortable for a few thousand boxes (the limits are 100,000 requests and 100,000 rows
 written a day, and 5 million rows read a day, which is what the 5-minute counts spend most of). Limits and prices change:
 check Cloudflare's current D1 and Workers pages before you promise anything.
 

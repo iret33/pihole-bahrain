@@ -472,6 +472,22 @@ for (const backend of backends) {
         assert.equal(w.db.calls.filter(([sql]) => sql === SQL.counts).length, 2);
       });
 
+      test('the counts are still answered when the remembered copy cannot be written (write limit, full database)', async () => {
+        const w = makeWorld(backend, { snapshotTtl: 300 });
+        await w.ping(pingBody({ id: ID_A }));
+        w.clock.advance(301);                                         // the remembered counts are stale: a recount, then a write
+        w.db.failWrites = new Error('D1_ERROR: daily write limit exceeded');
+        const stats = await w.get('/v1/stats');
+        assert.equal(stats.status, 200);
+        const body = await stats.json();
+        assert.deepEqual([body.online, body.active7d, body.total], [1, 1, 1]);
+        assert.equal((await w.get('/badge/online.json')).status, 200);
+        assert.equal((await w.ping(pingBody({ id: ID_B }))).status, 503);   // a ping needs its own write: the box asks again later
+        w.db.failWrites = null;
+        assert.equal((await w.ping(pingBody({ id: ID_B }))).status, 200);
+        assert.equal((await w.stats()).total, 2);
+      });
+
       test('a damaged or future snapshot is ignored and rebuilt', async () => {
         const w = makeWorld(backend, { snapshotTtl: 300 });
         await w.db.insertRaw(row(hex(1), T0));
