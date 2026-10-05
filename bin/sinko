@@ -595,6 +595,13 @@ class ApiError(Exception):
         self.status = status
 
 
+# Errors that mean "Pi-hole (or the network to it) did not answer properly": the session is dropped and the pass is
+# tried again with a back-off. Anything else is a bug in this program or a state it did not foresee. An answer that is
+# shorter than its Content-Length (FTL restarting, a connection closed half way) raises http.client.IncompleteRead,
+# which is neither an OSError nor a ValueError.
+TRANSPORT_ERRORS = (ApiError, OSError, ValueError, http.client.HTTPException)
+
+
 def ftl_config(key: str) -> str:
     # No "-q": with it, reading a boolean that is false exits with status 1.
     out = subprocess.run(["pihole-FTL", "--config", key],
@@ -768,7 +775,7 @@ class Api:
                 status, _ = self._raw("GET", "/api/auth")
                 if status in (200, 401):
                     return
-            except (OSError, ValueError):
+            except TRANSPORT_ERRORS:
                 pass
             if time.time() > deadline:
                 raise ApiError(0, "Pi-hole API did not come up at " + self.base)
@@ -1950,14 +1957,14 @@ def selfcheck_round(catalog: dict, scheduler=None) -> list:
         api = Api()
         api.login()
         add(True, "Pi-hole API reachable, signed in with the CLI password")
-    except (ApiError, OSError, ValueError) as err:
+    except Exception as err:                 # a check that cannot run FAILS: it must never end the process with a traceback
         api = None
         add(False, "Pi-hole API reachable, signed in with the CLI password (%s)" % short_text(err, 80))
     groups = lists = None
     if api is not None:
         try:
             groups, lists = api.group_map(), api.lists()
-        except (ApiError, OSError, ValueError) as err:
+        except Exception as err:
             groups = None
             reason = "could not be read: %s" % short_text(err, 60)
     else:
@@ -1975,7 +1982,7 @@ def selfcheck_round(catalog: dict, scheduler=None) -> list:
     if api is not None:
         try:
             api.logout()
-        except (ApiError, OSError, ValueError):
+        except Exception:
             pass
     if scheduler is None:
         state, text = scheduler_status()
@@ -3505,7 +3512,7 @@ def cmd_telemetry(args) -> int:
     try:
         api = Api()
         api.login()
-    except (ApiError, OSError, ValueError) as err:
+    except TRANSPORT_ERRORS as err:
         print("sinko: Pi-hole could not be reached (%s)" % short_text(err, 80), file=sys.stderr)
         return 2
     try:
@@ -3522,7 +3529,7 @@ def cmd_telemetry(args) -> int:
                     state["community"] = None             # an old number must not outlive the "no"
             patch_state(api, record)
         state = parse_state(api.group_map()[G_STATE].get("comment"))
-    except (ApiError, OSError, ValueError) as err:
+    except TRANSPORT_ERRORS as err:
         print("sinko: Pi-hole could not be read or written (%s)" % short_text(err, 80), file=sys.stderr)
         return 2
     finally:
@@ -3657,11 +3664,6 @@ def repair_catalog_files() -> list:
     except OSError as err:
         log.debug("could not repair the lists: %s", err)
         return []
-
-
-# Errors that mean "Pi-hole (or the network to it) did not answer properly": the session is dropped and the pass is
-# tried again with a back-off. Anything else is a bug in this program or a state it did not foresee.
-TRANSPORT_ERRORS = (ApiError, OSError, ValueError, http.client.HTTPException)
 
 
 class Scheduler:
@@ -4241,8 +4243,8 @@ def cmd_doctor(args) -> int:
                     rep.check(resp.status == 200, "list server reachable (%s)" % base)
             except (OSError, urllib.error.URLError) as err:
                 rep.fix("list server reachable (%s: %s)" % (base, err))
-    except (ApiError, OSError, ValueError) as err:
-        rep.fix("Pi-hole API reachable (%s)" % err)
+    except TRANSPORT_ERRORS as err:
+        rep.fix("Pi-hole API reachable (%s)" % short_text(err, 100))
     finally:
         drop_session(api)
     health_checks(rep, state)
@@ -4852,7 +4854,7 @@ def note_rollback(undone: str, restored: str) -> None:
             patch_state(api, mark)
         finally:
             api.logout()
-    except (ApiError, OSError, ValueError) as err:
+    except TRANSPORT_ERRORS as err:
         log.warning("could not record the rollback in the shared state: %s", err)
 
 
@@ -5083,6 +5085,12 @@ def main(argv=None) -> int:
         return args.fn(args)
     except ApiError as err:
         print("sinko: Pi-hole API error: %s" % err, file=sys.stderr)
+        return 2
+    except (OSError, ValueError, http.client.HTTPException) as err:
+        # Pi-hole did not answer properly (FTL restarting, a connection closed half way): one line, not a traceback.
+        log.debug("details", exc_info=True)
+        print("sinko: Pi-hole could not be reached or did not answer properly (%s: %s). Try again in a minute."
+              % (type(err).__name__, short_text(err, 100)), file=sys.stderr)
         return 2
 
 

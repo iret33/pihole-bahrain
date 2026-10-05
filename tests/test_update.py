@@ -2,6 +2,7 @@
 `sinko update|rollback|selfcheck` commands. Network access goes to a local HTTP server (tests/fake_release.py); the
 installer and the installed program are small fakes inside the fake release, and they really run."""
 import contextlib
+import http.client
 import importlib.machinery
 import importlib.util
 import io
@@ -1917,6 +1918,104 @@ class SelfcheckTests(unittest.TestCase):
             with open(os.path.join(app, "bin", "sinko"), "w") as fh:
                 fh.write("pass\n")
             self.assertEqual(pb.run_installed_selfcheck(), (True, ""))
+
+
+class TransportErrorTests(unittest.TestCase):
+    """Pi-hole answers with a body shorter than its Content-Length (FTL restarting, a connection closed half way): urllib
+    raises http.client.IncompleteRead, which is neither an OSError nor a ValueError. The scheduler survives it; so must
+    the self-check (or a good update is rolled back for it), the wait for Pi-hole, and every command."""
+
+    def setUp(self):
+        self.httpd, self.calls = fake_release.serve_truncated()
+        self.addCleanup(self.httpd.server_close)
+        self.addCleanup(self.httpd.shutdown)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+        os.makedirs(os.path.join(self.tmp, "www", "pb"))
+        with open(os.path.join(self.tmp, "pw"), "w") as fh:
+            fh.write(mock_pihole.PASSWORD)
+        env = mock.patch.dict(os.environ, {"SINKO_API_URL": self.httpd.url, "SINKO_WEBROOT": os.path.join(self.tmp, "www"),
+                                           "SINKO_STATE_DIR": os.path.join(self.tmp, "state")})
+        env.start()
+        self.addCleanup(env.stop)
+        for patch in (mock.patch.object(pb, "CLI_PW_FILE", os.path.join(self.tmp, "pw")),
+                      mock.patch.object(pb, "APP_DIR", os.path.join(self.tmp, "no-app"))):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.catalog = pb.load_catalog(LISTS)
+
+    def test_this_is_the_error_and_it_is_in_the_class_the_scheduler_survives(self):
+        with self.assertRaises(http.client.IncompleteRead) as caught:
+            pb.Api(self.httpd.url)._raw("GET", "/api/auth")
+        self.assertNotIsInstance(caught.exception, (OSError, ValueError))
+        self.assertIsInstance(caught.exception, pb.TRANSPORT_ERRORS)
+
+    def test_a_round_of_the_selfcheck_reports_it_as_a_failed_check_and_does_not_raise(self):
+        results = pb.selfcheck_round(self.catalog, scheduler=lambda: (True, "this is the scheduler"))
+        self.assertFalse(results[0][0])
+        self.assertIn("Pi-hole API reachable", results[0][1])
+        self.assertIn("IncompleteRead", results[0][1])
+        self.assertFalse(all(ok for ok, _ in results))
+        self.assertEqual(len(results), 6, "every check still ran and said something")
+
+    def test_the_command_exits_with_a_failure_not_a_traceback_and_waiting_goes_on_until_the_time_is_up(self):
+        lines, slept = [], []
+        now = [0.0]
+        code = pb.run_selfcheck(wait=10, out=lines.append, sleep=lambda s: (slept.append(s), now.__setitem__(0, now[0] + s)),
+                                clock=lambda: now[0], catalog=self.catalog)
+        self.assertEqual(code, 1)
+        self.assertGreaterEqual(len(slept), 2, "it tried again instead of giving up at the first cut answer")
+        self.assertTrue(any("FAIL" in l and "Pi-hole API reachable" in l for l in lines), lines)
+
+    def test_waiting_for_pihole_survives_it_and_ends_with_the_ordinary_error(self):
+        started = time.monotonic()
+        with self.assertRaises(pb.ApiError) as caught:
+            pb.Api(self.httpd.url).wait_ready(timeout=0.5)
+        self.assertIn("did not come up", str(caught.exception))
+        self.assertGreater(time.monotonic() - started, 0.4)
+        self.assertGreaterEqual(len(self.calls), 1)
+
+    def test_waiting_for_pihole_ends_as_soon_as_it_answers_properly(self):
+        httpd, calls = fake_release.serve_truncated(good_after=2)
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        with mock.patch.object(pb.time, "sleep", lambda s: None):
+            pb.Api(httpd.url).wait_ready(timeout=30)
+        self.assertEqual(len(calls), 3, "two cut answers, then the good one")
+
+    def cli(self, *args):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = pb.main(list(args))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_a_command_says_that_pihole_did_not_answer_properly_instead_of_a_traceback(self):
+        for args in (("status",), ("use-mac",), ("telemetry", "on"), ("selfcheck",), ("remove",)):
+            code, out, err = self.cli(*args)
+            self.assertIn(code, (1, 2), args)
+            self.assertNotIn("Traceback", out + err, args)
+        code, out, err = self.cli("status")
+        self.assertEqual(code, 2)
+        self.assertIn("did not answer properly", err)
+        self.assertIn("IncompleteRead", err)
+
+    def test_the_doctor_reports_it_as_something_to_fix_and_goes_on_to_the_other_checks(self):
+        lines = []
+        real_report = pb.Report
+        with mock.patch.object(pb, "Report", lambda: real_report(out=lines.append)), \
+                mock.patch.object(pb.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")), \
+                mock.patch.object(pb, "ftl_config", return_value="true"), \
+                mock.patch.object(pb, "scheduler_status", return_value=("ok", "the scheduler service has run for 300 s")):
+            code = pb.cmd_doctor(None)
+        self.assertEqual(code, 1)
+        self.assertTrue(any(l.lstrip().startswith("FIX") and "Pi-hole API reachable" in l and "IncompleteRead" in l
+                            for l in lines), lines)
+        self.assertTrue(any("running version" in l for l in lines), "and the checks that need no Pi-hole still ran")
+
+    def test_the_notes_of_a_rollback_by_hand_survive_it_as_well(self):
+        with self.assertLogs("sinko", level="WARNING"):
+            pb.note_rollback("3.1.0", "3.0.0")
 
 
 class SchedulerStatusTests(unittest.TestCase):
