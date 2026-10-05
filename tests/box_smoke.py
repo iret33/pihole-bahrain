@@ -1239,8 +1239,10 @@ def part_power(browser):
         page.click("#confirmYes")
         expect(eventually(lambda: store.state()["power"]["request"] is not None), "[%s] (set-up: the request waits in the state)" % lang)
         store.edit_state(lambda st: st.setdefault("update", {}).update({"status": "running", "from": VERSION, "to": "3.1.0", "at": int(time.time())}))
-        store.outage_until = time.time() + 2.5                                   # the installer restarts the box's services
-        expect(eventually(lambda: store.state()["power"] == {"request": None, "action": None}, 10), "[%s] the update started: the page takes the request back (the box would only drop it)" % lang)
+        expect(eventually(lambda: store.state()["power"] == {"request": None, "action": None}, 20), "[%s] the update started: the page takes the request back (the box would only drop it)" % lang)
+        # Only now does the box go silent, as the installer restarts the box's services a while after the update began. Both at once would leave it
+        # to chance which the page meets first, the update or the silence, and silence right after a restart request is, rightly, read as 'restarting'.
+        store.outage_until = time.time() + 2.5
         time.sleep(3.5)                                                          # longer than the page's wait for an answer, and than the outage
         msg = clean(page.inner_text("#boxPowerMsg"))
         expect(msg == T(lang, "boxPowerWaitUpdate"), "[%s] the note says to wait for the update, not 'the box did not react' or 'restarting': %r" % (lang, msg))
@@ -1750,6 +1752,20 @@ def part_narrow(browser):
         for lang in ("en", "ar"):
             for scheme in ("light", "dark"):
                 tag = "[%dpx %s %s]" % (width, lang, scheme)
+                # the two screens that carry the tagline: sign in, and the first run's welcome
+                for screen, kw in (("login", {}), ("claim", {"password": False, "setup_done": False, "kids": False})):
+                    surl, _ = make_site(**kw)
+                    lctx, lpage = open_page(browser, surl, lang, sign_in=False, viewport={"width": width, "height": 844}, color_scheme=scheme)
+                    lpage.wait_for_selector("#%s:not([hidden])" % screen)
+                    if lang == "ar":
+                        lpage.click("#%s .lang-toggle" % screen)
+                    lpage.wait_for_function("l => document.documentElement.lang === l", arg=lang)
+                    tagline = lpage.inner_text("#%s .tagline" % screen)
+                    over = lpage.evaluate("() => [document.documentElement.scrollWidth - document.documentElement.clientWidth, Math.round(document.querySelector('#%s .tagline').getBoundingClientRect().height)]" % screen)
+                    expect(tagline == BRAND["TAGLINE_" + lang.upper()] and over[0] <= 0 and over[1] < 60,
+                           "%s the %s screen says the brand's tagline in at most two lines, and nothing scrolls sideways (%r, %s)" % (tag, screen, tagline, over))
+                    shot(lpage, "narrow-%s-%d-%s-%s.png" % (screen, width, scheme, lang))
+                    lctx.close()
                 url, store = make_site()
                 offer_update(store)
                 store.config["dns"]["hosts"] = ["192.168.1.50 family.lan"]
@@ -1784,23 +1800,44 @@ def part_narrow(browser):
                 open_box(page)
                 page.evaluate("() => document.getElementById('boxPower').scrollIntoView()")
                 shot(page, "narrow-power-wait-%d-%s-%s.png" % (width, scheme, lang))
+                # the counter's line (exactly two, and many) and About with the Pi-hole row
+                for online, name in ((2, "two"), (1234, "many")):
+                    store.edit_state(lambda st: st.update({"community": {"online": online, "at": 1800000000}, "telemetry": {"on": True}}))
+                    page.keyboard.press("Escape")
+                    open_box(page)
+                    key = "boxCounterOnlineTwo" if online == 2 else "boxCounterOnline"
+                    expect(eventually(lambda: page.is_visible("#boxCounterOnline") and clean(page.inner_text("#boxCounterOnline")) == T(lang, key, n="{:,}".format(online))),
+                           "%s the online line for %d boxes: %r" % (tag, online, page.inner_text("#boxCounterOnline")))
+                    page.evaluate("() => document.getElementById('boxCounterOnline').scrollIntoView({block: 'center'})")
+                    expect(max(sideways()) <= 1, "%s the counter card (%s boxes) has nothing to scroll sideways %s" % (tag, name, sideways()))
+                    shot(page, "narrow-counter-%s-%d-%s-%s.png" % (name, width, scheme, lang))
+                eventually(lambda: page.is_visible("#boxAboutPihole"))
+                page.evaluate("() => document.getElementById('boxAbout').scrollIntoView()")
+                expect(page.is_visible("#boxAboutPihole") and max(sideways()) <= 1, "%s About shows the Pi-hole row and nothing scrolls sideways %s" % (tag, sideways()))
+                shot(page, "narrow-about-%d-%s-%s.png" % (width, scheme, lang))
                 ctx.close()
 
 
 def part_motion(browser):
     url, store = make_site()
+    store.state_read_delay = 0.5                           # a busy box on purpose: the page's write waits for its read of the state (see below)
     sim_for(store, run_seconds=None)
     offer_update(store)
     ctx, page = open_page(browser, url, "en", reduced_motion="reduce")
     open_box(page)
     page.click("#boxUpdateBtn")
-    eventually(lambda: page.locator(".box-bar").count() == 1)
+    # The bar shows the moment the button is pressed, before the request has reached the box: the page first reads the state (slow on a busy
+    # machine, and made slow here), then writes it. Closing the browser in between cancels the write, and the second half of this part (a second
+    # browser, the same box) would meet an update that never started: wait for the box to say it runs.
+    expect(eventually(lambda: store.state()["update"]["status"] == "running", 20), "(set-up: the update request reached the box and it is running)")
+    page.wait_for_selector(".box-bar i")
+    page.wait_for_selector(".box-status svg")
     anim = page.evaluate("() => [getComputedStyle(document.querySelector('.box-bar i')).animationName, getComputedStyle(document.querySelector('.box-status svg')).animationName]")
     expect(anim == ["none", "none"], "with reduced motion nothing in the progress state moves: %s" % anim)
     ctx.close()
     ctx, page = open_page(browser, url, "en")
     open_box(page)
-    eventually(lambda: page.locator(".box-bar").count() == 1)
+    page.wait_for_selector(".box-bar i")                   # a real wait with a message, not a silent 'not yet' that ends in a script error
     anim = page.evaluate("() => getComputedStyle(document.querySelector('.box-bar i')).animationName")
     expect(anim != "none", "and without it the bar does move (%s)" % anim)
     ctx.close()

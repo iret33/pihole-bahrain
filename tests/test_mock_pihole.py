@@ -515,6 +515,29 @@ class BoxJsonTests(MockCase):
             self.assertNotIn(word, text.lower())
 
 
+class SlowStateTests(MockCase):
+    """`state_read_delay`: a read of the shared state takes that long, and nothing else does."""
+
+    def setUp(self):
+        super().setUp()
+        self.box.login()
+
+    def timed(self, path):
+        started = time.time()
+        status, _ = self.box.json("GET", path)
+        return status, time.time() - started
+
+    def test_only_the_reading_of_the_state_is_slow(self):
+        self.assertLess(self.timed("/api/groups/pb-state")[1], 0.3)
+        self.store.state_read_delay = 0.6
+        status, took = self.timed("/api/groups/pb-state")
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(took, 0.55)
+        self.assertLess(self.timed("/api/groups")[1], 0.4, "other reads are as fast as before")
+        self.store.state_read_delay = 0.0
+        self.assertLess(self.timed("/api/groups/pb-state")[1], 0.3)
+
+
 class StaticFilesTests(MockCase):
     """The page's own files, served the way the browser tests need them: plain by default, and on request like Pi-hole's web server
     (civetweb: a cache lifetime of an hour for every file) and like the installer left them (@VERSION@ filled in)."""

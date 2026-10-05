@@ -24,6 +24,8 @@ browser keeps old scripts and styles for an hour exactly as it does on a box; `s
 becomes the installed version (or a fixed one when `stamp_pages` is a string), and every script says which release it belongs to
 (window.__pbAssets). `log_static` keeps the address
 (with its query) of every file the page asked for in `static_hits`, so a test can prove from the server's side that a file was fetched again.
+`state_read_delay` makes the box slow to answer a read of the shared state (seconds): a test that must hold on a busy machine can run on
+a slow box on purpose, instead of hoping the machine is slow enough to show the race.
 
 Run standalone to develop the web page without a Raspberry Pi:
     python3 tests/mock_pihole.py --web web --port 8080   (password: test; --open starts without a password)
@@ -128,6 +130,7 @@ class Store:
                                           # (a string = always stamp that version, like a page that was stamped wrongly)
         self.log_static = False           # keep the address (with its query string) of every page file asked for in static_hits
         self.static_hits = []
+        self.state_read_delay = 0.0       # seconds the box takes to answer GET /api/groups/pb-state (a busy box, or a busy test machine)
         # What `sinko box-info` writes to /pb/box.json (architecture.md, "Amendments"). `at` is left out here: it is the box's clock at
         # the moment of the request, minus box_info_age. None = an older box, which has no such file (the page must cope).
         self.box_info = default_box_info()
@@ -502,6 +505,8 @@ class Handler(BaseHTTPRequestHandler):
         if time.time() < self.store.outage_until:
             self.close_connection = True      # the box is restarting its services: no answer at all, not even an error
             return
+        if self.store.state_read_delay and method == "GET" and path.rstrip("/").endswith("/groups/pb-state"):
+            time.sleep(self.store.state_read_delay)
         if not path.startswith("/api"):
             return self.static(path)
         parts = [urllib.parse.unquote(p) for p in path.split("/")[2:]]

@@ -221,7 +221,7 @@
       boxCounterForget: 'إذا أوقفته، يطلب الصندوق من خدمة العدّاد أن تنسى هذا الصندوق، ويحذف رمزه العشوائي.',
       boxCounterNotTitle: 'ما لا يُرسل أبدًا:',
       boxCounterNot: 'المواقع، التطبيقات، أسماء الأطفال أو الأجهزة، عناوين أجهزتك، القواعد، كلمات المرور، اللغة أو المنطقة الزمنية.',
-      boxCounterOnline: 'هذا الصندوق واحد من صناديق سينكو المتصلة، وعددها {n}.', boxCounterOnlineTwo: 'هذا الصندوق وصندوق آخر من سينكو متصلان.',
+      boxCounterOnline: 'هذا الصندوق واحد من صناديق سينكو المتصلة، وعددها {n}.', boxCounterOnlineTwo: 'هذا الصندوق وصندوق آخر من صناديق سينكو متصلان.',
       boxCounterOnToast: 'تم تشغيل العدّاد. شكرًا لك.', boxCounterOffToast: 'تم إيقاف العدّاد. سيطلب الصندوق من خدمة العدّاد أن تنسى هذا الصندوق.',
       boxAboutTitle: 'عن سينكو', boxAboutVersion: 'سينكو {v}', boxAboutPihole: 'محرّك الحجب Pi-hole {v}', boxAboutLicence: 'برنامج حر، مرخّص بموجب GPL-3.0-or-later.',
       boxAboutTrademark: 'Pi-hole علامة تجارية لشركة Pi-hole LLC. سينكو برنامج مستقل يعمل معه.',
