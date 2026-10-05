@@ -29,7 +29,8 @@ everything needed to ship it on a ready-made Orange Pi Zero 3.
   and automatic rollback if the new version does not work. `sudo sinko update`, `sinko rollback`, `sinko selfcheck`.
   The page says "the previous version is back" only when it is; an update that stops halfway (a power cut) is judged by
   a self-check after about three minutes. `sudo sinko update --ref v3.0.1` **pins** the box to a version (the command says
-  so, and `--ref latest` follows releases again).
+  so, and `--ref latest` follows releases again). A request from the page is for now: the box ignores one that is more than
+  15 minutes old by its own clock, which keeps the old "update" or "restart" inside a restored backup from firing.
 - **First-run set-up** for ready-made boxes: a welcome screen to choose the parent password, and a short checklist
   (router, first device, counter question).
 - The box **keeps its local name working** when the router gives it a new address, and is reachable as
