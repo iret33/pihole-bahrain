@@ -57,6 +57,27 @@ class ReleaseBuild(unittest.TestCase):
                      "web/app.js", "lists/services.json", "systemd/sinko.service", "systemd/sinko-lists.timer"):
             self.assertIn("sinko/" + need, self.members)
 
+    def test_what_the_documents_send_a_seller_to_look_for_is_inside(self):
+        # docs/selling.md and docs/product-image.md name these paths on the box: they only exist there if the release carries them.
+        for need in ("tools/seal.sh", "tools/firstboot.sh", "systemd/sinko-firstboot.service", "systemd/sinko-lists.service",
+                     "lists/LICENSE", "web/fonts/OFL.txt", "web/fonts/plex-arabic-arabic-400.woff2"):
+            self.assertIn("sinko/" + need, self.members)
+        for name in ("tools/seal.sh", "tools/firstboot.sh"):
+            self.assertTrue(self.members["sinko/" + name].mode & 0o111, name)
+
+    def test_the_start_page_carries_the_stamp_the_installer_fills_in(self):
+        # The installer replaces @VERSION@ with the release's version in the addresses of the page's scripts and styles (a phone keeps
+        # files from Pi-hole's web server for an hour), so every file of the page must be asked for with it, and the page must say
+        # which release it is. A page without the stamp would run old scripts after an update.
+        with tarfile.open(self.tar) as tf:
+            page = tf.extractfile("sinko/web/index.html").read().decode("utf-8")
+        self.assertIn('<meta name="sinko-version" content="@VERSION@">', page)
+        files = re.findall(r'(?:src|href)="/pb/([^"?]+)\?v=@VERSION@"', page)
+        self.assertGreaterEqual(len(files), 6)                 # the style sheet and five scripts
+        for name in files:
+            self.assertIn("sinko/web/" + name, self.members, name)
+        self.assertEqual(re.findall(r'(?:src|href)="/pb/(?![^"]*\?v=@VERSION@)[^"]*\.(?:js|css)"', page), [], "an address without the stamp")
+
     def test_what_a_box_does_not_need_stays_out(self):
         for name in self.members:
             self.assertFalse(re.match(r"sinko/(tests|docs|site|telemetry|\.github)/", name), name)

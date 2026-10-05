@@ -33,6 +33,11 @@ body:
       description: Shown in the page under My box, or by `sudo sinko --version`
     validations:
       required: true
+  - type: input
+    id: pihole
+    attributes:
+      label: Pi-hole version
+      description: Shown in the page under My box, About (when the box can tell), or by `pihole -v` on an own install
   - type: dropdown
     id: board
     attributes:

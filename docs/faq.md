@@ -21,17 +21,20 @@ children or devices:
   default);
 * the nightly refresh of the block lists, which Pi-hole downloads from where they are published (Sinko's come from this
   project's page on GitHub);
-* the update check (a request to GitHub for the latest release) and, when you update, the download of the new version;
+* the update check (a request to GitHub for the latest release, about two minutes after the box starts and then about
+  once a day, and again within the hour when GitHub could not be reached) and, when you update, the download of the new
+  version, a refresh of the block lists, and one small public file that the installer fetches from the block-list address
+  to check it (`sudo sinko doctor` does the same by hand);
 * Debian's automatic security updates, and the time from public time servers (the box has no clock battery);
-* when you install Sinko yourself, the downloads the installer needs, and `sudo sinko doctor` fetches one small public
-  file from the block-list address;
+* when you install Sinko yourself, the downloads the installer needs;
 * the optional anonymous counter, which is off until you say yes, and which tells the project only a random code, the
   version and the kind of box.
 
 [`privacy.md`](privacy.md) has the details, including what each of them can see.
 
 **Is it free?** Yes. The software is free (GPL-3.0-or-later); you can build your own box in about 20 minutes with an
-Orange Pi Zero 3 or any small Debian computer. You can also buy it ready-made.
+Orange Pi Zero 3 or any small Debian computer. A ready-made box (nothing to build) is not on sale yet: the project
+website will say where to buy one as soon as there is a shop.
 
 **What can children do to get around it?** Use mobile data or a VPN; use an app that connects to fixed addresses; use a
 browser's own "secure DNS" or iCloud Private Relay (Sinko blocks the well-known providers, new ones appear); change the
@@ -47,8 +50,8 @@ who guesses a password. Everything a parent needs is on the page. If something i
 [`troubleshooting.md`](troubleshooting.md): it comes down to the page, the router, the power cable, or re-flashing.
 
 **How is Pi-hole kept up to date?** On your own install, with `sudo pihole -up` (Sinko updates only itself). A ready-made
-box cannot be logged in to, so Pi-hole on it is updated by re-flashing a newer Sinko image; *My box*, *About* says
-which Pi-hole version the box runs. See [`updating.md`](updating.md).
+box cannot be logged in to, so Pi-hole on it is updated by re-flashing a newer Sinko image; *My box*, *About* shows
+which Pi-hole version the box runs (the line is left out when the box cannot tell). See [`updating.md`](updating.md).
 
 **Do I need Ethernet?** Strongly recommended: a wired box is more reliable than Wi-Fi.
 
@@ -60,7 +63,8 @@ IPv6 and DNS settings.
 [`troubleshooting.md`](troubleshooting.md). A card that is worn out from years of writing is the usual cause of repeated
 trouble: use a high-endurance card and keep a backup (*My box → Backup*).
 
-**How do I remove it?** Own install: `sudo /opt/sinko/uninstall.sh` removes Sinko and its rules and keeps Pi-hole. Ready-made
+**How do I remove it?** Own install: `sudo /opt/sinko/uninstall.sh` removes Sinko and its rules and keeps Pi-hole (a device that
+also holds a group of your own in Pi-hole stays, without Sinko's groups). Ready-made
 box: there is nothing to uninstall, just unplug it. In both cases, point the router's DNS server back to its default so
 that the devices at home do not keep asking a box that is gone.
 

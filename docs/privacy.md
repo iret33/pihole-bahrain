@@ -73,7 +73,9 @@ tap the link.
 * the command `sudo sinko telemetry on` (own install).
 
 If the installer cannot ask (nobody is at the keyboard), nothing is decided: the page asks you later, and nothing is
-sent before you answer. A box that was built without a counter address never sends anything, even when the answer is yes.
+sent before you answer. A box that was built without a counter address (a copy of Sinko that nobody has set up a counter
+for) can never send anything, so none of the four places asks: the installer says nothing about the counter, and the
+page shows neither the *Count this box* card nor the checklist question.
 
 **What is sent.** About every 6 hours (the first time about 5 minutes after the box starts, or soon after you say yes
 if that comes later), the box sends exactly three things and nothing else:
@@ -93,8 +95,9 @@ for example Bahrain, and the address itself is not kept) and when the box was fi
 internet address and a line naming Sinko and its version. The counter does not store, log or use either of them. It
 runs on Cloudflare, which handles the connection under its own terms, as any hosting company does.
 
-**What comes back.** The number of boxes online now and the number counted in all. The page shows it as "You are
-one of N Sinko boxes online."
+**What comes back.** The number of boxes online now and the number counted in all. The page shows how many Sinko boxes
+are online ("This box is one of N Sinko boxes online."), but only from two boxes up: while yours is the only box
+counted, the counter has nothing to compare it with and the page says nothing.
 
 **Where it lives.** In a database at Cloudflare (D1), in the account of whoever runs the counter your box is set up to
 use (for official Sinko boxes, the project maintainer), who is the only person who can read it. What the project
@@ -125,21 +128,41 @@ a message (you said no first) has nothing to delete.
 
 ### What happens when Sinko updates
 
-Once a day, and whenever you tap *Check again*, the box asks GitHub (`api.github.com`) which version is the latest.
-When you update, the box downloads the new version from GitHub in the same way. GitHub sees the box's internet
-address and a line naming Sinko and its version, as it does for any download, and it counts downloads. These requests
-carry nothing about your family, and GitHub's own privacy policy applies to what it receives.
+**Looking for a new version.** About two minutes after the box starts, then about once a day, and whenever you tap
+*Check again*, the box asks GitHub (`api.github.com`) which version is the latest. The two minutes count from every start
+of the box (or of Sinko on it), so also after a power cut and after an update. If GitHub cannot be reached (the internet
+is down, or GitHub is busy), the box asks again after half an hour to an hour, so a box that is offline asks more often
+than once a day. A box that was pinned to one version on purpose (`sudo sinko update --ref v3.0.1`, on your own box) does
+not ask which version is the latest, and one that follows a development branch asks nothing.
+
+**Updating.** When you update (the page's *Update now*, the automatic update at night, or `sudo sinko update`), the box
+asks `api.github.com` once more which version is the latest (a pinned box does not), and downloads the new version from
+GitHub: the program file and its checksum, from `github.com`, which hands the file on from one of its own download
+servers. Then the update runs Sinko's installer again on the box, and the installer reaches out
+twice more. It refreshes the block lists: Pi-hole downloads each list from where it is published, which for Sinko's
+twenty or so small lists is `raw.githubusercontent.com`, and for any list you added yourself is wherever that one lives.
+And it ends with the same check as `sudo sinko doctor`, which fetches one small public file from the block-list address
+(`lists/guard.txt`, on `raw.githubusercontent.com`) to see that the address can be reached. If something the installer
+needs is missing on the box, it also asks the operating system's package servers for it; that is rare on a box that
+already works.
+
+**Who sees what.** GitHub sees the box's internet address, when it asked and what it asked for, as any website does. The
+check and the download carry a line naming Sinko and its version. The list downloads (made by Pi-hole) and the small file
+check (made by the box's Python) are ordinary requests that do not name Sinko or its version. GitHub counts downloads.
+None of these requests carries anything about your family, and GitHub's own privacy policy applies to what it receives.
 
 When you install Sinko yourself, the installer also downloads the programs it needs from the operating system's package
 servers (Debian's and, on an Orange Pi, Armbian's), Pi-hole's own installer from `install.pi-hole.net` if Pi-hole is not
-there yet, and Sinko from GitHub; those servers see your internet address and what was asked for, as in any download. A ready-made box has all of this done already. On your own box,
-`sudo sinko doctor` also fetches one small public file from the block-list address on GitHub to check that it can be
-reached: a plain request that carries nothing about your family.
+there yet, and Sinko from GitHub; those servers see your internet address and what was asked for, as in any download. A
+ready-made box has all of this done already, and Sinko itself then makes only the requests described above (what the
+operating system and Pi-hole do by themselves is under "Other things on the box that are not Sinko's"). The installer ends
+every run with the same check as `sudo sinko doctor`: a ready-made box therefore makes that small request after every
+update, and on your own box you can make it yourself by running the command.
 
 The nightly refresh of the block lists works the same way: Pi-hole downloads every list it has (Sinko's, and any you
-added yourself) from where each one is published. Sinko's lists come from this project's page on GitHub, so a change made
-to them in the project reaches every box at its next nightly refresh, without a new release. A list can change what is
-blocked; it cannot run anything on the box.
+added yourself) from where each one is published, and it also refreshes them once a week on its own. Sinko's lists come
+from this project's page on GitHub, so a change made to them in the project reaches every box at its next nightly
+refresh, without a new release. A list can change what is blocked; it cannot run anything on the box.
 
 ### The project website
 
@@ -159,8 +182,9 @@ Sinko is a layer on top of Pi-hole and of the operating system, and these do som
   its update checks and its privacy levels are Pi-hole's, and Pi-hole's documentation describes them. Pi-hole is
   updated separately from Sinko; on a ready-made box that means re-flashing a newer Sinko image (see `docs/updating.md`).
 * **Debian**, the operating system, fetches its automatic security updates from Debian's servers (Sinko's installer
-  turns this on, and `SINKO_OS_UPDATES=0` skips it). The box has no clock battery, so it asks public time servers for
-  the time.
+  turns this on, and `SINKO_OS_UPDATES=0` skips it; automatic updates that were already set up on the box are left as
+  they were). The box has no clock battery, so it asks public time servers for the time (the installer sets up a time
+  service when the box has none).
 * **The local name** of the box (the one that ends in `.local`) is announced only inside your home network.
 
 ### If this statement changes
@@ -237,7 +261,9 @@ something new, this statement changes first, with the release that does it.
 * الأمر `sudo sinko telemetry on` (لمن بنى صندوقه بنفسه).
 
 وإن لم يستطع برنامج التثبيت أن يسألك (لأن أحدًا لا يجلس أمام لوحة المفاتيح) فلا يُحسم شيء، وتسألك الصفحة لاحقًا، ولا يُرسَل
-أي شيء قبل أن تجيب. والصندوق الذي بُني بلا عنوان للعدّاد لا يرسل شيئًا حتى لو كان جوابك «نعم».
+أي شيء قبل أن تجيب. والصندوق الذي بُني بلا عنوان للعدّاد (نسخة من سينكو لم يُعدّ لها أحد عدّادًا) لا يستطيع أن يرسل شيئًا
+أصلًا، ولذلك لا يسأل أيٌّ من الأماكن الأربعة: لا يذكر برنامج التثبيت العدّاد، ولا تعرض الصفحة بطاقة «احتساب هذا الصندوق»
+ولا سؤال قائمة الإعداد.
 
 **ما يُرسَل.** كل 6 ساعات تقريبًا (وأول مرة بعد نحو 5 دقائق من تشغيل الصندوق، أو بعد قولك «نعم» بوقت قصير إن جاء
 ذلك لاحقًا) يرسل الصندوق ثلاثة أشياء بالضبط، ولا شيء غيرها:
@@ -256,8 +282,9 @@ something new, this statement changes first, with the release that does it.
 وإصداره. والعدّاد لا يحفظ أيًّا منهما ولا يسجّله ولا يستعمله. وهو يعمل على Cloudflare، التي تتعامل مع الاتصال وفق
 شروطها هي، كما تفعل أي شركة استضافة.
 
-**ما يعود إليك.** عدد الصناديق المتصلة الآن والعدد الكلي المحسوب. وتعرضه الصفحة هكذا: «أنت ضمن N من صناديق سينكو
-المتصلة».
+**ما يعود إليك.** عدد الصناديق المتصلة الآن والعدد الكلي المحسوب. وتعرض الصفحة عدد صناديق سينكو المتصلة («هذا الصندوق واحد
+من صناديق سينكو المتصلة، وعددها N»)، لكن ابتداءً من صندوقين اثنين فقط: ما دام صندوقك هو الوحيد المحسوب فليس عند العدّاد
+ما يقارنه به، ولا تقول الصفحة شيئًا.
 
 **أين يُحفظ.** في قاعدة بيانات على Cloudflare (D1)، ضمن حساب من يشغّل العدّاد الذي أُعدّ صندوقك له (وفي صناديق سينكو
 الرسمية هو مشرف المشروع)، وهو الوحيد الذي يستطيع قراءتها. وما ينشره المشروع أرقام مجمّعة فقط، في موقعه وفي الشارات على
@@ -284,19 +311,40 @@ something new, this statement changes first, with the release that does it.
 
 ### ماذا يحدث عند التحديث
 
-مرة كل يوم، وكلما ضغطت «افحص مجددًا»، يسأل الصندوق GitHub (`api.github.com`) عن أحدث إصدار. وعندما تحدّث، ينزّل
-الصندوق الإصدار الجديد من GitHub بالطريقة نفسها. يرى GitHub عنوان إنترنت الصندوق وسطرًا يذكر اسم سينكو وإصداره، كما
-يحدث مع أي تنزيل، ويحسب عدد التنزيلات. ولا تحمل هذه الطلبات شيئًا عن عائلتك، وتسري على ما يصل إلى GitHub سياسة
-الخصوصية الخاصة به.
+**البحث عن إصدار جديد.** بعد دقيقتين تقريبًا من تشغيل الصندوق، ثم مرة كل يوم تقريبًا، وكلما ضغطت «افحص مجددًا»، يسأل
+الصندوق GitHub (`api.github.com`) عن أحدث إصدار. والدقيقتان تبدآن من كل تشغيل للصندوق (أو لسينكو عليه)، فتبدآن من
+جديد أيضًا بعد انقطاع الكهرباء وبعد كل تحديث. وإن تعذّر الوصول إلى GitHub (لانقطاع الإنترنت أو لانشغاله) أعاد الصندوق السؤال
+بعد نصف ساعة إلى ساعة، فالصندوق الذي لا إنترنت عنده يسأل أكثر من مرة في اليوم. أما الصندوق الذي ثُبّت عمدًا على إصدار
+واحد (`sudo sinko update --ref v3.0.1` على صندوقك الذي بنيته بنفسك) فلا يسأل عن أحدث إصدار، والذي يتبع فرعًا تطويريًا لا
+يسأل عن شيء.
+
+**التحديث.** عندما تحدّث («حدّث الآن» في الصفحة، أو التحديث التلقائي في الليل، أو الأمر `sudo sinko update`) يسأل
+الصندوق `api.github.com` مرة أخرى عن أحدث إصدار (إلا الصندوق المثبَّت على إصدار بعينه)، ثم ينزّل الإصدار الجديد من
+GitHub: ملف البرنامج وملف التحقق الخاص به، من `github.com`، الذي يحوّل الملف إلى أحد خوادم التنزيل التابعة له. ثم يعيد
+التحديث تشغيل برنامج تثبيت سينكو على الصندوق، ويتصل هذا بالإنترنت مرتين أخريين. فهو يحدّث
+قوائم الحظر: ينزّل Pi-hole كل قائمة من المكان الذي تُنشر فيه، فقوائم سينكو الصغيرة، وعددها نحو عشرين، من
+`raw.githubusercontent.com`، وأي قائمة أضفتها أنت من موضعها هي. ثم يختم بالفحص نفسه الذي يجريه الأمر `sudo sinko doctor`،
+فيجلب ملفًا عامًّا صغيرًا من عنوان قوائم الحظر (الملف `lists/guard.txt` على `raw.githubusercontent.com`) ليتأكد من إمكان
+الوصول إلى ذلك العنوان. وإن كان ينقص الصندوق شيء يحتاجه برنامج التثبيت فإنه يطلبه أيضًا من خوادم الحزم الخاصة بنظام
+التشغيل، وهذا نادر في صندوق يعمل أصلًا.
+
+**من يرى ماذا.** يرى GitHub عنوان إنترنت الصندوق ووقت الطلب وما طُلب، كما يفعل أي موقع. ويحمل طلب الفحص وطلب التنزيل سطرًا
+يذكر اسم سينكو وإصداره. أما تنزيلات القوائم (يجريها Pi-hole) وفحص الملف الصغير (تجريه لغة Python على الصندوق) فطلبات
+عادية لا تذكر سينكو ولا إصداره. ويحسب GitHub عدد التنزيلات. ولا يحمل أي من هذه الطلبات شيئًا عن عائلتك، وتسري على ما يصل
+إلى GitHub سياسة الخصوصية الخاصة به.
 
 وعندما تثبّت سينكو بنفسك، ينزّل برنامج التثبيت أيضًا ما يحتاجه من البرامج من خوادم الحزم الخاصة بنظام التشغيل (خوادم
 Debian، وخوادم Armbian إن كنت تستعمل Orange Pi)، ومثبّت Pi-hole نفسه من `install.pi-hole.net` إن لم يكن Pi-hole موجودًا
-بعد، وسينكو من GitHub؛ وترى هذه الخوادم عنوان إنترنتك وما طلبتَه، كما في أي تنزيل. والصندوق الجاهز يكون هذا كله قد أُنجز فيه من قبل. وعلى صندوقك الذي بنيته بنفسك يجلب الأمر `sudo sinko doctor` أيضًا
-ملفًا صغيرًا عامًّا من عنوان قوائم الحظر على GitHub ليتأكد من إمكان الوصول إليه: طلب عادي لا يحمل شيئًا عن عائلتك.
+بعد، وسينكو من GitHub؛ وترى هذه الخوادم عنوان إنترنتك وما طلبتَه، كما في أي تنزيل. والصندوق الجاهز يكون هذا كله قد أُنجز
+فيه من قبل، ولا يطلب سينكو نفسه بعد ذلك إلا ما ذُكر أعلاه (أما ما يفعله نظام التشغيل وPi-hole من تلقاء نفسيهما فمذكور في
+«أشياء أخرى على الصندوق ليست من سينكو»). ويختم برنامج التثبيت كل تشغيل له بالفحص نفسه الذي يجريه الأمر `sudo sinko
+doctor`: فيجري الصندوق الجاهز ذلك الطلب الصغير بعد كل تحديث، وتستطيع على صندوقك الذي بنيته بنفسك أن تجريه بنفسك بتشغيل
+الأمر.
 
-وكذلك التحديث الليلي لقوائم الحظر: ينزّل Pi-hole كل قائمة عنده (قوائم سينكو وما أضفته أنت) من المكان الذي تُنشر فيه.
-وقوائم سينكو تأتي من صفحة هذا المشروع على GitHub، فأي تغيير عليها في المشروع يصل إلى كل صندوق عند تحديثه الليلي
-التالي دون إصدار جديد. والقائمة تغيّر ما يُحظر، ولا تستطيع تشغيل أي شيء على الصندوق.
+وكذلك التحديث الليلي لقوائم الحظر: ينزّل Pi-hole كل قائمة عنده (قوائم سينكو وما أضفته أنت) من المكان الذي تُنشر فيه،
+وهو يحدّثها أيضًا مرة في الأسبوع من تلقاء نفسه. وقوائم سينكو تأتي من صفحة هذا المشروع على GitHub، فأي تغيير عليها في
+المشروع يصل إلى كل صندوق عند تحديثه الليلي التالي دون إصدار جديد. والقائمة تغيّر ما يُحظر، ولا تستطيع تشغيل أي شيء على
+الصندوق.
 
 ### موقع المشروع
 
@@ -315,7 +363,8 @@ Debian، وخوادم Armbian إن كنت تستعمل Orange Pi)، ومثبّت
   للخصوصية، هو من شأن Pi-hole، وتشرحه وثائقه. ويُحدَّث Pi-hole على حدة بعيدًا عن سينكو؛ وفي الصندوق الجاهز يعني ذلك
   إعادة كتابة البطاقة بصورة أحدث من سينكو (انظر `docs/updating.md`).
 * **Debian**، نظام التشغيل، يجلب تحديثاته الأمنية التلقائية من خوادم Debian (وبرنامج تثبيت سينكو يشغّل ذلك، والمتغير
-  `SINKO_OS_UPDATES=0` يتخطّاه). وليس في الصندوق بطارية للساعة، فيسأل خوادم الوقت العامة عن الوقت.
+  `SINKO_OS_UPDATES=0` يتخطّاه؛ وما كان من التحديثات التلقائية معدًّا على الصندوق من قبل يُترك كما كان). وليس في الصندوق
+  بطارية للساعة، فيسأل خوادم الوقت العامة عن الوقت (ويجهّز برنامج التثبيت خدمة للوقت إن لم تكن في الصندوق خدمة).
 * **الاسم المحلي** للصندوق (الذي ينتهي بـ `.local`) لا يُعلَن إلا داخل شبكة بيتك.
 
 ### إن تغيّر هذا البيان

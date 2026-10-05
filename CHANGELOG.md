@@ -20,7 +20,12 @@ everything needed to ship it on a ready-made Orange Pi Zero 3.
 - **The privacy statement says what leaves the box.** Pi-hole passes the names of sites it cannot answer itself to its
   upstream DNS service (Cloudflare for Families on a new Pi-hole that the installer sets up), which therefore sees site
   names and the home's internet address; the statement, the FAQ, the seller's guide and the website said otherwise. It
-  also states the retention of Pi-hole's own history precisely (30 days only on a Pi-hole the installer sets up).
+  also states the retention of Pi-hole's own history precisely (30 days only on a Pi-hole the installer sets up). It says
+  how often the box asks GitHub (about two minutes after it starts, about daily, and again within the hour when GitHub could
+  not be reached) and that an update also refreshes the block lists and fetches the one small file the doctor check uses.
+- The install command is written in one form everywhere (`--proto '=https' --proto-redir '=https'`, also on the website);
+  the README has its **Install** section again; the page, the README, the website and the social preview say one tagline
+  per language ("Calm internet for the family" · «إنترنت هادئ للعائلة»).
 
 ### Added
 - **My box** in the parent page: update (check, update now, automatic at night), box health, addresses, change the
@@ -52,11 +57,29 @@ everything needed to ship it on a ready-made Orange Pi Zero 3.
   cannot leave an empty one, and keeps your own Pi-hole rules (even an existing `^.*$` deny rule) untouched.
 - Sealing a ready-made image also wipes the free space by default (`--no-zerofill` for test units), removes Wi-Fi profiles, the
   on-disk copy of the logs, Pi-hole's HTTPS key, application password and TOTP secret, and locks the root login last.
+- An update needs **more than 200 MB free** and says plainly when it does not (nothing is changed, and the page says the
+  previous version is back only after the box checked itself); a first installation needs more than 1 GB. A failed
+  `sinko update --ref vX` leaves the choice of what the box follows as it was.
+- A box whose **page and program were left of two versions** by a power cut during an update repairs itself from the copy it
+  keeps (`sinko repair`, started by the scheduler after ten quiet minutes, at most once an hour); a failed night is tried
+  again the same night when it was only the network or the disk.
+- Every `pihole -g` that Sinko starts, and the nightly refresh, takes one lock, so two never rebuild Pi-hole's lists together.
+- `sinko remove` no longer deletes a device that also holds a group of the owner's own in Pi-hole.
+- **My box → About** shows the Pi-hole version; the page's scripts carry the release in their addresses, so a phone never
+  runs a new page with old scripts after an update; the "boxes online" line is shown from two boxes up.
+- The installer asks apt and dpkg in English whatever the system's language, asks the counter question only when a counter
+  address exists, sets up `systemd-timesyncd` on a box with no time service, and uses `pihole setpassword` (the password
+  briefly in that program's arguments, which the install guide says) for a Pi-hole that already has a password.
+- The seal refuses a unit with another console login, without automatic security updates or a time service, or pinned to a
+  version or a branch; its read-back of the SSH lock-down asks `sshd -G` (the host keys are gone by then); its zero-fill
+  fails on anything but a full disk.
 - GPL-3.0-or-later licence (lists: CC0), security policy, contribution guide, code of conduct, issue templates.
 
 ### Migrating from pihole-bahrain 2.x
 Run `sudo pihole-bahrain update` (or the new install command). The installer moves your settings, keeps your devices,
-rules and password, replaces the old services and leaves a `pihole-bahrain` command that points to `sinko`. A 2.x box
+rules and password, replaces the old services and leaves a `pihole-bahrain` command that points to `sinko`. The old updater
+fetches the `master` branch, but a box that follows releases gets the checksum-verified release instead as soon as one is
+published (and keeps a copy of it to go back to). A 2.x box
 followed the `master` branch (the old default); after migrating it follows **releases**, like a new install.
 
 ## [2.2.0] - 2026-10-03

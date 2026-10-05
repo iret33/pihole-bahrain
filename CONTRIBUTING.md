@@ -25,7 +25,7 @@ Needs Python 3.9+, Node 20+, bash and, for browser tests, Playwright with Chromi
 pip install playwright && python -m playwright install chromium     # once
 python3 -m unittest discover -s tests -p "test_*.py"                # box program, lists, doctor, diagnose, copy, and (with Playwright) the real page against the real scheduler
 node --test tests/*.test.js                                          # page logic
-sudo bash tests/test_install.sh                                      # installer end to end, on a stubbed system
+sudo bash tests/run_shell_tests.sh                                   # installer, migration, seal, first start, on a stubbed system
 shellcheck install.sh uninstall.sh tools/*.sh tests/*.sh            # shell lint
 python3 tests/ui_smoke.py --shots /tmp/shots                         # the page in a real browser, English and Arabic
 python3 tests/mock_pihole.py --web web --setup --live               # the page at http://127.0.0.1:8080 (password "test")
@@ -54,6 +54,11 @@ Everything in `lists/` (the block lists and `services.json`) is public domain (C
   bans technical words (DNS, query, cache, ...) outside the "how it works" sheet.
 * Update the README and `CHANGELOG.md` when users would notice. If a change alters what the box sends or stores, change
   `docs/privacy.md` (both languages), `site/strings.js` and the counter's root page in the same pull request.
+* The documents quote numbers that the program decides (how soon the box checks for an update and how it retries, how much
+  free space an update needs, how long a cut-off update waits before the box repairs itself). `tests/test_docs.py` reads those
+  constants from `bin/sinko` and `install.sh` and fails when a document says something else: change the sentence (and its
+  Arabic) in the same pull request. The install command is written in one form only (with `--proto '=https'
+  --proto-redir '=https'`), and the same test fails for any copy of it that lacks either flag.
 * Sign your commits off (`git commit -s`): it says you wrote the change or have the right to submit it under this
   project's licence (the [Developer Certificate of Origin](https://developercertificate.org)).
 

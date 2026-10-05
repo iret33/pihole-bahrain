@@ -68,8 +68,10 @@
     };
   }
 
+  // The one form of the install command that is written anywhere (README, docs, this site): https only, and a redirect
+  // may not leave https either (a plain `curl -fsSL` would follow GitHub to an http address if it were ever sent there).
   function installCommand(repo) {
-    return 'curl -fsSL https://github.com/' + repo + '/releases/latest/download/install.sh | sudo bash';
+    return "curl --proto '=https' --proto-redir '=https' -fsSL https://github.com/" + repo + '/releases/latest/download/install.sh | sudo bash';
   }
 
   // {online, downloads}: each a real count or null. online > total would be nonsense, so it is not shown either.

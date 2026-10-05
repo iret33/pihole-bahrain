@@ -57,7 +57,10 @@ that promises more than the README does. Recommend Screen Time (iPhone) or Famil
   [`docs/troubleshooting.md`](troubleshooting.md) first, then you). **A ready-made box has no login, for you as well as
   for the customer: you cannot connect to it.** Support works with what the parent can show you: a screenshot of
   *My box*, the router's list of connected devices, and, as the last step, a re-flash (the parent's backup from *My box →
-  Backup* brings devices and rules back). Plan your support around that, and say so on the product page.
+  Backup* brings devices and rules back). Plan your support around that, and say so on the product page. A box whose
+  update was cut short by a power failure usually puts itself right within a quarter of an hour (it installs the version
+  again from the copy it keeps; [`updating.md`](updating.md), "If the power fails during an update"): tell the customer to
+  leave it plugged in and wait before they write to you. The printed card says so.
 
 ## 5. Privacy promise to buyers
 

@@ -34,7 +34,9 @@ Keep the box plugged in all the time. Update it from the page: *My box → Updat
 
 Something wrong? Unplug the box, wait ten seconds, plug it in, and give it two minutes. Nobody can log in to this box, not
 you and not us, so help comes from the page (*My box*) and from us: a screenshot of *My box* and of your router's list of
-connected devices tells us most of what we need.
+connected devices tells us most of what we need. If the power failed while the box was updating, leave it plugged in for a
+quarter of an hour before you do anything else: it usually puts itself right. If *My box* still says the update did not
+finish after an hour, send us a screenshot of it.
 
 Help: [YOUR SUPPORT PAGE OR WHATSAPP]  ·  Warranty: [YOUR WARRANTY TERMS]
 
@@ -68,7 +70,8 @@ Pi-hole; Pi-hole is a trademark of Pi-hole LLC.*
 
 هل من خلل؟ افصل الصندوق عن الكهرباء، وانتظر عشر ثوانٍ، ثم أعد توصيله، واتركه دقيقتين. لا يستطيع أحد تسجيل الدخول إلى هذا
 الصندوق، لا أنت ولا نحن، فالمساعدة تأتي من الصفحة («صندوقي») ومنا: صورة لشاشة «صندوقي» ولقائمة الأجهزة المتصلة في
-الراوتر تخبرنا بمعظم ما نحتاج إلى معرفته.
+الراوتر تخبرنا بمعظم ما نحتاج إلى معرفته. وإن انقطعت الكهرباء أثناء تحديث الصندوق فاتركه موصولًا ربع ساعة قبل أن تفعل أي
+شيء آخر: فهو يصلح نفسه في الغالب. وإن ظلّت «صندوقي» تقول إن التحديث لم يكتمل بعد مرور ساعة، فأرسل إلينا صورة لشاشتها.
 
 للمساعدة: [صفحة الدعم أو واتساب]  ·  الضمان: [شروط الضمان]
 

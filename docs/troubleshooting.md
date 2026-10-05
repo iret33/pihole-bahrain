@@ -56,18 +56,26 @@ The usual causes:
 *My box* shows what happened, and it says one of three things (see [`updating.md`](updating.md), "How an update can end"):
 it **worked**; it **failed and the previous version is back** (the box keeps working as before); or it **failed and the
 previous version could not be put back**. Only in the second case is the old version running again. In the third, restart
-the box (unplug it, wait ten seconds, plug it in) and try *Update now* again; if it still misbehaves, restore from a backup
-or re-flash (ready-made box), or use the commands below (own install).
+the box (unplug it, wait ten seconds, plug it in, give it two minutes) and press *Try again* if the page offers it; if it
+still misbehaves, restore from a backup or re-flash (ready-made box), or use the commands below (own install).
+
+**The power failed in the middle of an update.** Leave the box on for about a quarter of an hour. A box that ended up with
+its page and its program of two versions installs the version again by itself from the copy it keeps (nothing is
+downloaded), and *My box* then says the update worked. If it still says it did not finish after an hour, and the page
+offers *Update now* or *Try again*, press it; if not, take a backup (while the page opens) and re-flash the card. The
+details are in [`updating.md`](updating.md), "If the power fails during an update".
 
 Own install: `sudo sinko selfcheck` says what is wrong, `sudo journalctl -u sinko -u sinko-update --since "1 hour ago"` is
-the log, and `/var/log/sinko-install.log` has the installer's output. `sudo sinko update --force` tries again. To go back by
-hand: `sudo sinko rollback`.
+the log, and `/var/log/sinko-install.log` has the installer's output. `sudo sinko repair` installs the version that is
+running again from the copy on the box (it does nothing when the page and the program already agree), and `sudo sinko
+update --force` installs the newest release again. To go back by hand: `sudo sinko rollback`.
 
 ## The box has the wrong time
 
 Bedtime and timers follow the box's clock. Boards such as the Orange Pi Zero 3 have no clock battery; they take the time
 from the network a minute after start, and bedtime and timers wait until the clock is believed (for at most about ten
-minutes). Own install: `sudo sinko doctor` warns if the clock is not set; check `timedatectl`; set the zone with
+minutes). Own install: `sudo sinko doctor` warns if the clock is not set; check `timedatectl` (the installer sets up
+`systemd-timesyncd` when the box has no time service at all, and leaves any other one as it is); set the zone with
 `sudo timedatectl set-timezone Asia/Bahrain` (or yours). Ready-made box: the clock row in *My box* compares the box's clock
 with your phone; if they differ, leave the box on with internet for a few minutes. The time **zone** is the one the seller
 built the box with and a parent cannot change it: if bedtime starts at the wrong hour although the clock row agrees, set

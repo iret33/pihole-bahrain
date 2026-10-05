@@ -1,5 +1,50 @@
 # Releasing Sinko, and setting the project up for the first time
 
+## Before you publish: what works only after you act
+
+Today the only repository that exists is `iret33/pihole-bahrain`, it has no release, and nothing is published to Pages. So
+the addresses written into the tree (`iret33/sinko`) lead nowhere yet, and the installer, every box's update and the
+website depend on them. Do the steps below **in this order**; each says what starts to work. The numbered steps of "One-time
+setup" further down are the details of steps 1, 4 and 5 here.
+
+| What | Where it is written | Works after step |
+|---|---|---|
+| The repository address `github.com/iret33/sinko`, and every link to it | README, SECURITY.md, the issue templates, `web/links.json` (*My box → About*: Project page, All versions), `site/config.js`, `install.sh`, `bin/sinko` | 1 (rename) |
+| The block lists: `raw.githubusercontent.com/iret33/sinko/master/lists/` (every box downloads its lists from here every night) | the default of `SINKO_LISTS_BASE` in `install.sh` and `bin/sinko` | 2 (master holds the tree under the new name) |
+| *My box → About*: Privacy and Licence (`blob/master/docs/privacy.md`, `blob/master/LICENSE`), the website's privacy link | `web/links.json`, `site/app.js` | 2 |
+| README badge **CI** (`actions/workflows/ci.yml/badge.svg`) | README | 3 (it stays empty until one CI run exists on `master`) |
+| README link **Website** (`https://iret33.github.io/sinko/`) and the website's own address; the website's "Full instructions on GitHub" link (README, `#install`) | README, `site/` | 4 (Pages) |
+| The **boxes online** badge and the counter numbers on the website | commented out in the README; `statsUrl` in `site/config.js` | 5 (counter deployed) |
+| README badges **Downloads** (`img.shields.io/github/downloads/iret33/sinko/total`) and **Latest release** (`img.shields.io/github/v/release/iret33/sinko`) | README | 7 (the first release with its files; before it they show an error, "no releases" or zero) |
+| The install one-liner (`releases/latest/download/install.sh`), and every box's update check and download (`api.github.com/repos/iret33/sinko/releases/latest`, `releases/latest/download/sinko.tar.gz`) | README, `docs/install.md`, the website, `install.sh`, `bin/sinko` | 7 |
+| The security reporting link (`security/advisories/new`) and the *Issues* links | `SECURITY.md`, the issue templates, `web/links.json` | 1, with the settings of "One-time setup" step 4 switched on |
+| The **Licence** badge | README | already (it is a static image) |
+
+1. **Rename the repository to `sinko`**, detach it from the Pi-hole fork network, set the repository page and switch on the
+   settings ("One-time setup", steps 1 to 4). Check: `https://github.com/iret33/sinko` opens, and the old
+   `https://github.com/iret33/pihole-bahrain` redirects to it (2.x boxes update and fetch their lists through that
+   redirect).
+2. **Merge this tree to `master`.** Check: `curl -sI https://raw.githubusercontent.com/iret33/sinko/master/lists/guard.txt`
+   answers `200` (the doctor's check and the nightly list refresh both read there), and `blob/master/docs/privacy.md` opens.
+3. **Let CI run on `master` once** (the merge does it; or Actions, *CI*, if it did not). Check: the CI badge in the README
+   says *passing*.
+4. **Switch Pages on:** Settings → Pages → Build and deployment → Source = *GitHub Actions*, then run *Project site* once
+   (Actions → *Project site* → Run workflow; it only runs by itself when something under `site/` or `docs/img/` changes on
+   `master`). Check: the Website link opens the site, its install command is the hardened one, and "Full instructions on
+   GitHub" lands on the README's *Install* section.
+5. **Deploy the counter** with `/v1/forget` (`telemetry/README.md`), then put its address into `TELEMETRY_URL` in `bin/sinko`
+   and `statsUrl` in `site/config.js`, and add the **boxes online** badge to the README (the commented block under the
+   other badges) with the same address. Do it **before the tag**: the address is part of the release. From then on the
+   installer asks the counter question and the page shows the *Count this box* card; until then neither does.
+6. **If there is a shop:** set `buyUrl` in `site/config.js` and change the sentence "Ready-made boxes are not on sale yet" in
+   the README, `docs/install.md` and `docs/faq.md` (a test fails while those words and an empty `buyUrl` disagree).
+7. **Release:** replace `Unreleased` in the `CHANGELOG.md` heading with the date, make `VERSION` and `bin/sinko` agree, tag
+   `v3.0.0` and push it ("Cutting a release" below). Check: the Downloads and Latest release badges show the release, the
+   one-liner installs on a clean box, and a box on 2.x or on an older build updates from the page.
+8. **Walk every link in the table** once, with a phone and a computer, then do section G of
+   [`../hardware-test-checklist.md`](../hardware-test-checklist.md). Upload the social preview by hand (Settings → General →
+   Social preview: `docs/img/social-preview.png`; nothing in the repository does it).
+
 ## One-time setup (do this before the first public release)
 
 1. **Rename the repository to `sinko`** (GitHub → Settings → General → Repository name). GitHub then redirects the old
@@ -30,7 +75,9 @@
    asking), then put its address in `TELEMETRY_URL` near the top of `bin/sinko` and in `site/config.js` (`statsUrl`).
    Until you do, no box can ever send anything. **Do this before you tag**: the address is part of the release.
    If you want a per-address rate limit in front of the counter, it needs a custom domain (see the README, "Abuse").
-6. **Website**: set `buyUrl` (your shop page) and `supportUrl` in `site/config.js`; leave `buyUrl` empty to hide the button.
+6. **Website**: set `buyUrl` (your shop page) and `supportUrl` in `site/config.js`; leave `buyUrl` empty to hide the button
+   (the card then says "Not on sale yet", and so do the README, `docs/install.md` and `docs/faq.md`: change those three
+   together with `buyUrl`).
 7. **Where the repository name is written.** If you ever move to another owner or name, change `iret33/sinko` in:
    `install.sh`, `bin/sinko`, `web/links.json`, `site/config.js`, `telemetry/wrangler.toml`, `systemd/sinko.service`,
    `.github/ISSUE_TEMPLATE/*.yml`, `README.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `docs/`. One command finds them all:
@@ -49,7 +96,7 @@
    checks again, builds `sinko.tar.gz`, `sinko.tar.gz.sha256` and `install.sh` (in a job that can only read), and a
    second job that can write publishes the release with the GitHub CLI.
 5. **Check the release like a family would**: on a spare box (or VM) run
-   `curl -fsSL https://github.com/iret33/sinko/releases/latest/download/install.sh | sudo bash`; then on a box
+   `curl --proto '=https' --proto-redir '=https' -fsSL https://github.com/iret33/sinko/releases/latest/download/install.sh | sudo bash`; then on a box
    running the previous version open *My box* and press *Update now*; both must end green. Keep the old box until you have.
 
 ## Ready-made images follow releases

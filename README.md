@@ -3,6 +3,7 @@
 </p>
 
 <p align="center"><strong>Calm internet for the family.</strong><br>
+<span dir="rtl" lang="ar"><strong>إنترنت هادئ للعائلة</strong></span><br>
 Parental controls that live on a small box in your home, in Arabic and English.<br>
 <a href="https://iret33.github.io/sinko/">Website</a> · <a href="docs/install.md">Install</a> · <a href="docs/faq.md">FAQ</a> · <a href="docs/privacy.md">Privacy · الخصوصية</a></p>
 
@@ -38,24 +39,33 @@ after the first set-up.
 
 ## Two ways to get Sinko
 
-**Buy it ready-made.** An Orange Pi Zero 3 with Sinko already on its card: plug in the cable and the power, open
-`http://sinko.local` on your phone, choose a password, point your router at the box. See the
-[project website](https://iret33.github.io/sinko/) for where to buy.
+**Ready-made.** An Orange Pi Zero 3 with Sinko already on its card: plug in the cable and the power, open
+`http://sinko.local` on your phone, choose a password, point your router at the box. **Ready-made boxes are not on sale
+yet.** Follow the project on GitHub for news; the [project website](https://iret33.github.io/sinko/) will say where to buy
+one as soon as there is a shop.
 
-**Build your own, free.** Any small Debian-based computer will do (an Orange Pi Zero 3 or a Raspberry Pi is ideal). One command:
+**Build your own, free.** Any small Debian-based computer will do (an Orange Pi Zero 3 or a Raspberry Pi is ideal), and it
+takes one command: see [Install](#install) below.
+
+Sinko is free software (GPL-3.0-or-later). Anyone may build, share and sell help with it; flashed boxes sold under the
+Sinko name are covered by [`TRADEMARK.md`](TRADEMARK.md), and [`docs/selling.md`](docs/selling.md) explains what a seller owes
+the software's authors.
+
+## Install
+
+For people who build their own box. You need a small computer that runs Debian, Ubuntu or Raspberry Pi OS (an Orange Pi
+Zero 3 is what Sinko is tested on), connected to the router by an Ethernet cable, with more than 1 GB of free disk space.
+On it, over SSH or at its keyboard, run one command:
 
 ```bash
 curl --proto '=https' --proto-redir '=https' -fsSL https://github.com/iret33/sinko/releases/latest/download/install.sh | sudo bash
 ```
 
 It installs Pi-hole v6 if needed, Sinko, the services and the block lists, asks you for a parent password, and tells you the
-address of the page and the one setting to change in your router. Running it again updates Sinko and keeps your password,
-devices and rules. Everything about it (options, the Orange Pi Zero 3 steps, keeping the box safe) is in
-[`docs/install.md`](docs/install.md).
-
-Sinko is free software (GPL-3.0-or-later). Anyone may build, share and sell help with it; flashed boxes sold under the
-Sinko name are covered by [`TRADEMARK.md`](TRADEMARK.md), and [`docs/selling.md`](docs/selling.md) explains what a seller owes
-the software's authors.
+address of the page and the one setting to change in your router (the DNS server: the box's address, reserved for the box).
+Then open the page on your phone and add your children's devices. Running the command again updates Sinko and keeps your
+password, devices and rules. Everything about it (options, the Orange Pi Zero 3 steps, keeping the box safe, removing
+Sinko) is in [`docs/install.md`](docs/install.md).
 
 ## Updates
 
@@ -67,11 +77,13 @@ timers or bedtime. There is an option to update automatically at night. Details 
 ## Privacy, plainly
 
 Sinko keeps your children's names and devices, your rules and your settings on the box, and never sends them to the project
-or to anyone else. There is no account and no tracking. Two things you should know:
+or to anyone else. There is no account and no tracking. Three things you should know:
 
 - Like every DNS filter, Pi-hole passes on the **names of sites it cannot answer itself** to an upstream DNS service
   (Cloudflare for Families, by default, on a box Sinko sets up). It sees those names and your home's internet address. The
   project never receives them. You can choose another service in Pi-hole's settings.
+- To look for a new version, to update and to refresh its block lists, the box asks **GitHub**, which sees the box's
+  internet address (as any website you visit does). Nothing about your family is in those requests.
 - An optional **anonymous counter** (how many Sinko boxes are online) is **off until you say yes**; it sends a random number,
   the version and the kind of board, and nothing else. Switching it off makes the box ask the counter to forget it.
 

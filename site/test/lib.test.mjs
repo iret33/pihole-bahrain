@@ -58,8 +58,18 @@ test('a configuration is checked, and a bad value counts as empty at run time', 
 });
 
 test('the install command follows the repository', () => {
-  assert.equal(Lib.installCommand('iret33/sinko'), 'curl -fsSL https://github.com/iret33/sinko/releases/latest/download/install.sh | sudo bash');
-  assert.equal(Lib.installCommand('a/b'), 'curl -fsSL https://github.com/a/b/releases/latest/download/install.sh | sudo bash');
+  const hardened = "curl --proto '=https' --proto-redir '=https' -fsSL https://github.com/";
+  assert.equal(Lib.installCommand('iret33/sinko'), hardened + 'iret33/sinko/releases/latest/download/install.sh | sudo bash');
+  assert.equal(Lib.installCommand('a/b'), hardened + 'a/b/releases/latest/download/install.sh | sudo bash');
+});
+
+test('the install command is the hardened form: https only, and no redirect may leave https', () => {
+  for (const repo of ['iret33/sinko', 'a/b']) {
+    const command = Lib.installCommand(repo);
+    assert.ok(command.includes("--proto '=https'"), command);
+    assert.ok(command.includes("--proto-redir '=https'"), command);
+    assert.ok(command.endsWith('| sudo bash'), command);
+  }
 });
 
 test('counter answers: only real counts are believed', () => {

@@ -1,15 +1,16 @@
 # Installing Sinko on your own hardware
 
 You will have a box that keeps your children's devices on your rules in about 20 minutes. If you would rather not do
-this yourself, [buy a ready-made box](../README.md#two-ways-to-get-sinko); everything below is for people who build
-their own. After that, everything is done from the parent page; you will not need these commands again, except to
-look at what is happening.
+this yourself, a ready-made box is planned (it is not on sale yet; the [README](../README.md#two-ways-to-get-sinko) says
+where things stand); everything below is for people who build their own. After that, everything is done from the parent
+page; you will not need these commands again, except to look at what is happening.
 
 ## What you need
 
 * A small computer that runs **Debian, Ubuntu or Raspberry Pi OS** (Armbian is Debian): an Orange Pi Zero 3 is what
   Sinko is tested on; a Raspberry Pi or any other small Debian computer works too. Use the **Ethernet** port, not Wi-Fi.
-  At least 1 GB of free disk space, 1 GB of RAM or more (comfortable), and a good (high-endurance) microSD card.
+  More than 1 GB of free disk space for a first installation (an update needs more than 200 MB), 1 GB of RAM or more
+  (comfortable), and a good (high-endurance) microSD card.
 * Python 3.9 or newer (every supported system has it), `systemd`, and an internet connection while installing.
 * Your router's settings page, to point your home network at the box (the last step).
 * [Pi-hole](https://pi-hole.net) version 6. If it is missing, the installer installs it for you (fully unattended). If an
@@ -27,17 +28,29 @@ The installer downloads the newest release (`sinko.tar.gz`), checks it against t
 go on if they differ. Then it:
 
 1. installs Pi-hole v6 if it is missing;
-2. asks for a **parent password** (8 or more characters). If nobody can be asked, it generates one and shows it on the
+2. asks for a **parent password** (8 or more characters) when Pi-hole has none yet; a password that Pi-hole already has is
+   kept, unless you give `SINKO_PASSWORD`. If nobody can be asked, it generates one and shows it on the
    screen only; with no screen at all it saves it in `/etc/sinko/initial-password` (readable by root only: read it, then
-   delete the file). The password is never written to the install log. An *update* never chooses a password;
+   delete the file). The password is never written to the install log. An *update* never chooses a password. How the
+   password reaches Pi-hole depends on Pi-hole: one that has no password yet (a new Pi-hole) is given it through its API,
+   in the body of a request on the box itself; one that already has a password (an existing Pi-hole, or a second run, with
+   `SINKO_PASSWORD` given) refuses to have it changed that way, so the installer uses Pi-hole's own `pihole setpassword`, which
+   takes the password as an argument: for a moment it is in that program's arguments, which any user on the box can read
+   in the process list. On a box that other people log in to, change the password afterwards on the page instead
+   (*My box*, *Change password*, which does not go through a command line). If this copy of Sinko has a counter address, the
+   installer also asks once whether to count the box in the anonymous number of Sinko boxes online (default *no*; see
+   [`privacy.md`](privacy.md)); without a counter address it says nothing about it;
 3. installs the parent page at `http://<box-ip>/` (the Pi-hole admin stays at `/admin/`) and, through Avahi,
    `http://<hostname>.local/` so phones can find it by name;
 4. creates the Pi-hole groups, rules and block lists, and starts the scheduler and the nightly list refresh;
-5. checks that the new scheduler really runs, and prints the address and the router step below.
+5. checks that the new scheduler really runs, sets up Debian's automatic security updates and, when the box has no time
+   service, `systemd-timesyncd` (the boards have no clock battery), and prints the address and the router step below.
 
-If a step fails, nothing is half-installed: fix the problem and run the same command again. **Running the same command
-again updates everything and keeps your password, devices and rules.** (Updating normally happens from the page,
-see [`updating.md`](updating.md).)
+If a step fails, the installer says which and stops (the log is `/var/log/sinko-install.log`): fix the problem and run the
+same command again, which is always safe. A card that is nearly full is refused at the start (more than 1 GB free for a
+first installation, more than 200 MB for an update), before anything is changed. **Running the same command again updates
+everything and keeps your password, devices and rules.** (Updating normally happens from the page, see
+[`updating.md`](updating.md).)
 
 An existing Pi-hole v6 is used as it is: your groups, lists, clients and rules are never touched. Sinko adds its own, all
 named `pb-…`.
@@ -49,7 +62,7 @@ Pass these as environment variables after `sudo`, for example
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SINKO_PASSWORD` | ask / generate | The parent password (also Pi-hole's admin password). Not on a shared computer: it stays in your shell history. The installer takes it out of its environment at once and hands it to Pi-hole through Pi-hole's API |
+| `SINKO_PASSWORD` | ask / generate | The parent password (also Pi-hole's admin password). Not on a shared computer: it stays in your shell history, and while the command runs it is in the process list (also with `sudo SINKO_PASSWORD=… bash`: those are sudo's own arguments). The installer takes it out of its own environment at once. A Pi-hole that has no password yet gets it through Pi-hole's API, in the body of a request on the box; a Pi-hole that already has one is changed with `pihole setpassword`, where the password is briefly in that program's arguments (see step 2 above) |
 | `SINKO_HOSTNAME` | `family.lan` | Local name for the page (works on devices that use the box); `none` to skip |
 | `SINKO_UPSTREAMS` | `1.1.1.3,1.0.0.3` | Upstream DNS for a **new** Pi-hole: Cloudflare for Families, which also keeps out adult sites and known malware |
 | `SINKO_TIMEZONE` | `Asia/Bahrain` if the system is on UTC | Time zone that bedtime follows |
@@ -59,10 +72,15 @@ Pass these as environment variables after `sudo`, for example
 | `SINKO_SRC` | – | A folder with an already extracted release: nothing is downloaded (offline installs, image builds, tests) |
 | `SINKO_RELEASE_BASE`, `SINKO_RELEASE_API` | GitHub's | Where releases and the "latest release" answer come from; **https only** (a mirror of your own) |
 | `SINKO_LISTS_BASE` | this project's `lists/` on GitHub | Where Pi-hole downloads the app block lists |
-| `SINKO_TELEMETRY` | ask (default *no*) | `1` = count this box in the anonymous number of Sinko boxes online, `0` = no. Not asked and not set: the page asks later. What is sent: [`privacy.md`](privacy.md) |
+| `SINKO_TELEMETRY` | ask (default *no*) | `1` = count this box in the anonymous number of Sinko boxes online, `0` = no. The question is asked only when this copy of Sinko has a counter address; not asked and not set: the page asks later (and shows nothing when there is no counter address). What is sent: [`privacy.md`](privacy.md) |
 | `SINKO_MDNS` | on | `0` = do not install Avahi (the box then has no `.local` name) |
-| `SINKO_OS_UPDATES` | on | `0` = do not set up automatic Debian **security** updates (the box never restarts by itself for them) |
+| `SINKO_OS_UPDATES` | on | `0` = do not set up automatic Debian **security** updates (the box never restarts by itself for them). An `unattended-upgrades` that is already installed is left exactly as it is, switched on or off |
 | `SINKO_NONINTERACTIVE` | – | `1` = never prompt |
+
+The installer works whatever language the system is set to: where it reads apt's or dpkg's answers it asks for them in
+English, so a box set to Arabic, German or French still gets Avahi, the security updates and a time service (Pi-hole's
+installer and apt's own messages stay in your language). A time service that is already there is left alone, and so is
+one that is installed but switched off: the installer then says so and how to switch it on.
 
 ## The last step: point your home at the box
 
@@ -117,7 +135,8 @@ sudo sinko rollback      # put the previous version back (works offline)
 sudo sinko selfcheck     # quick health check of the installation
 sudo sinko telemetry     # the optional anonymous counter: on, off, status, payload
 sudo sinko setup         # re-create the groups and lists if something was deleted
-sudo pihole setpassword  # change the parent password (or use My box in the page)
+sudo sinko repair        # the page and the program are of two versions (an update was cut off): install this version again from the copy on the box
+sudo pihole setpassword  # change the parent password (or use My box, Change password, in the page: no command line involved)
 journalctl -u sinko      # the scheduler's log
 ```
 
@@ -129,5 +148,8 @@ Problems? [`troubleshooting.md`](troubleshooting.md).
 sudo /opt/sinko/uninstall.sh
 ```
 
-Removes Sinko, its groups, lists, rules and children's devices from Pi-hole, and the page. Pi-hole stays installed (remove it
-with `sudo pihole uninstall`). Then point the router's DNS server back to its default.
+Removes Sinko, its groups, lists, rules and children's devices from Pi-hole, and the page. A device that also holds a group
+of your own in Pi-hole (you had registered it before Sinko, or have since given it one) is **not** deleted: it only loses
+Sinko's groups and keeps your groups and its name. A device that holds nothing but Sinko's groups (and Pi-hole's Default
+one) was only there for Sinko and is deleted. Pi-hole stays installed (remove it with `sudo pihole uninstall`). Then point
+the router's DNS server back to its default.
