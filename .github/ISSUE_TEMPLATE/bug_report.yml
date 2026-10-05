@@ -1,0 +1,57 @@
+name: Bug report
+description: Something does not work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. For a blocked app that still works, please read the
+        [troubleshooting guide](https://github.com/iret33/sinko/blob/master/docs/troubleshooting.md) first.
+        **This issue is public. Never paste your parent password.** `sudo sinko doctor` output has no passwords, but it can
+        contain your children's names (as you typed them), their devices' MAC or IP addresses and your router's address:
+        read it first and replace those (`Child 1`, `aa:bb:cc:...`) before you post.
+        A ready-made box has no login, so it cannot run `doctor`: describe what you see, or attach a screenshot of
+        *My box* with any names hidden, and put "ready-made" in the hardware field.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `sudo sinko doctor` (own install only)
+      description: "Public page: replace your children's names, device addresses (MAC or IP) and your router's address before you post. Ready-made box (no login)? Write \"ready-made\" here instead and describe what *My box* shows."
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Sinko version
+      description: Shown in the page under My box, or by `sudo sinko --version`
+    validations:
+      required: true
+  - type: input
+    id: pihole
+    attributes:
+      label: Pi-hole version
+      description: Shown in the page under My box, About (when the box can tell), or by `pihole -v` on an own install
+  - type: dropdown
+    id: board
+    attributes:
+      label: Hardware
+      options: [Orange Pi Zero 3 (ready-made), Orange Pi Zero 3 (own install), Raspberry Pi, Other ARM board, x86 PC or VM, Other]
+    validations:
+      required: true
+  - type: input
+    id: router
+    attributes:
+      label: Router and phone (make, model, system version)
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs, if relevant
+      description: "Own install only: `journalctl -u sinko --since '1 hour ago'` or `/var/log/sinko-install.log`. Public page: leave out names and addresses."
+      render: text

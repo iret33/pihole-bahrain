@@ -1,9 +1,9 @@
-/* Family Internet — parent page for pihole-bahrain.
+/* Sinko — parent page for sinko.
  *
  * Talks only to the local Pi-hole v6 API (same origin), signed in with the
  * Pi-hole admin password. Blocking is done by enabling/disabling Pi-hole
- * groups (see bin/pihole-bahrain for the model). Timers and bedtime are stored
- * in the "pb-state" group and enforced by the pihole-bahrain service on the Pi,
+ * groups (see bin/sinko for the model). Timers and bedtime are stored
+ * in the "pb-state" group and enforced by the sinko service on the Pi,
  * so they keep working after this page is closed.
  */
 'use strict';
@@ -16,13 +16,11 @@
   var POLL_MS = 30000;
   var SID_KEY = 'pb.sid';
   var LANG_KEY = 'pb.lang';
-  var DEFAULT_STATE = { v: 1, timer: null, scheduleActive: false,
-    schedule: { enabled: false, start: '21:00', end: '06:00', days: [0, 1, 2, 3, 4, 5, 6] } };
 
   // ------------------------------------------------------------------ strings
   var STR = {
     en: {
-      appName: 'Family Internet', loginHint: 'Sign in with the parent password chosen during setup.', password: 'Password',
+      appName: 'Sinko', loginHint: 'Sign in with the parent password chosen during setup.', password: 'Password',
       totp: '6-digit code from your authenticator app', signIn: 'Sign in', signOut: 'Sign out',
       wrongPassword: 'That password is not right. Try again.', wrongTotp: 'Enter the password and the 6-digit code.',
       noConnection: 'Cannot reach the family box. Check that it is switched on and connected.',
@@ -42,7 +40,9 @@
       from: 'Off at', until: 'On at', nights: 'Nights', saveBedtime: 'Save bedtime', bedtimeSaved: 'Bedtime saved',
       pickNight: 'Pick at least one night.', sameTimes: 'Off and on times must be different.',
       advanced: 'Advanced settings', helpTitle: 'Setup help',
-      helpBody: 'For the rules to work, your router must send all devices to this box for DNS. In the router settings, set the DNS server to {ip} and reserve that address for the box. Then turn Wi\u2011Fi off and on again on each child\u2019s device.', close: 'Close', cancel: 'Cancel', start: 'Start', add: 'Add',
+      helpBody: 'For the rules to work, your router must send all devices to this box for DNS. In the router settings, set the DNS server to {ip} and reserve that address for the box. Then turn Wi\u2011Fi off and on again on each child\u2019s device.',
+      // When the page does not know the box's number address (no /pb/box.json, and the page was opened by a name): never a name in its place.
+      helpBodyNoIp: 'For the rules to work, your router must send all devices to this box for DNS. In the router settings, set the DNS server to the box\u2019s number address (four numbers separated by dots) and reserve that address for the box. You can find the number in your router\u2019s list of connected devices: look for the box. Then turn Wi\u2011Fi off and on again on each child\u2019s device.', close: 'Close', cancel: 'Cancel', start: 'Start', add: 'Add',
       customMinutes: 'Or enter minutes', addHint: 'Pick your child\u2019s phone, tablet or console. Devices appear here after they have used the internet at home.',
       manual: 'Enter address by hand', addrLabel: 'MAC or IP address', nameLabel: 'Name',
       macTip: 'Tip: on the child\u2019s device, turn off \u201cPrivate Wi\u2011Fi address\u201d for your home network so it keeps the same address.',
@@ -63,8 +63,9 @@
       homeworkOn: 'Homework mode on', freeOn: 'Free time started', breakOn: 'Offline break started', timerEnded: 'Timer ended',
       internetOff: 'Internet turned off', internetOn: 'Internet turned on',
       nowBlocked: '{n} blocked', nowAllowed: '{n} allowed', allAllowed: 'All apps allowed', allBlocked: 'All apps blocked',
-      schedulerDown: 'The timer on the box is not running. On the Pi, run: sudo systemctl restart pihole-bahrain',
-      notInstalled: 'Setup is not finished on this box. On the Pi, run: sudo pihole-bahrain setup',
+      // Nothing here may need a keyboard on the box: parents cannot type commands. Unplugging and re-plugging restarts everything.
+      schedulerDown: 'The timer on the box is not running. Unplug the box, plug it back in and wait two minutes. If it keeps happening, ask whoever set up the box.',
+      notInstalled: 'Setup is not finished on this box. Wait a few minutes and reload this page. If it stays like this, ask whoever set up the box.',
       failed: 'That did not work: {e}', sessionEnded: 'Your session ended. Sign in again.',
       days: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'],
       daysLong: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'],
@@ -74,7 +75,7 @@
       cat: {}, langSwitch: 'العربية', minutesShort: '{n} min'
     },
     ar: {
-      appName: 'إنترنت العائلة', loginHint: 'سجّل الدخول بكلمة مرور الوالدين التي اخترتها أثناء الإعداد.', password: 'كلمة المرور',
+      appName: 'سينكو', loginHint: 'سجّل الدخول بكلمة مرور الوالدين التي اخترتها أثناء الإعداد.', password: 'كلمة المرور',
       totp: 'الرمز المكوّن من 6 أرقام من تطبيق المصادقة', signIn: 'تسجيل الدخول', signOut: 'تسجيل الخروج',
       wrongPassword: 'كلمة المرور غير صحيحة. حاول مرة أخرى.', wrongTotp: 'أدخل كلمة المرور والرمز المكوّن من 6 أرقام.',
       noConnection: 'تعذّر الوصول إلى صندوق العائلة. تأكد أنه يعمل ومتصل بالشبكة.',
@@ -94,7 +95,8 @@
       from: 'الإيقاف الساعة', until: 'التشغيل الساعة', nights: 'الليالي', saveBedtime: 'حفظ وقت النوم', bedtimeSaved: 'تم حفظ وقت النوم',
       pickNight: 'اختر ليلة واحدة على الأقل.', sameTimes: 'يجب أن يختلف وقت الإيقاف عن وقت التشغيل.',
       advanced: 'إعدادات متقدمة', helpTitle: 'مساعدة في الإعداد',
-      helpBody: 'لكي تعمل القواعد، يجب أن يوجّه جهاز الراوتر كل الأجهزة إلى صندوق العائلة لخدمة DNS. في إعدادات الراوتر، اجعل خادم DNS هو {ip} واحجز هذا العنوان للصندوق. ثم أطفئ Wi‑Fi وشغّله مجددًا على جهاز كل طفل.', close: 'إغلاق', cancel: 'إلغاء', start: 'ابدأ', add: 'إضافة',
+      helpBody: 'لكي تعمل القواعد، يجب أن يوجّه جهاز الراوتر كل الأجهزة إلى صندوق العائلة لخدمة DNS. في إعدادات الراوتر، اجعل خادم DNS هو {ip} واحجز هذا العنوان للصندوق. ثم أطفئ Wi‑Fi وشغّله مجددًا على جهاز كل طفل.',
+      helpBodyNoIp: 'لكي تعمل القواعد، يجب أن يوجّه جهاز الراوتر كل الأجهزة إلى صندوق العائلة لخدمة DNS. في إعدادات الراوتر، اجعل خادم DNS هو العنوان الرقمي للصندوق (أربعة أرقام تفصل بينها نقاط) واحجز هذا العنوان للصندوق. تجد الرقم في قائمة الأجهزة المتصلة في الراوتر: ابحث عن الصندوق. ثم أطفئ Wi‑Fi وشغّله مجددًا على جهاز كل طفل.', close: 'إغلاق', cancel: 'إلغاء', start: 'ابدأ', add: 'إضافة',
       customMinutes: 'أو أدخل عدد الدقائق', addHint: 'اختر هاتف طفلك أو جهازه اللوحي أو جهاز الألعاب. تظهر الأجهزة هنا بعد استخدامها للإنترنت في المنزل.',
       manual: 'إدخال العنوان يدويًا', addrLabel: 'عنوان MAC أو IP', nameLabel: 'الاسم',
       macTip: 'نصيحة: على جهاز الطفل، أوقف خيار «عنوان Wi‑Fi خاص» لشبكة المنزل حتى يحتفظ الجهاز بعنوان ثابت.',
@@ -115,8 +117,8 @@
       homeworkOn: 'تم تفعيل وقت الدراسة', freeOn: 'بدأ الوقت الحر', breakOn: 'بدأت الاستراحة', timerEnded: 'انتهى المؤقت',
       internetOff: 'تم إيقاف الإنترنت', internetOn: 'تم تشغيل الإنترنت',
       nowBlocked: 'تم حظر {n}', nowAllowed: 'تم السماح بـ {n}', allAllowed: 'تم السماح بكل التطبيقات', allBlocked: 'تم حظر كل التطبيقات',
-      schedulerDown: 'المؤقت على صندوق العائلة لا يعمل. نفّذ على الصندوق: sudo systemctl restart pihole-bahrain',
-      notInstalled: 'الإعداد غير مكتمل على صندوق العائلة. نفّذ على الصندوق: sudo pihole-bahrain setup',
+      schedulerDown: 'المؤقت على صندوق العائلة لا يعمل. افصل الصندوق عن الكهرباء ثم أعد توصيله وانتظر دقيقتين. إذا تكرر ذلك فاسأل من أعدّ الصندوق.',
+      notInstalled: 'الإعداد غير مكتمل على صندوق العائلة. انتظر بضع دقائق ثم أعد تحميل الصفحة. إذا استمر الأمر فاسأل من أعدّ الصندوق.',
       failed: 'لم تنجح العملية: {e}', sessionEnded: 'انتهت الجلسة. سجّل الدخول مجددًا.',
       days: ['أحد', 'اثنين', 'ثلاثاء', 'أربعاء', 'خميس', 'جمعة', 'سبت'],
       daysLong: ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'],
@@ -281,6 +283,54 @@
   Object.keys(LIVE_STR.en).forEach(function (k) { STR.en[k] = LIVE_STR.en[k]; });
   Object.keys(LIVE_STR.ar).forEach(function (k) { STR.ar[k] = LIVE_STR.ar[k]; });
 
+  // ------------------------------------------------------------------ strings for the first run: claim screen, setup list, update banner
+  // (the My box sheet's own strings live in pb-box.js). tests/test_copy.py checks both languages and the plain-words rule.
+  var FIRST_STR = {
+    en: {
+      tagline: 'Calm internet for the family',
+      claimTitle: 'Welcome to Sinko', claimLead: 'Choose a parent password for this box. You will use it to sign in on this page.',
+      claimWhy: 'Until you do, anyone on your Wi‑Fi can open this page and change the rules.',
+      claimPw: 'Password (at least 8 characters)', claimPw2: 'Password again', claimBtn: 'Choose password and continue', claimBusy: 'Saving…',
+      claimShort: 'The password needs at least 8 characters.', claimMismatch: 'The two passwords are not the same.',
+      claimFail: 'The password could not be saved: {e}', claimSignIn: 'Your password is saved. Sign in with it.',
+      setupTitle: 'Get started', setupProgress: '{n} of {t} done', setupHide: 'Hide this list',
+      setupPw: 'Parent password chosen',
+      setupRouter: 'Router points to this box', setupRouterHow: 'No other device at home has used the box yet. See “Setup help” at the bottom of this page.', setupRouterBtn: 'Show setup help',
+      setupChild: 'First child device added', setupChildHow: 'Add your child’s phone or tablet so the rules apply to it.',
+      setupCounterQ: 'Help count Sinko boxes?', setupCounterDone: 'Counter question answered',
+      setupCounterText: 'Optional. Every few hours the box sends a random code, the Sinko version and the kind of box. Nothing about your family. The counter adds the country and when it first and last heard from the box. Switch it off any time in My box: the box then asks the counter service to forget it.',
+      setupDone: 'done', setupTodo: 'not done yet',
+      setupYes: 'Yes', setupNotNow: 'Not now', setupLaterToast: 'Okay. You can change this in My box.', setupDoneToast: 'Everything is set up.',
+      updateReady: 'Sinko {v} is ready: open My box', updateRunning: 'Sinko is updating: open My box to follow it',
+      updateFailed: 'The last update did not work: open My box'
+    },
+    ar: {
+      tagline: 'إنترنت هادئ للعائلة',
+      claimTitle: 'مرحبًا بك في سينكو', claimLead: 'اختر كلمة مرور الوالدين لهذا الصندوق. ستستخدمها لتسجيل الدخول في هذه الصفحة.',
+      claimWhy: 'إلى أن تفعل ذلك، يستطيع أي شخص على شبكة Wi‑Fi فتح هذه الصفحة وتغيير القواعد.',
+      claimPw: 'كلمة المرور (8 أحرف على الأقل)', claimPw2: 'أعد كتابة كلمة المرور', claimBtn: 'اختيار كلمة المرور والمتابعة', claimBusy: 'جارٍ الحفظ…',
+      claimShort: 'يجب أن تتكوّن كلمة المرور من 8 أحرف على الأقل.', claimMismatch: 'كلمتا المرور غير متطابقتين.',
+      claimFail: 'تعذّر حفظ كلمة المرور: {e}', claimSignIn: 'تم حفظ كلمة المرور. سجّل الدخول بها.',
+      setupTitle: 'ابدأ من هنا', setupProgress: 'تم {n} من {t}', setupHide: 'إخفاء هذه القائمة',
+      setupPw: 'تم اختيار كلمة مرور الوالدين',
+      setupRouter: 'الراوتر يوجّه الأجهزة إلى هذا الصندوق', setupRouterHow: 'لم يستخدم أي جهاز آخر في البيت الصندوق بعد. راجع «مساعدة في الإعداد» أسفل هذه الصفحة.', setupRouterBtn: 'عرض المساعدة',
+      setupChild: 'إضافة أول جهاز لطفل', setupChildHow: 'أضف هاتف طفلك أو جهازه اللوحي لتُطبَّق عليه القواعد.',
+      setupCounterQ: 'هل تساعد في عدّ صناديق سينكو؟', setupCounterDone: 'تمت الإجابة عن سؤال العدّاد',
+      setupCounterText: 'اختياري. يرسل الصندوق كل بضع ساعات رمزًا عشوائيًا ورقم إصدار سينكو ونوع الصندوق. لا شيء عن عائلتك. ويضيف العدّاد الدولة ووقت أول رسالة وآخر رسالة من الصندوق. يمكنك إيقافه في أي وقت من «صندوقي»، وعندها يطلب الصندوق من خدمة العدّاد أن تنسى هذا الصندوق.',
+      setupDone: 'تم', setupTodo: 'لم يتم بعد',
+      setupYes: 'نعم', setupNotNow: 'ليس الآن', setupLaterToast: 'حسنًا. يمكنك تغيير ذلك من «صندوقي».', setupDoneToast: 'تم إعداد كل شيء.',
+      updateReady: 'الإصدار {v} من سينكو جاهز: افتح صندوقي', updateRunning: 'يجري تحديث سينكو: افتح صندوقي للمتابعة',
+      updateFailed: 'لم ينجح آخر تحديث: افتح صندوقي'
+    }
+  };
+  Object.keys(FIRST_STR.en).forEach(function (k) { STR.en[k] = FIRST_STR.en[k]; });
+  Object.keys(FIRST_STR.ar).forEach(function (k) { STR.ar[k] = FIRST_STR.ar[k]; });
+  // The My box sheet's strings (pb-box.js is loaded before this file).
+  if (window.PBBox) {
+    Object.keys(PBBox.strings.en).forEach(function (k) { STR.en[k] = PBBox.strings.en[k]; });
+    Object.keys(PBBox.strings.ar).forEach(function (k) { STR.ar[k] = PBBox.strings.ar[k]; });
+  }
+
   // ------------------------------------------------------------------ state
   var lang = safeGet(localStorage, LANG_KEY) === 'ar' ? 'ar' : (safeGet(localStorage, LANG_KEY) ? 'en' : guessLang());
   var sid = safeGet(sessionStorage, SID_KEY) || '';
@@ -292,6 +342,16 @@
   var pollTimer = null, tickTimer = null;
   var timerMode = 'free', timerMinutes = 0, pickedDevice = null;
   var serverOffsetMs = 0;            // box clock minus this device's clock, from the Date header of every API answer
+  var boxInfo = null;                // /pb/box.json as the box program writes it (parsed and checked); null = an older box, which has none
+  var heartbeatLateSince = 0;        // local time (ms) this page first saw the box's pulse late, 0 while it is not late
+  var pageStamp = '';                // the release the installer stamped into index.html ('' = not stamped: development, or a page copied by hand)
+  var pageVersion = '';              // the version this page is: the stamp, else pb/version.txt at boot; the box may be newer after an update
+  var offsetKnown = false;           // serverOffsetMs has been read from an answer at least once
+  var clockStepHoldUntil = 0;        // local time (ms) until which the box's clock is taken to be catching up after a jump, see noteBoxClock
+  var staleCheckedAt = 0, staleReloading = false;
+  var UPDATED_KEY = 'pb.updated';    // set just before the page reloads itself after an update, so it can say what happened
+  var RELOADED_KEY = 'pb.reloadedFor';   // the version this tab last reloaded itself for: a page that is still not that version does not reload again
+  var CLOCK_STEP_MS = 30000;         // the box's clock moving by more than this between two answers (beyond the Date header's whole seconds) is a jump
 
   function $(id) { return document.getElementById(id); }
   function safeGet(store, key) { try { return store.getItem(key); } catch (e) { return null; } }
@@ -320,6 +380,13 @@
   }
   // Timers and "last online" are compared by the box with ITS clock, so the page must use the box's time, not the phone's.
   function serverNowSec() { return (Date.now() + serverOffsetMs) / 1000; }
+  // The box has no real-time clock: after a long time without internet it can step by hours or days at once when it reaches a time server. The
+  // scheduler then needs a pass (up to five minutes) to write box.json again, so for that time the file's age says nothing about the scheduler.
+  function noteBoxClock(offsetMs) {
+    if (offsetKnown && Math.abs(offsetMs - serverOffsetMs) > CLOCK_STEP_MS) clockStepHoldUntil = Date.now() + PBBox.timing.clockStepHold;
+    serverOffsetMs = offsetMs;
+    offsetKnown = true;
+  }
   function locale() { return lang === 'ar' ? 'ar-BH-u-nu-latn' : 'en-GB'; }
   function fmtTime(date) { return date.toLocaleTimeString(locale(), { hour: 'numeric', minute: '2-digit' }); }
   function fmtHHMM(hhmm) { var d = new Date(); d.setHours(+hhmm.slice(0, 2), +hhmm.slice(3), 0, 0); return fmtTime(d); }
@@ -344,30 +411,42 @@
 
   var toastTimer = null;
   function toast(msg, isError) {
-    var n = $('toast'); n.textContent = msg; n.classList.toggle('toast-error', !!isError); n.classList.add('show');
+    // Everything outside an open modal dialog is hidden behind it, so while My box is open its messages show inside it.
+    var inBox = $('boxDialog').open;
+    var n = inBox ? $('boxToast') : $('toast');
+    $('toast').classList.remove('show'); $('boxToast').classList.remove('show');
+    n.textContent = msg; n.classList.toggle('toast-error', !!isError); n.classList.add('show');
     clearTimeout(toastTimer); toastTimer = setTimeout(function () { n.classList.remove('show'); }, isError ? 6000 : 2600);
   }
 
   // ------------------------------------------------------------------ API
-  function ApiError(status, message) { this.status = status; this.message = message; }
-  function call(method, path, body) {
-    var headers = { Accept: 'application/json' };
-    if (body !== undefined) headers['Content-Type'] = 'application/json';
-    if (sid) headers.sid = sid;
-    return fetch(path, { method: method, headers: headers, credentials: 'omit', cache: 'no-store',
-      body: body === undefined ? undefined : JSON.stringify(body) })
+  // `body` is a JSON value. opts (all optional): blob = the answer is a file, resolves { blob }; form = a FormData to send as is (the browser
+  // writes the multipart header); noSid / sid = send no session / this one; quiet401 = an answer of 401 does not sign the page out;
+  // text = the answer is plain text (a streamed run), resolves { text }.
+  // An ApiError carries the status (0 = the box did not answer), a message for people, and `body`, the parsed answer.
+  function ApiError(status, message, body) { this.status = status; this.message = message; this.body = body; }
+  function call(method, path, body, opts) {
+    opts = opts || {};
+    var headers = { Accept: opts.blob ? 'application/zip, */*' : 'application/json' }, payload;
+    if (opts.form) payload = opts.form;
+    else if (body !== undefined) { headers['Content-Type'] = 'application/json'; payload = JSON.stringify(body); }
+    var useSid = opts.sid !== undefined ? opts.sid : (opts.noSid ? '' : sid);
+    if (useSid) headers.sid = useSid;
+    return fetch(path, { method: method, headers: headers, credentials: 'omit', cache: 'no-store', body: payload })
       .catch(function () { throw new ApiError(0, t('noConnection')); })
       .then(function (r) {
         var boxTime = Date.parse(r.headers.get('Date') || '');
-        if (!isNaN(boxTime)) serverOffsetMs = boxTime - Date.now();
+        if (!isNaN(boxTime)) noteBoxClock(boxTime - Date.now());
+        if (opts.blob && r.ok) return r.blob().then(function (b) { return { blob: b }; });
         return r.text().then(function (txt) {
           var j = {}; try { j = txt ? JSON.parse(txt) : {}; } catch (e) { j = {}; }
-          if (r.status === 401) { endSession(); throw new ApiError(401, t('sessionEnded')); }
+          if (r.status === 401) { if (!opts.quiet401) endSession(); throw new ApiError(401, t('sessionEnded'), j); }
           if (!r.ok) {
             var e = j && j.error; var m = e ? (e.message || e.key || String(e)) : ('HTTP ' + r.status);
             if (e && e.hint) m += ' (' + e.hint + ')';
-            throw new ApiError(r.status, m);
+            throw new ApiError(r.status, m, j);
           }
+          if (opts.text) return { text: txt };
           return j;
         });
       });
@@ -391,15 +470,51 @@
     return call('PUT', '/api/clients/' + q(c.client), { comment: c.comment || '', groups: groups });
   }
 
+  // ------------------------------------------------------------------ what the box says about itself (/pb/box.json)
+  // Written by the box program (docs/maintainers/architecture.md, "Amendments"): its number address, time zone, whether a counter address is
+  // configured, and `at`, its own pulse. Read without signing in. An older box has no such file and every feature that needs it stays off:
+  // nothing here may break the page. No answer at all keeps what was known; a file that is not what it should be counts as no file.
+  function loadBoxInfo() {
+    return fetch('/pb/box.json', { cache: 'no-store', credentials: 'omit' })
+      .then(function (r) { return r.ok ? r.json() : null; }, function () { return undefined; })
+      .then(function (j) { if (j !== undefined) boxInfo = PBBox.pure.parseBoxInfo(j); return boxInfo; },
+        function () { boxInfo = null; return null; });
+  }
+  // The number to give the router: the box's own address from box.json, else the address this page was opened by when that is a number.
+  // Never a name: a router takes only numbers there.
+  function renderHelp() {
+    var ip = (boxInfo && boxInfo.ip) || PBBox.pure.usableIpv4((location.hostname || '').toLowerCase());
+    $('helpBody').textContent = ip ? t('helpBody', { ip: ip }) : t('helpBodyNoIp');
+  }
+  // The timer on the box is overdue, or the box's own pulse (box.json's `at`) is more than 20 minutes behind the box's clock. The pulse is
+  // not written while an update runs, and it is only believed once this page has seen it late for a minute (right after the box's clock is
+  // corrected the file is a few seconds behind).
+  function schedulerSilent() {
+    if (Date.now() < clockStepHoldUntil) { heartbeatLateSince = 0; return false; }       // the box's clock just jumped: give the scheduler a pass to catch up
+    var tm = M.state.timer, now = serverNowSec();
+    if (tm && tm.until < now - 90) return true;
+    var late = PBBox.pure.heartbeatLate(boxInfo, now) && M.state.update.status !== 'running';
+    if (!late) { heartbeatLateSince = 0; return false; }
+    if (!heartbeatLateSince) heartbeatLateSince = Date.now();
+    return Date.now() - heartbeatLateSince >= PBBox.timing.heartbeatGrace;
+  }
+
   // ------------------------------------------------------------------ auth
-  function endSession() {
+  // `note` is one calm line for the sign-in screen: "your password was changed", "the box restarted".
+  function endSession(note) {
     sid = ''; safeSet(sessionStorage, SID_KEY, null);
     stopPolling();
+    if (window.PBBox) PBBox.reset();
     if (window.PBPicture) { PBPicture.stop(); picInited = false; }
-    showLogin();
+    showLogin(typeof note === 'string' ? note : '');
   }
-  function showLogin() { $('app').hidden = true; $('login').hidden = false; setTimeout(function () { $('pw').focus(); }, 0); }
-  function showApp() { $('login').hidden = true; $('app').hidden = false; }
+  function showLogin(note) {
+    $('app').hidden = true; $('claim').hidden = true; $('login').hidden = false;
+    var n = $('loginNote'); n.textContent = note || ''; n.hidden = !note;
+    $('loginErr').textContent = '';
+    setTimeout(function () { $('pw').focus(); }, 0);
+  }
+  function showApp() { $('login').hidden = true; $('claim').hidden = true; $('app').hidden = false; }
 
   function probeAuth() {
     return call('GET', '/api/auth').then(function (j) {
@@ -411,10 +526,63 @@
       throw e;
     });
   }
+  // ------------------------------------------------------------------ first run: choosing the parent password
+  // A box with no password answers GET /api/auth with a valid session even when no session id is sent. That is asked WITHOUT the
+  // stored session id: with one, "valid" would only say that the session is fine, not that no password exists.
+  function noPasswordSet() {
+    return fetch('/api/auth', { headers: { Accept: 'application/json' }, credentials: 'omit', cache: 'no-store' })
+      .then(function (r) { return r.json().then(function (j) { return !!(r.ok && j && j.session && j.session.valid); }, function () { return false; }); });
+  }
+  // Only a box that has Sinko on it is claimed here: without Sinko's groups there is nothing for this page to protect yet.
+  function sinkoInstalled() {
+    return fetch('/api/groups', { headers: { Accept: 'application/json' }, credentials: 'omit', cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : { groups: [] }; })
+      .then(function (j) { return (j.groups || []).some(function (g) { return g.name === G.state; }); })
+      .catch(function () { return false; });
+  }
+  function showClaim() {
+    $('app').hidden = true; $('login').hidden = true; $('claim').hidden = false;
+    $('claimErr').textContent = '';
+    setTimeout(function () { $('claimPw').focus(); }, 0);
+  }
+  function claim(ev) {
+    ev.preventDefault();
+    var pw = $('claimPw').value, again = $('claimPw2').value, err = $('claimErr'), btn = $('claimBtn');
+    err.textContent = '';
+    var problem = PBBox.pure.passwordProblem('', pw, again);
+    if (problem === 'boxPwShort') { err.textContent = t('claimShort'); $('claimPw').focus(); return; }
+    if (problem === 'boxPwMismatch') { err.textContent = t('claimMismatch'); $('claimPw2').focus(); return; }
+    btn.disabled = true; btn.textContent = t('claimBusy');
+    var finish = function () { btn.disabled = false; btn.textContent = t('claimBtn'); };
+    var saved = false;
+    call('PATCH', '/api/config', { config: { webserver: { api: { password: pw } } } }, { noSid: true, quiet401: true })
+      .then(function () {
+        saved = true;
+        // Pi-hole may be busy applying the change for a moment: signing in is tried a few times before giving up.
+        var attempt = function (left) {
+          return call('POST', '/api/auth', { password: pw }, { noSid: true, quiet401: true }).catch(function (e) {
+            if (left > 1 && (!e.status || e.status >= 500)) return new Promise(function (res) { setTimeout(res, 1200); }).then(function () { return attempt(left - 1); });
+            throw e;
+          });
+        };
+        return attempt(4);
+      })
+      .then(function (j) {
+        $('claimPw').value = ''; $('claimPw2').value = '';
+        sid = (j.session && j.session.sid) || ''; safeSet(sessionStorage, SID_KEY, sid);
+        finish();
+        return start();
+      }, function (e) {
+        finish();
+        if (saved) { $('claimPw').value = ''; $('claimPw2').value = ''; showLogin(t('claimSignIn')); return; }   // the password exists: only signing in failed
+        err.textContent = t('claimFail', { e: e && e.message ? e.message : String(e) });
+      });
+  }
+
   function login(ev) {
     ev.preventDefault();
     var pw = $('pw').value, code = $('totp').value.trim();
-    var btn = $('loginBtn'); $('loginErr').textContent = '';
+    var btn = $('loginBtn'); $('loginErr').textContent = ''; $('loginNote').hidden = true;
     if (!pw) { $('pw').focus(); return; }
     btn.disabled = true;
     var body = { password: pw };
@@ -448,7 +616,7 @@
   // Pi-hole (FTL) picks a client's groups from the client rows whose IP or subnet contains the
   // address a query comes from (longest prefix wins, highest id on a tie) and only then looks at
   // the device's MAC row. So an IP or subnet row silently overrides a child's MAC row.
-  // Same logic as shadowing_rows() in bin/pihole-bahrain.
+  // Same logic as shadowing_rows() in bin/sinko.
   function parseIpv4(s) {
     var m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s);
     if (!m) return null;
@@ -533,25 +701,8 @@
   }
 
   // ------------------------------------------------------------------ model
-  function parseState(raw) {
-    var s = JSON.parse(JSON.stringify(DEFAULT_STATE)), d = {};
-    try { d = raw ? JSON.parse(raw) : {}; } catch (e) { d = {}; }
-    if (!d || typeof d !== 'object') d = {};
-    var tm = d.timer;
-    if (tm && (tm.mode === 'free' || tm.mode === 'block') && typeof tm.until === 'number') {
-      var snap = tm.snapshot || {};
-      s.timer = { mode: tm.mode, until: tm.until, snapshot: { services: snap.services || {}, offline: !!snap.offline } };
-    }
-    if (d.schedule && typeof d.schedule === 'object') {
-      var sc = d.schedule;
-      s.schedule.enabled = !!sc.enabled;
-      if (/^\d\d:\d\d$/.test(sc.start || '')) s.schedule.start = sc.start;
-      if (/^\d\d:\d\d$/.test(sc.end || '')) s.schedule.end = sc.end;
-      if (Array.isArray(sc.days)) s.schedule.days = sc.days.filter(function (x) { return x >= 0 && x <= 6; });
-    }
-    s.scheduleActive = !!d.scheduleActive;
-    return s;
-  }
+  // The shared state is normalised by PBCore.parseState (pb-core.js), with the same rules as the scheduler.
+  var parseState = PBCore.parseState;
 
   function load() {
     return Promise.all([
@@ -562,7 +713,8 @@
       catalog ? Promise.resolve(catalog) : fetch('/pb/services.json', { cache: 'no-store' }).then(function (r) { return r.json(); }),
       // A missing file (an older install) is cached as "no names"; a failed fetch is retried on the next load.
       domainMap ? Promise.resolve(domainMap) : fetch('/pb/domains.json', { cache: 'no-store' }).then(function (r) { return r.status === 404 ? { domains: {} } : r.ok ? r.json() : null; })
-        .then(function (j) { return j && j.domains && typeof j.domains === 'object' ? j.domains : null; }).catch(function () { return null; })
+        .then(function (j) { return j && j.domains && typeof j.domains === 'object' ? j.domains : null; }).catch(function () { return null; }),
+      loadBoxInfo()
     ]).then(function (r) {
       catalog = r[4]; domainMap = r[5] || domainMap;
       var byName = {};
@@ -613,13 +765,12 @@
   }
   function writeState(mutator) {
     // Re-read first so we never overwrite a change the Pi service just made.
+    // PBCore.editState keeps every field the mutator does not touch, including the ones only the scheduler writes.
     return call('GET', '/api/groups/' + q(G.state)).then(function (j) {
       var g = (j.groups || [])[0] || M.groups[G.state];
-      var st = parseState(g.comment);
-      mutator(st);
-      var comment = JSON.stringify(st);
-      return call('PUT', '/api/groups/' + q(G.state), { name: G.state, comment: comment, enabled: false })
-        .then(function () { M.groups[G.state].comment = comment; M.state = st; });
+      var next = PBCore.editState(g.comment, mutator);
+      return call('PUT', '/api/groups/' + q(G.state), { name: G.state, comment: next.json, enabled: false })
+        .then(function () { M.groups[G.state].comment = next.json; M.state = next.state; });
     });
   }
   // Apply a full rule set. Only groups that actually change are written.
@@ -845,14 +996,98 @@
   // ------------------------------------------------------------------ render
   function banner(msg) { var b = $('banner'); b.hidden = !msg; b.textContent = msg || ''; }
 
+  // The banner for a newer Sinko (or an update that is running or failed): opens My box, where the update is done.
+  function renderUpdateBanner() {
+    var b = $('updateBanner');
+    PBBox.sweep(M.state);                       // an update request nobody picks up is withdrawn after a while (see pb-box.js)
+    var view = PBBox.pure.updateView(M.state, { now: serverNowSec(), current: pageVersion });
+    var text = '';
+    if (view.phase === 'available') text = t('updateReady', { v: view.latest });
+    else if (view.phase === 'starting' || view.phase === 'running') text = t('updateRunning');
+    else if (view.phase === 'failed' && view.latest) text = t('updateFailed');
+    b.hidden = !text; b.textContent = text;
+    b.setAttribute('data-phase', view.phase);
+  }
+
+  // ---- the setup list: shown until it is dismissed or every step is done
+  function routerPointsHere() {
+    // A device other than the parent's own phone (and other than the box itself) has asked the box something: the router sends devices here.
+    var now = serverNowSec();
+    return M.devices.some(function (d) {
+      if (!d.lastQuery || now - d.lastQuery > 7 * 86400) return false;
+      var ips = (d.ips || []).map(function (i) { return i.ip; });
+      if (M.myIp && ips.indexOf(M.myIp) >= 0) return false;
+      return !ips.some(function (ip) { return ip === '127.0.0.1' || ip === '::1' || ip === location.hostname; });
+    });
+  }
+  var setupSig = '', setupSaving = false, setupWasShown = false;
+  function renderSetup() {
+    var card = $('setup'), s = M.state;
+    var items = [
+      { id: 'pw', done: true, title: t('setupPw') },
+      { id: 'router', done: routerPointsHere(), title: t('setupRouter'), how: t('setupRouterHow'), btn: t('setupRouterBtn'), act: 'setupHelp' },
+      { id: 'child', done: M.kids.length > 0, title: t('setupChild'), how: t('setupChildHow'), btn: t('addDevice'), act: 'openAdd' }
+    ];
+    // The counter question is asked only when the box says a counter address is configured (box.json): a promise nothing keeps is worse than
+    // silence. A box with no box.json (an older one) does not ask.
+    if (boxInfo && boxInfo.counter === true) {
+      items.push({ id: 'counter', done: s.telemetry.on !== null, title: t('setupCounterQ'), doneTitle: t('setupCounterDone'), how: t('setupCounterText') });
+    }
+    var doneCount = items.filter(function (i) { return i.done; }).length;
+    var all = doneCount === items.length;
+    if (all && !s.setup.done && !setupSaving) {
+      // Everything is ticked: remember it, so the list does not come back if the router changes later.
+      setupSaving = true;
+      writeState(function (st) { st.setup.done = true; }).then(function () { if (setupWasShown) toast(t('setupDoneToast')); }, function () {})
+        .then(function () { setupSaving = false; });
+    }
+    var hide = s.setup.done || all;
+    card.hidden = hide;
+    if (hide) { setupSig = ''; setupWasShown = false; return; }
+    setupWasShown = true;
+    var sig = lang + '|' + items.map(function (i) { return i.id + (i.done ? '1' : '0'); }).join('');
+    if (sig === setupSig) return;                     // the list is only rebuilt when it changed, so a button being pressed is not replaced
+    setupSig = sig;
+    $('setupProgress').textContent = t('setupProgress', { n: doneCount, t: items.length });
+    var ul = $('setupList'); ul.textContent = '';
+    items.forEach(function (i) {
+      var kids = [el('span', { class: 'setup-check', 'aria-hidden': 'true' }, [icon(i.done ? 'i-check' : 'i-dot')])];
+      var text = [el('span', { class: 'setup-title', text: i.done && i.doneTitle ? i.doneTitle : i.title }),
+        el('span', { class: 'sr-only', text: ' (' + t(i.done ? 'setupDone' : 'setupTodo') + ')' })];
+      var li = el('li', { class: 'setup-item' + (i.done ? ' is-done' : ''), 'data-item': i.id });
+      if (!i.done && i.how) text.push(el('span', { class: 'setup-how', text: i.how }));
+      var body = el('div', { class: 'setup-text' }, text);
+      if (!i.done && i.act) body.appendChild(el('div', { class: 'setup-actions' }, [el('button', { type: 'button', class: 'btn btn-small', 'data-act': i.act, text: i.btn })]));
+      if (!i.done && i.id === 'counter') {
+        body.appendChild(el('div', { class: 'setup-actions' }, [
+          el('button', { type: 'button', class: 'btn btn-small btn-primary', 'data-act': 'counterYes', text: t('setupYes') }),
+          el('button', { type: 'button', class: 'btn btn-small', 'data-act': 'counterNo', text: t('setupNotNow') })]));
+      }
+      li.appendChild(kids[0]); li.appendChild(body);
+      ul.appendChild(li);
+    });
+  }
+  function answerCounter(yes) {
+    run(function () { return writeState(function (st) { st.telemetry = { on: yes }; }); }, t(yes ? 'boxCounterOnToast' : 'setupLaterToast'));
+  }
+  function hideSetup() { run(function () { return writeState(function (st) { st.setup.done = true; }); }); }
+  function showSetupHelp() {
+    var h = $('help'); h.open = true;
+    if (h.scrollIntoView) h.scrollIntoView({ behavior: window.PBLive && PBLive.reducedMotion() ? 'auto' : 'smooth', block: 'center' });
+    $('help').querySelector('summary').focus({ preventScroll: true });
+  }
+
   function render() {
     if (!M) return;
     renderHero();
+    renderUpdateBanner();
+    renderSetup();
     renderServices();
     renderDevices();
     renderBedtime(false);
     var tm = M.state.timer;
-    banner(tm && tm.until < serverNowSec() - 90 ? t('schedulerDown') : '');
+    banner(schedulerSilent() ? t('schedulerDown') : '');
+    renderHelp();
     Array.prototype.forEach.call(document.querySelectorAll('.mode'), function (b) {
       var m = b.getAttribute('data-mode');
       b.classList.toggle('mode-on', !!(tm && m === tm.mode));
@@ -1026,7 +1261,8 @@
     Array.prototype.forEach.call(document.querySelectorAll('.lang-toggle'), function (n) {
       n.textContent = t('langSwitch'); n.setAttribute('lang', lang === 'ar' ? 'en' : 'ar');
     });
-    $('helpBody').textContent = t('helpBody', { ip: location.hostname });
+    renderHelp();
+    if (window.PBBox) PBBox.relang();
     if (M) { render(); renderBedtime(true); }
   }
 
@@ -1065,6 +1301,12 @@
       case 'pause': togglePause(n.getAttribute('data-client')); break;
       case 'remove': removeKid(n.getAttribute('data-client')); break;
       case 'saveBed': saveBedtime(); break;
+      case 'box': PBBox.open(); break;
+      case 'boxClose': closeDialog('boxDialog'); break;
+      case 'setupHelp': showSetupHelp(); break;
+      case 'counterYes': answerCounter(true); break;
+      case 'counterNo': answerCounter(false); break;
+      case 'setupHide': hideSetup(); break;
     }
   }
   function onChipClick(ev) {
@@ -1083,8 +1325,38 @@
   }
   function stopPolling() { clearInterval(pollTimer); clearInterval(tickTimer); }
 
+  // pb/version.txt is the version the box has installed now ('' when it cannot be read or is not a version).
+  function fetchInstalled() {
+    return fetch('/pb/version.txt', { cache: 'no-store' }).then(function (r) { return r.ok ? r.text() : ''; })
+      .then(function (v) { v = (v || '').trim(); return PBBox.pure.parseSemver(v) ? v : ''; }, function () { return ''; });   // a 404 page or garbage is not a version
+  }
+  // Pi-hole's web server lets a browser keep a page and its scripts for an hour, so a phone can be running a release that is gone from the box:
+  // one that stayed open through an update, or another phone's, or the night's automatic update. A page that was stamped by the installer knows
+  // what it is; when the box has another version it reloads itself (a reload fetches the page afresh, and every script and style is addressed by the
+  // new version). Not while an update runs (the files are being replaced), not twice for one version, and only where a tab can remember it.
+  function checkStale() {
+    if (!pageStamp || staleReloading) return Promise.resolve(false);
+    if (M && M.state.update.status === 'running') return Promise.resolve(false);
+    return fetchInstalled().then(function (v) {
+      var target = PBBox.pure.staleTarget(pageStamp, v, safeGet(sessionStorage, RELOADED_KEY));
+      if (!target || staleReloading) return false;
+      safeSet(sessionStorage, UPDATED_KEY, target);
+      if (safeGet(sessionStorage, UPDATED_KEY) !== target) return false;                   // no memory in this tab (private mode): never risk a loop
+      staleReloading = true;
+      location.reload();
+      return true;
+    });
+  }
+  // Coming back to the page: look at the version, but not while something is open or being typed, and not more than once a minute.
+  function checkStaleLater() {
+    var now = Date.now();
+    if (now - staleCheckedAt < PBBox.timing.staleEvery || $('app').hidden || document.querySelector('dialog[open]') || bedDirty || busy) return;
+    staleCheckedAt = now;
+    checkStale().catch(function () {});
+  }
+
   function start() {
-    return load().then(function () { showApp(); startPolling(); })
+    return load().then(function () { showApp(); startPolling(); staleCheckedAt = Date.now(); checkStale(); })
       .catch(function (e) {
         if (e && e.status === 401) return;
         showApp(); banner(e && e.message ? e.message : t('noConnection'));
@@ -1093,11 +1365,40 @@
 
   function boot() {
     applyLang();
-    fetch('/pb/version.txt', { cache: 'no-store' }).then(function (r) { return r.ok ? r.text() : ''; })
-      .then(function (v) { $('version').textContent = v ? 'v' + v.trim() : ''; }).catch(function () {});
+    var meta = document.querySelector('meta[name="sinko-version"]');
+    pageStamp = PBBox.pure.pageStamp(meta && meta.getAttribute('content'));
+    if (pageStamp) {
+      pageVersion = pageStamp;                                  // the page says what it is: the box's version file may already be newer
+      $('version').textContent = 'v' + pageVersion;
+    } else {
+      fetchInstalled().then(function (v) {                      // development or a copy that was not stamped: the box's own version is the best there is
+        pageVersion = v;
+        $('version').textContent = pageVersion ? 'v' + pageVersion : '';
+        if (M) renderUpdateBanner();
+      }).catch(function () {});
+    }
+    PBBox.init({
+      t: t, el: el, icon: icon, lang: function () { return lang; }, locale: locale, fmtTime: fmtTime,
+      formatCount: function (n) { return PBCore.formatCount(n, locale()); },
+      call: call, model: function () { return M; }, state: function () { return M ? M.state : null; },
+      writeState: writeState, reload: load, openDialog: openDialog, closeDialog: closeDialog, confirm: confirmBox, toast: toast,
+      endSession: endSession, serverNowSec: serverNowSec, clockOffsetMs: function () { return serverOffsetMs; },
+      version: function () { return pageVersion; },
+      boxInfo: function () { return boxInfo; }, refreshBoxInfo: loadBoxInfo,
+      rememberUpdate: function (v) { safeSet(sessionStorage, UPDATED_KEY, v); },
+      reloadedFor: function () { return safeGet(sessionStorage, RELOADED_KEY) || ''; }
+    });
+    var updated = safeGet(sessionStorage, UPDATED_KEY);        // the page just reloaded itself after an update
+    if (updated) {
+      safeSet(sessionStorage, UPDATED_KEY, null);
+      safeSet(sessionStorage, RELOADED_KEY, updated);            // remembered for this tab: see checkStale
+      // Said only when the page really is that version now (an unstamped page cannot tell): a reload that brought the same old page back says nothing.
+      if (!pageStamp || pageStamp === updated) setTimeout(function () { toast(t('boxUpdatedToast', { v: updated })); }, 700);
+    }
     document.addEventListener('click', onClick);
     $('timerChips').addEventListener('click', onChipClick);
     $('loginForm').addEventListener('submit', login);
+    $('claimForm').addEventListener('submit', claim);
     ['bedOn', 'bedStart', 'bedEnd', 'bedDays'].forEach(function (id) {
       $(id).addEventListener('change', function () { bedDirty = true; syncBedOn(); });
     });
@@ -1107,12 +1408,18 @@
       });
     });
     document.addEventListener('visibilitychange', function () {
-      if (document.visibilityState === 'visible' && !$('app').hidden && !busy) load().catch(function () {});
+      if (document.visibilityState === 'visible' && !$('app').hidden && !busy) load().catch(function () {}).then(checkStaleLater);
     });
-    probeAuth().then(function (valid) {
-      if (valid) return start();
-      if (sid) { sid = ''; safeSet(sessionStorage, SID_KEY, null); }
-      showLogin();
+    noPasswordSet().catch(function () { return false; }).then(function (open) {
+      if (open) {
+        // No password: offer to choose one when Sinko is on the box; otherwise carry on as before (the page explains what is missing).
+        return sinkoInstalled().then(function (installed) { return installed ? showClaim() : start(); });
+      }
+      return probeAuth().then(function (valid) {
+        if (valid) return start();
+        if (sid) { sid = ''; safeSet(sessionStorage, SID_KEY, null); }
+        showLogin();
+      });
     }).catch(function () { showLogin(); $('loginErr').textContent = t('noConnection'); });
   }
 

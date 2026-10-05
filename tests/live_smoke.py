@@ -25,7 +25,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--shots", default=None)
 args = ap.parse_args()
 
-loader = importlib.machinery.SourceFileLoader("pb", os.path.join(ROOT, "bin", "pihole-bahrain"))
+loader = importlib.machinery.SourceFileLoader("pb", os.path.join(ROOT, "bin", "sinko"))
 spec = importlib.util.spec_from_loader("pb", loader)
 pb = importlib.util.module_from_spec(spec)
 loader.exec_module(pb)
@@ -60,6 +60,9 @@ def make_site(live=False, blocked=("youtube", "tiktok"), privacy=0, history=True
     if live:
         mock_pihole.start_live(store)
     store.privacy = privacy
+    # These tests are about the picture, which only moves while it is on screen: the first-run checklist (tests/box_smoke.py) is dismissed,
+    # so it does not push the picture below the fold of the 390x844 phone.
+    store.edit_state(lambda st: st.setdefault("setup", {}).update({"done": True}))
     return "http://127.0.0.1:%d/" % httpd.server_port, store
 
 
@@ -81,6 +84,7 @@ def open_page(browser, url, **opts):
 def shot(page, name, full=False):
     if args.shots:
         os.makedirs(args.shots, exist_ok=True)
+        page.evaluate("() => Promise.all(document.getAnimations().filter(a => { const t = a.effect && a.effect.getComputedTiming(); return t && isFinite(t.endTime); }).map(a => a.finished.catch(() => {})))")   # a sheet still sliding in is see-through
         page.screenshot(path=os.path.join(args.shots, name), full_page=full)
 
 
@@ -228,7 +232,11 @@ with sync_playwright() as p:
     expect(len(set(texts)) == 4, "each step has its own words")
     expect(page.locator(".node-dev .node-name").all_inner_texts() == ["Example phone", "Everyone else"], "examples come from an example phone, never from a real child: %s" % page.locator(".node-dev .node-name").all_inner_texts())
     shot(page, "live-tour.png")
-    expect((page.inner_text("#statChecked"), page.inner_text("#statStopped"), page.inner_text("#statShare")) == n0, "the tour changed no number")
+    n1 = (page.inner_text("#statChecked"), page.inner_text("#statStopped"), page.inner_text("#statShare"))
+    # The numbers cover the last 24 hours, so the seeded history rolls out of the window while the test runs: a number may go DOWN by a
+    # query or two. What an example must never do is push one UP.
+    c0, c1, s0, s1, p0, p1 = number(n0[0]), number(n1[0]), number(n0[1]), number(n1[1]), number(n0[2]), number(n1[2])
+    expect(0 <= c0 - c1 <= 3 and 0 <= s0 - s1 <= 3 and abs(p0 - p1) <= 0.3, "the tour added nothing to any number %s -> %s" % (n0, n1))
     page.click("#tourNext")                                # Done
     expect(page.locator("#liveTour").is_hidden(), "finishing the tour closes it")
     expect(page.evaluate("() => document.activeElement && document.activeElement.id") == "tourBtn", "and puts focus back on the button that opened it")

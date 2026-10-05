@@ -1,0 +1,19 @@
+[Unit]
+Description=Refresh Sinko block lists (pihole -g)
+After=pihole-FTL.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Pi-hole's gravity has no lock of its own: every run deletes and rebuilds one fixed temporary database and then moves it over
+# the live one, so two runs at the same time (this timer, an update's `sinko setup`, the scheduler's self-repair) leave a
+# gravity with lists missing or doubled that no check of Sinko's would notice. Every gravity run that Sinko starts takes the
+# same lock first, and waits its turn (half an hour at most: a run takes a few minutes; Type=oneshot has no start timeout).
+# The lock file is in Sinko's own state folder (root only), the one bin/sinko uses too (GRAVITY_LOCK there). Pi-hole's own
+# weekly run (its cron, Sundays) and the page's restore do not take it: that overlap can only be made unlikely by timing.
+ExecStart=/usr/bin/flock -w 1800 /var/lib/sinko/gravity.lock @PIHOLE@ -g
+# Makes the folder if it is not there (the installer and sinko.service make it too), so the lock file can be opened.
+StateDirectory=sinko
+StateDirectoryMode=0700
+Nice=10
+IOSchedulingClass=idle

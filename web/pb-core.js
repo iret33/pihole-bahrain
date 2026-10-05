@@ -5,6 +5,7 @@
  *   - follow /api/queries without repeating or missing anything, using the SERVER's clock
  *   - decide which queries are worth animating (a home makes many per second; the picture shows a few)
  *   - curve maths for the wires
+ *   - the shared state: parseState / defaultState (the same rules as the scheduler, see the contract test)
  *
  * Loaded by the page before pb-live.js, and by node for tests/pb-core.test.js. ES5 on purpose.
  */
@@ -325,7 +326,133 @@
     else done(true);
   };
 
+  // ------------------------------------------------------------------ the shared state
+  // The state lives in the description of the "pb-state" group and is written by TWO programs: this page and the scheduler
+  // (bin/sinko). Both normalise it with the same rules, and a value one of them does not know is lost on its next write.
+  // tests/fixtures/state-cases.json is the executable spec, run against bin/sinko's parse_state by tests/test_state_contract.py
+  // and against this function by tests/state-contract.test.js. Change one side and the other has to follow.
+  var SEMVER_RE = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/;
+  var NOTES_RE = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/releases(\/tag\/[A-Za-z0-9_.+-]+)?$/;
+  var UPDATE_STATUSES = ['idle', 'running', 'ok', 'failed'];
+  var POWER_ACTIONS = ['reboot', 'poweroff'];
+  var HHMM_RE = /^\d\d:\d\d$/;
+  // "Blank" for update.error: the same characters bin/sinko lists (neither language's own idea of whitespace decides).
+  var BLANK_RE = /^[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]*$/;
+
+  function defaultState() {
+    return {
+      v: 1, timer: null,
+      schedule: { enabled: false, start: '21:00', end: '06:00', days: [0, 1, 2, 3, 4, 5, 6] },
+      scheduleActive: false,
+      update: { auto: false, request: null, checkRequest: null, latest: null, notes: null, checked: 0, status: 'idle',
+        from: null, to: null, at: 0, error: null, rolledBack: null },
+      power: { request: null, action: null },
+      telemetry: { on: null },
+      community: null,
+      setup: { done: false }
+    };
+  }
+
+  function isDict(x) { return x !== null && typeof x === 'object' && !(x instanceof Array); }
+  function isNum(x) { return typeof x === 'number' && isFinite(x); }
+  function isCount(x) { return isNum(x) && x >= 0; }
+  /** Python's bool(): the scheduler normalises with it, so an empty list or object is false there. */
+  function truthy(x) {
+    if (x === null || x === undefined || x === false || x === 0 || x === '') return false;
+    if (x instanceof Array) return x.length > 0;
+    if (typeof x === 'object') return Object.keys(x).length > 0;
+    return true;
+  }
+  var ASTRAL = /[\uD800-\uDBFF][\uDC00-\uDFFF]/g;
+  /** Length in characters, not UTF-16 units (the scheduler counts characters). */
+  function charLength(s) { return s.replace(ASTRAL, 'x').length; }
+  function charSlice(s, n) {
+    if (charLength(s) <= n) return s;
+    var out = '', count = 0, i = 0, c;
+    while (count < n && i < s.length) {
+      c = s.charAt(i);
+      if (/[\uD800-\uDBFF]/.test(c) && i + 1 < s.length) { c += s.charAt(i + 1); i++; }
+      out += c; count++; i++;
+    }
+    return out;
+  }
+  /** A request marker the page writes (the time in ms) and the scheduler acts on once: a positive number or a string of 1-40 characters. */
+  function nonce(x) {
+    if (isNum(x) && x > 0) return x;
+    if (typeof x === 'string' && x.length > 0 && charLength(x) <= 40) return x;
+    return null;
+  }
+  function parseUpdate(raw) {
+    var out = defaultState().update;
+    if (!isDict(raw)) return out;
+    out.auto = raw.auto === true;
+    out.request = nonce(raw.request);
+    out.checkRequest = nonce(raw.checkRequest);
+    ['latest', 'from', 'to'].forEach(function (k) { out[k] = typeof raw[k] === 'string' && SEMVER_RE.test(raw[k]) ? raw[k] : null; });
+    out.notes = typeof raw.notes === 'string' && NOTES_RE.test(raw.notes) ? raw.notes : null;
+    ['checked', 'at'].forEach(function (k) { out[k] = isCount(raw[k]) ? raw[k] : 0; });
+    out.status = UPDATE_STATUSES.indexOf(raw.status) >= 0 ? raw.status : 'idle';
+    out.error = typeof raw.error === 'string' && !BLANK_RE.test(raw.error) ? charSlice(raw.error, 200) : null;
+    out.rolledBack = typeof raw.rolledBack === 'boolean' ? raw.rolledBack : null;
+    return out;
+  }
+  function parsePower(raw) {
+    var out = defaultState().power;
+    if (isDict(raw) && POWER_ACTIONS.indexOf(raw.action) >= 0) {
+      out.request = nonce(raw.request);
+      out.action = out.request === null ? null : raw.action;
+    }
+    return out;
+  }
+  function validHHMM(x) { return typeof x === 'string' && HHMM_RE.test(x) && +x.slice(0, 2) <= 23 && +x.slice(3) <= 59; }
+
+  /** Anything (the group description, "", garbage) -> a complete, valid state. Unknown keys are dropped. */
+  function parseState(raw) {
+    var s = defaultState(), d = null;
+    try { d = raw ? JSON.parse(raw) : null; } catch (e) { d = null; }
+    if (!isDict(d)) d = {};
+    var tm = d.timer;
+    if (isDict(tm) && (tm.mode === 'free' || tm.mode === 'block') && isNum(tm.until)) {
+      var snap = isDict(tm.snapshot) ? tm.snapshot : {}, services = {};
+      if (isDict(snap.services)) Object.keys(snap.services).forEach(function (k) { services[k] = truthy(snap.services[k]); });
+      s.timer = { mode: tm.mode, until: tm.until, snapshot: { services: services, offline: truthy(snap.offline) } };
+    }
+    if (isDict(d.schedule)) {
+      var sc = d.schedule;
+      s.schedule.enabled = truthy(sc.enabled);
+      if (validHHMM(sc.start)) s.schedule.start = sc.start;
+      if (validHHMM(sc.end)) s.schedule.end = sc.end;
+      if (sc.days instanceof Array) {
+        s.schedule.days = sc.days.filter(function (x, i, a) { return typeof x === 'number' && x % 1 === 0 && x >= 0 && x <= 6 && a.indexOf(x) === i; })
+          .sort(function (a, b) { return a - b; });
+      }
+    }
+    s.scheduleActive = truthy(d.scheduleActive);
+    s.update = parseUpdate(d.update);
+    s.power = parsePower(d.power);
+    if (isDict(d.telemetry) && typeof d.telemetry.on === 'boolean') s.telemetry = { on: d.telemetry.on };
+    if (isDict(d.community) && isCount(d.community.online) && isNum(d.community.at)) {
+      s.community = { online: Math.floor(d.community.online), at: d.community.at };
+    }
+    if (isDict(d.setup)) s.setup = { done: d.setup.done === true };
+    return s;
+  }
+
+  /**
+   * One read-modify-write of the stored description: parse what is stored NOW (never a copy the page kept earlier, the scheduler
+   * may have written since), let `mutate(state)` change only what this write is about, normalise again so nothing the schema
+   * does not allow can be stored, and return { state, json }. Every field `mutate` does not touch survives, which is the whole
+   * point: both programs write the same description, and a field one of them forgets is wiped for the other.
+   */
+  function editState(raw, mutate) {
+    var st = parseState(raw);
+    mutate(st);
+    st = parseState(JSON.stringify(st));
+    return { state: st, json: JSON.stringify(st) };
+  }
+
   var api = {
+    parseState: parseState, defaultState: defaultState, editState: editState,
     classify: classify, isHiddenDomain: isHiddenDomain, isHiddenClient: isHiddenClient, baseDomain: baseDomain, appFor: appFor,
     formatCount: formatCount, percent: percent, topByApp: topByApp, hourly: hourly, deviceState: deviceState, Feed: Feed, priority: priority, Pacer: Pacer, Poller: Poller,
     lerp: lerp, easeInOut: easeInOut, clamp01: clamp01, wire: wire, pointAt: pointAt,

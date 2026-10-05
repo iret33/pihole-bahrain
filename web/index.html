@@ -6,18 +6,27 @@
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#0F766E">
 <meta name="robots" content="noindex">
-<meta name="generator" content="pihole-bahrain">
-<title>Family Internet</title>
-<link rel="stylesheet" href="/pb/style.css">
+<meta name="generator" content="sinko">
+<!-- The installer (install.sh) replaces the version placeholder, here and in the six addresses below, with the release's version. Pi-hole's
+     web server lets a browser keep a file for an hour; a new version in the address is what makes a phone fetch the new scripts and styles
+     after an update. In development (the mock, a plain file server) the placeholder stays: the query string is ignored and the page knows
+     it is unstamped (see pageStamp in app.js). -->
+<meta name="sinko-version" content="@VERSION@">
+<title>Sinko</title>
+<link rel="icon" href="/pb/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/pb/apple-touch-icon.png">
+<link rel="stylesheet" href="/pb/style.css?v=@VERSION@">
 <link rel="manifest" href="/pb/manifest.json">
-<script src="/pb/pb-core.js" defer></script>
-<script src="/pb/pb-live.js" defer></script>
-<script src="/pb/pb-picture.js" defer></script>
-<script src="/pb/app.js" defer></script>
+<script src="/pb/pb-core.js?v=@VERSION@" defer></script>
+<script src="/pb/pb-live.js?v=@VERSION@" defer></script>
+<script src="/pb/pb-picture.js?v=@VERSION@" defer></script>
+<script src="/pb/pb-box.js?v=@VERSION@" defer></script>
+<script src="/pb/app.js?v=@VERSION@" defer></script>
 </head>
 <body>
 
 <svg width="0" height="0" class="sprite" aria-hidden="true">
+  <symbol id="i-sinko" viewBox="0 0 24 24"><path d="M11.41 8.8A0.86 0.86 0 0 1 12.59 8.8L18.58 14.33A0.86 0.86 0 0 1 18.86 14.97L18.86 21.19A0.86 0.86 0 0 1 17.99 22.06L13.5 22.06V19.81a1.5 1.5 0 0 0 -3 0V22.06L6.01 22.06A0.86 0.86 0 0 1 5.14 21.19L5.14 14.97A0.86 0.86 0 0 1 5.42 14.33z" fill="currentColor"/><path d="M9.52 6.86A3.57 3.57 0 0 1 14.48 6.86M7.88 4.17A6.69 6.69 0 0 1 16.12 4.17" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
   <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11.5 12 5l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5h-5v5H5a1 1 0 0 1-1-1z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
   <symbol id="i-moon" viewBox="0 0 24 24"><path d="M19.5 14.6A7.5 7.5 0 0 1 9.4 4.5a7.5 7.5 0 1 0 10.1 10.1z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
   <symbol id="i-book" viewBox="0 0 24 24"><path d="M5 5.5A1.5 1.5 0 0 1 6.5 4H19v14H6.5A1.5 1.5 0 0 0 5 19.5zm0 14A1.5 1.5 0 0 0 6.5 21H19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
@@ -33,13 +42,24 @@
   <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   <symbol id="i-moon-sm" viewBox="0 0 24 24"><path d="M19.5 14.6A7.5 7.5 0 0 1 9.4 4.5a7.5 7.5 0 1 0 10.1 10.1z" fill="currentColor"/></symbol>
   <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-box" viewBox="0 0 24 24"><path d="M12 3.6 4.6 7.6v8.8l7.4 4 7.4-4V7.6zM4.6 7.6l7.4 4 7.4-4M12 11.6v8.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M19 12a7 7 0 1 1-2.1-5M19 4.6V9h-4.4" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5.5 12.5 4.2 4.2 8.8-9.2" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-dot" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5.5" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 16.5v-8.6M8.2 11.6 12 7.9l3.8 3.7" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-external" viewBox="0 0 24 24"><path d="M13.5 5H19v5.5M19 5l-8 8M17 14.5V18a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="10" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
 </svg>
 
 <main id="login" class="login" hidden>
   <form id="loginForm" class="login-card" novalidate>
-    <span class="brand-mark"><svg><use href="#i-home"/></svg></span>
-    <h1 data-i18n="appName">Family Internet</h1>
+    <span class="brand-mark"><svg aria-hidden="true"><use href="#i-sinko"/></svg></span>
+    <div class="login-title">
+      <h1 data-i18n="appName">Sinko</h1>
+      <p class="tagline" data-i18n="tagline">Calm internet for the family</p>
+    </div>
     <p class="muted" data-i18n="loginHint">Sign in with the parent password chosen during setup.</p>
+    <p class="login-note" id="loginNote" role="status" hidden></p>
     <label class="field">
       <span data-i18n="password">Password</span>
       <input type="password" id="pw" autocomplete="current-password" required>
@@ -54,10 +74,35 @@
   </form>
 </main>
 
+<!-- First run: the box has Sinko but no password yet. Choosing one is the first thing a parent does. -->
+<main id="claim" class="login" hidden>
+  <form id="claimForm" class="login-card" novalidate>
+    <span class="brand-mark"><svg aria-hidden="true"><use href="#i-sinko"/></svg></span>
+    <div class="login-title">
+      <h1 data-i18n="claimTitle">Welcome to Sinko</h1>
+      <p class="tagline" data-i18n="tagline">Calm internet for the family</p>
+    </div>
+    <p class="muted" data-i18n="claimLead">Choose a parent password for this box. You will use it to sign in on this page.</p>
+    <p class="claim-why" data-i18n="claimWhy">Until you do, anyone on your Wi‑Fi can open this page and change the rules.</p>
+    <label class="field">
+      <span data-i18n="claimPw">Password (at least 8 characters)</span>
+      <input type="password" id="claimPw" autocomplete="new-password" minlength="8" required>
+    </label>
+    <label class="field">
+      <span data-i18n="claimPw2">Password again</span>
+      <input type="password" id="claimPw2" autocomplete="new-password" required>
+    </label>
+    <p class="form-error" id="claimErr" role="alert"></p>
+    <button type="submit" class="btn btn-primary btn-wide" id="claimBtn" data-i18n="claimBtn">Choose password and continue</button>
+    <button type="button" class="link lang-toggle" data-act="lang">العربية</button>
+  </form>
+</main>
+
 <div id="app" class="app" hidden>
   <header class="topbar">
-    <div class="brand"><span class="brand-mark"><svg><use href="#i-home"/></svg></span><span data-i18n="appName">Family Internet</span></div>
+    <div class="brand"><span class="brand-mark"><svg aria-hidden="true"><use href="#i-sinko"/></svg></span><span data-i18n="appName">Sinko</span></div>
     <div class="topbar-actions">
+      <button type="button" class="link topbar-box" data-act="box"><svg aria-hidden="true"><use href="#i-box"/></svg><span data-i18n="boxButton">My box</span></button>
       <button type="button" class="link lang-toggle" data-act="lang">العربية</button>
       <button type="button" class="link" data-act="logout" data-i18n="signOut">Sign out</button>
     </div>
@@ -76,6 +121,19 @@
   </section>
 
   <p class="banner" id="banner" role="status" hidden></p>
+  <button type="button" class="update-banner" id="updateBanner" data-act="box" hidden></button>
+
+  <!-- The setup list: shown until it is dismissed or every step is done (see renderSetup in app.js). -->
+  <section class="block setup" id="setup" aria-labelledby="setupTitle" hidden>
+    <div class="setup-card">
+      <div class="setup-head">
+        <h2 id="setupTitle" data-i18n="setupTitle">Get started</h2>
+        <p class="setup-progress" id="setupProgress"></p>
+      </div>
+      <ol class="setup-list" id="setupList"></ol>
+      <button type="button" class="link" data-act="setupHide" data-i18n="setupHide">Hide this list</button>
+    </div>
+  </section>
 
   <!-- The live picture: how the home's requests flow through the family box. Built and animated by pb-picture.js. -->
   <section class="block live" id="live" aria-labelledby="liveTitle" hidden>
@@ -214,8 +272,11 @@
   </details>
 
   <footer class="foot">
-    <a href="/admin/" data-i18n="advanced">Advanced settings</a>
-    <span id="version"></span>
+    <span class="foot-links">
+      <button type="button" class="link" data-act="box" data-i18n="boxButton">My box</button>
+      <a href="/admin/" data-i18n="advanced">Advanced settings</a>
+    </span>
+    <span id="version" dir="ltr"></span>
   </footer>
   </div>
   </div>
@@ -282,6 +343,18 @@
     </div>
     <div id="sheetBody" class="sheet-scroll"></div>
   </form>
+</dialog>
+
+<!-- My box: built by pb-box.js when it is first opened. -->
+<dialog id="boxDialog" class="sheet sheet-tall sheet-box" aria-labelledby="boxTitle">
+  <div class="sheet-body">
+    <div class="sheet-head">
+      <h2 id="boxTitle" tabindex="-1" data-i18n="boxTitle">My box</h2>
+      <button type="button" class="icon-btn" data-act="boxClose"><svg aria-hidden="true"><use href="#i-close"/></svg><span class="sr-only" data-i18n="close">Close</span></button>
+    </div>
+    <div id="boxBody" class="sheet-scroll"></div>
+  </div>
+  <div id="boxToast" class="toast" role="status" aria-live="polite"></div>
 </dialog>
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>

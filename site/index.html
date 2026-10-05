@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title data-i18n="docTitle">Sinko · Calm internet for the family</title>
+<meta name="description" content="Sinko is free parental-controls software for a small box at home, in Arabic and English. Block apps in one tap, set homework time and bedtime, and see what the box is doing." data-i18n-attr="content:metaDescription">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#F1F4F2" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0E1615" media="(prefers-color-scheme: dark)">
+<!-- The placeholder in these three addresses is replaced at deploy time (site/assemble.sh): crawlers do not run
+     JavaScript, so they must be absolute addresses in the file itself. -->
+<link rel="canonical" href="__SITE_URL__/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Sinko">
+<meta property="og:title" content="Sinko · Calm internet for the family">
+<meta property="og:description" content="Sinko is free parental-controls software for a small box at home, in Arabic and English. Block apps in one tap, set homework time and bedtime, and see what the box is doing.">
+<meta property="og:url" content="__SITE_URL__/">
+<meta property="og:image" content="__SITE_URL__/img/social-preview.png">
+<meta property="og:image:alt" content="The Sinko page on a phone: the home screen, with the rules working">
+<meta property="og:locale" content="en_US">
+<meta property="og:locale:alternate" content="ar_AR">
+<meta name="twitter:card" content="summary_large_image">
+<!-- Sets the language and direction before the first paint, so an Arabic visitor never sees the page flip.
+     Order: ?lang=ar|en in the address, then the saved choice, then the browser's language. app.js does the rest. -->
+<script id="lang-boot">
+(function () {
+  var lang = '';
+  try { lang = new URLSearchParams(location.search).get('lang') || ''; } catch (e) {}
+  if (lang !== 'ar' && lang !== 'en') {
+    try { lang = localStorage.getItem('sinko-lang') || ''; } catch (e) { lang = ''; }
+  }
+  if (lang !== 'ar' && lang !== 'en') {
+    var langs = navigator.languages && navigator.languages.length ? navigator.languages : [navigator.language || ''];
+    lang = /^ar(-|$)/i.test(String(langs[0])) ? 'ar' : 'en';
+  }
+  document.documentElement.lang = lang;
+  document.documentElement.dir = lang === 'ar' ? 'rtl' : 'ltr';
+  // The hero picture has no src of its own (app.js gives it the one for the language). Start fetching the right one
+  // now, so that an Arabic visitor never downloads the English one first.
+  var pre = document.createElement('link');
+  pre.rel = 'preload';
+  pre.as = 'image';
+  pre.href = 'img/panel-' + lang + '.png';
+  document.head.appendChild(pre);
+})();
+</script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main" data-i18n="skip">Skip to the content</a>
+
+<header class="top">
+  <div class="wrap top-in">
+    <a class="brand" href="#top" aria-label="Sinko">
+      <img src="icon.svg" alt="" width="36" height="36">
+      <span class="brand-name"><span lang="en">Sinko</span> <span lang="ar">سينكو</span></span>
+    </a>
+    <nav class="nav" aria-label="Main" data-i18n-attr="aria-label:navLabel">
+      <a href="#how" data-i18n="navHow">How it works</a>
+      <a href="#features" data-i18n="navFeatures">Features</a>
+      <a href="#get" data-i18n="navGet">Get Sinko</a>
+      <a href="#faq" data-i18n="navFaq">Questions</a>
+    </nav>
+    <button class="lang" id="langBtn" type="button" aria-label="Switch to Arabic" data-i18n-attr="aria-label:langSwitchLabel"><span id="langText" lang="ar" data-i18n="langSwitch">العربية</span></button>
+  </div>
+</header>
+
+<main id="main">
+  <section class="hero" id="top">
+    <div class="wrap hero-in">
+      <div class="hero-copy">
+        <p class="badge" data-i18n="heroBadge">Free software · Arabic and English</p>
+        <h1 class="name"><span lang="en">Sinko</span><span lang="ar">سينكو</span></h1>
+        <p class="tagline" data-i18n="heroTagline">Calm internet for the family</p>
+        <p class="lead" data-i18n="heroLead">Sinko is a free parental-controls page for a small box in your home. Block apps in one tap, set homework time and bedtime, and see what the box is doing, in Arabic or English.</p>
+        <div class="cta">
+          <a class="btn btn-primary" href="#get" data-i18n="heroCtaGet">Get Sinko</a>
+          <a class="btn btn-ghost" href="#how" data-i18n="heroCtaHow">See how it works</a>
+        </div>
+      </div>
+      <figure class="hero-shot">
+        <div class="frame"><img data-shot="panel" width="780" height="1688" fetchpriority="high" alt="The Sinko page on a phone: the home screen, with the rules working" data-i18n-attr="alt:heroImgAlt"><noscript><img src="img/panel-en.png" width="780" height="1688" alt="The Sinko page on a phone: the home screen, with the rules working"></noscript></div>
+      </figure>
+    </div>
+  </section>
+
+  <!-- Hidden until real numbers arrive from the counter or GitHub. A failure leaves it hidden, quietly. -->
+  <section class="counts" id="counts" aria-label="Sinko in numbers" data-i18n-attr="aria-label:countsLabel" hidden>
+    <div class="wrap">
+      <div class="counts-card">
+        <div class="stats">
+          <p class="stat" id="statOnline" hidden><strong class="num" id="numOnline"></strong><span data-i18n="countOnline">boxes online now</span></p>
+          <p class="stat" id="statDownloads" hidden><strong class="num" id="numDownloads"></strong><span data-i18n="countDownloads">downloads</span></p>
+        </div>
+        <p class="counts-note" id="countsNote"><span data-i18n="countsNote">A box is counted only when its family switches the counter on. Only a random code, the version, the kind of box, the country and when it was first and last heard from are kept.</span> <a data-privacy-link href="https://github.com/iret33/sinko/blob/master/docs/privacy.md" data-i18n="countsPrivacy">How the counter works</a></p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="how" aria-labelledby="howTitle">
+    <div class="wrap">
+      <h2 id="howTitle" data-i18n="howTitle">How it works</h2>
+      <ol class="steps3">
+        <li class="card">
+          <span class="step-no" aria-hidden="true">1</span>
+          <h3 data-i18n="how1Title">Plug in the family box</h3>
+          <p data-i18n="how1Text">A small box connects to your router with a network cable. A ready-made box is already set up. If you build your own, one command does it.</p>
+        </li>
+        <li class="card">
+          <span class="step-no" aria-hidden="true">2</span>
+          <h3 data-i18n="how2Title">Point your router at the box</h3>
+          <p data-i18n="how2Text">One setting in the router, and every phone and tablet at home asks the box first.</p>
+        </li>
+        <li class="card">
+          <span class="step-no" aria-hidden="true">3</span>
+          <h3 data-i18n="how3Title">Open the page on your phone</h3>
+          <p data-i18n="how3Text">Block apps, set homework time and bedtime, and watch what is happening, from any phone on your home Wi‑Fi.</p>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="section tint" id="features" aria-labelledby="featTitle">
+    <div class="wrap">
+      <h2 id="featTitle" data-i18n="featTitle">What you can do</h2>
+      <ul class="grid">
+        <li class="card feat">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg>
+          <h3 data-i18n="f1Title">Block apps in one tap</h3>
+          <p data-i18n="f1Text">YouTube, TikTok, Roblox, Snapchat and many more. Tap an app to block it, tap again to allow it.</p>
+        </li>
+        <li class="card feat">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6.5C10.3 5.3 8 4.5 4.5 4.5v13c3.5 0 5.8.8 7.5 2 1.7-1.2 4-2 7.5-2v-13c-3.5 0-5.8.8-7.5 2z"/><path d="M12 6.5v13"/></svg>
+          <h3 data-i18n="f2Title">Homework mode</h3>
+          <p data-i18n="f2Text">Games, video and social media off in one tap, with a timer. Free time and offline breaks too.</p>
+        </li>
+        <li class="card feat">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>
+          <h3 data-i18n="f3Title">Bedtime</h3>
+          <p data-i18n="f3Text">The internet turns off for the children’s devices at night and back on in the morning, even when the page is closed.</p>
+        </li>
+        <li class="card feat">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>
+          <h3 data-i18n="f4Title">The live picture</h3>
+          <p data-i18n="f4Text">See what the box is doing, in words a parent can follow: who is asking, what is allowed and what is stopped.</p>
+        </li>
+        <li class="card feat">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5"/><path d="M5.5 11.5L12 5l6.5 6.5"/></svg>
+          <h3 data-i18n="f5Title">Updates from the page</h3>
+          <p data-i18n="f5Text">One tap to update. The box checks that the new version works, and goes back by itself if it does not.</p>
+        </li>
+        <li class="card feat">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18"/><path d="M12 3a14 14 0 0 0 0 18"/></svg>
+          <h3 data-i18n="f6Title">Arabic and English</h3>
+          <p data-i18n="f6Text">The whole page follows your language, right to left or left to right. Switch whenever you like.</p>
+        </li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="section" id="get" aria-labelledby="getTitle">
+    <div class="wrap">
+      <h2 id="getTitle" data-i18n="getTitle">Two ways to get Sinko</h2>
+      <p class="section-lead" data-i18n="getLead">Sinko is free software. Build your own box, or get one that is ready to plug in.</p>
+      <div class="two">
+        <article class="card get">
+          <h3 data-i18n="ownTitle">Build your own</h3>
+          <p data-i18n="ownText">For anyone with an Orange Pi Zero 3 or another small Debian computer. It takes about 20 minutes.</p>
+          <ol class="own-steps">
+            <li data-i18n="own1">Put Armbian minimal (Debian Trixie) for the Orange Pi Zero 3 on a microSD card of 8 GB or more.</li>
+            <li data-i18n="own2">Connect the network cable and the power, log in over SSH and choose a strong password for the box.</li>
+            <li data-i18n="own3">Run this one line and answer the questions:</li>
+          </ol>
+          <div class="cmd">
+            <code id="installCmd" dir="ltr">curl --proto '=https' --proto-redir '=https' -fsSL https://github.com/iret33/sinko/releases/latest/download/install.sh | sudo bash</code>
+            <button class="btn btn-small" id="copyBtn" type="button" data-i18n="ownCopy">Copy</button>
+          </div>
+          <p class="sr-only" id="copyStatus" role="status" aria-live="polite"></p>
+          <p class="note" data-i18n="ownNote">Use the network cable rather than Wi‑Fi, and avoid the 1.5 GB model.</p>
+          <p><a class="more" data-readme-link href="https://github.com/iret33/sinko#install" data-i18n="ownMore">Full instructions on GitHub</a></p>
+        </article>
+        <article class="card get get-ready">
+          <h3 data-i18n="readyTitle">Ready-made</h3>
+          <p data-i18n="readyText">A Sinko box that is already set up. Plug it in, open the page on your phone and choose your password. No computer skills needed.</p>
+          <a class="btn btn-primary" id="buyBtn" href="#get" hidden data-i18n="readyButton">Get a ready-made box</a>
+          <p class="note" id="readySoon" data-i18n="readySoon">Not on sale yet. Follow the project on GitHub for news.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- Hidden until app.js has found at least one picture: the screenshots are added to the repository later than the
+       site, and without JavaScript there is no way to know. -->
+  <section class="section tint" id="shots" aria-labelledby="shotsTitle" hidden>
+    <div class="wrap">
+      <h2 id="shotsTitle" data-i18n="shotsTitle">See it</h2>
+      <ul class="shots">
+        <li><figure class="shot"><div class="frame"><img src="img/panel-en.png" width="780" height="1688" loading="lazy" decoding="async" alt="The Sinko home page in English: the rules are working, with a picture of the devices and the family box" data-i18n-attr="alt:shotPanelEnAlt"></div><figcaption data-i18n="shotPanelEn">The home page, in English</figcaption></figure></li>
+        <li><figure class="shot"><div class="frame"><img src="img/panel-ar.png" width="780" height="1688" loading="lazy" decoding="async" alt="The Sinko home page in Arabic, laid out right to left" data-i18n-attr="alt:shotPanelArAlt"></div><figcaption data-i18n="shotPanelAr">The home page, in Arabic</figcaption></figure></li>
+        <li><figure class="shot"><div class="frame"><img src="img/live-en.png" width="716" height="2004" loading="lazy" decoding="async" alt="The live picture: each device on top, the family box in the middle and the internet below" data-i18n-attr="alt:shotLiveAlt"></div><figcaption data-i18n="shotLive">The live picture</figcaption></figure></li>
+        <li><figure class="shot"><div class="frame"><img src="img/box-en.png" width="780" height="3000" loading="lazy" decoding="async" alt="The My box sheet: update, health of the box, network, backup and the anonymous counter" data-i18n-attr="alt:shotBoxAlt"></div><figcaption data-i18n="shotBox">My box: updates, health and settings</figcaption></figure></li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="section" id="faq" aria-labelledby="faqTitle">
+    <div class="wrap narrow">
+      <h2 id="faqTitle" data-i18n="faqTitle">Questions</h2>
+      <details class="qa">
+        <summary data-i18n="q1">Does it work on mobile data or with a VPN?</summary>
+        <p data-i18n="a1">Only at home. Sinko works through your home Wi‑Fi, so a phone on mobile data or a VPN goes around the box. For outside the home, use it together with Screen Time on iPhone or Family Link on Android.</p>
+      </details>
+      <details class="qa">
+        <summary data-i18n="q2">What does Sinko know about us?</summary>
+        <p data-i18n="a2">Sinko keeps your family’s names, devices and rules on the box and never sends them to the project. Like any DNS filter, the box asks an upstream DNS service (Cloudflare for Families by default) to find the address of the sites it does not block, so that service sees those site names and your home’s internet address. There is one optional anonymous counter, and it is off until you say yes. It sends a random code, the version and the kind of box, and nothing else.</p>
+        <p><a class="more" data-privacy-link href="https://github.com/iret33/sinko/blob/master/docs/privacy.md" data-i18n="faqPrivacy">Read the privacy statement</a></p>
+      </details>
+      <details class="qa">
+        <summary data-i18n="q3">What does it cost?</summary>
+        <p data-i18n="a3">The software is free. To build your own you need the small computer, a microSD card and a power supply. Or get a box that is ready-made.</p>
+      </details>
+      <details class="qa">
+        <summary data-i18n="q4">How do I update it?</summary>
+        <p data-i18n="a4">Open My box on the page and tap Update now, or switch on automatic updates at night. The box checks that the new version works, and goes back by itself if it does not.</p>
+      </details>
+      <details class="qa">
+        <summary data-i18n="q5">How do I remove it?</summary>
+        <p data-i18n="a5">On a box you built yourself, run this command. It removes Sinko and its rules and keeps Pi-hole. A ready-made box has nothing to remove: unplug it. Then undo the router setting from step 2.</p>
+        <p><code class="inline" dir="ltr">sudo /opt/sinko/uninstall.sh</code></p>
+      </details>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <div class="wrap foot-in">
+    <p data-i18n="footLicence">Free software, licensed GPL-3.0-or-later.</p>
+    <p data-i18n="footTrademark">Pi-hole is a trademark of Pi-hole LLC. Sinko is independent software that works with it.</p>
+    <p class="foot-links">
+      <a data-repo-link href="https://github.com/iret33/sinko" data-i18n="footGitHub">GitHub</a>
+      <a data-privacy-link href="https://github.com/iret33/sinko/blob/master/docs/privacy.md" data-i18n="footPrivacy">Privacy</a>
+      <a id="supportLink" href="#" hidden data-i18n="footSupport">Support</a>
+    </p>
+  </div>
+</footer>
+
+<script src="config.js"></script>
+<script src="strings.js"></script>
+<script src="lib.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

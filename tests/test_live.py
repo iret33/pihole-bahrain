@@ -13,7 +13,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 LISTS = os.path.join(ROOT, "lists")
 
-loader = importlib.machinery.SourceFileLoader("pb", os.path.join(ROOT, "bin", "pihole-bahrain"))
+loader = importlib.machinery.SourceFileLoader("pb", os.path.join(ROOT, "bin", "sinko"))
 spec = importlib.util.spec_from_loader("pb", loader)
 pb = importlib.util.module_from_spec(spec)
 loader.exec_module(pb)

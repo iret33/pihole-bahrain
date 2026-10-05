@@ -1,5 +1,5 @@
 [Unit]
-Description=Nightly refresh of Family Internet block lists
+Description=Nightly refresh of Sinko block lists
 
 [Timer]
 OnCalendar=*-*-* 03:30

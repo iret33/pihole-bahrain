@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 screenshots/
 .DS_Store
+dist/
+_site/

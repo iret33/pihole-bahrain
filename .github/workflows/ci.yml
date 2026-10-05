@@ -1,40 +1,100 @@
 name: CI
 on:
   push:
+    branches: [master]
   pull_request:
+  workflow_call:          # the release workflow runs the same checks before it publishes anything
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  test:
+  unit:
+    name: Unit tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.11", "3.13"]     # Ubuntu 22.04 / Debian 12 / Debian 13 and Armbian
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4          # the copy test runs the page's strings through node
+        with:
+          node-version: "20"
+      - name: Core, scheduler, updater, lists, doctor, diagnose, copy, release build
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+  shell:
+    name: Shell lint and installer end to end
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - name: Unit tests (core, schedule, lists)
-        run: python -m unittest discover -s tests -p "test_*.py" -v
       - name: Shell lint
         run: |
           pip install shellcheck-py
-          shellcheck install.sh uninstall.sh tests/test_install.sh
-      - name: JavaScript syntax and logic tests
+          shopt -s nullglob
+          shellcheck install.sh uninstall.sh tools/*.sh tests/*.sh site/assemble.sh
+      - name: Installer, updates source, migration, image tools (stubbed system; needs root and ports 18080-18084, 18091)
+        run: sudo -E env "PATH=$PATH" bash tests/run_shell_tests.sh
+
+  web:
+    name: Page logic, counter service and site tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: JavaScript syntax
         run: |
-          for f in web/*.js; do node --check "$f"; done
-          node --test tests/pb-core.test.js
-      - name: Installer end-to-end (stubbed system)
-        run: sudo -E env "PATH=$PATH" bash tests/test_install.sh
-      - name: Browser test (Arabic/English, timers, devices)
+          for f in web/*.js site/*.js telemetry/src/*.js; do node --check "$f"; done
+      - name: Page logic
+        run: node --test tests/*.test.js
+      - name: Counter service (Cloudflare Worker)
+        run: node --test telemetry/test/*.test.js
+      - name: Project site
+        run: node --test site/test/*.test.mjs
+
+  browser:
+    name: Browser tests (English and Arabic)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install playwright && python -m playwright install --with-deps chromium
+      - name: Run the browser suites
         run: |
-          pip install playwright
-          python -m playwright install --with-deps chromium
-          python tests/ui_smoke.py --shots screenshots
-          python tests/stage_smoke.py
-          python tests/live_smoke.py --shots screenshots
+          mkdir -p screenshots
+          for t in ui_smoke stage_smoke live_smoke box_smoke; do
+            echo "::group::$t"; python tests/$t.py --shots screenshots; echo "::endgroup::"
+          done
+      - name: The real page against the real scheduler (the unit job has no browser and skips this file)
+        run: python -m unittest discover -s tests -p "test_page_scheduler.py" -v
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: screenshots
           path: screenshots
+
+  release-build:
+    name: Release archive builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash tools/build-release.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: dist

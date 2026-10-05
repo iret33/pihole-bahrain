@@ -1,0 +1,26 @@
+name: New app or site to block
+description: Ask for an app to be added to the list on the page
+labels: [lists]
+body:
+  - type: input
+    id: app
+    attributes:
+      label: App or site name
+    validations:
+      required: true
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options: [Social, Video, Games, Messaging, AI, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: domains
+    attributes:
+      label: Domains it uses, if you know them
+      description: Your own domains are best, not the platform underneath (for example not google.com).
+  - type: textarea
+    id: how
+    attributes:
+      label: How many families use it, and why it matters here

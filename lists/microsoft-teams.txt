@@ -1,4 +1,4 @@
-! Title: pihole-bahrain / microsoft-teams
+! Title: sinko / microsoft-teams
 ! Format: Adblock-style, one ||domain^ per line
 ||lync.cn^
 ||lync.com^

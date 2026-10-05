@@ -1,0 +1,3368 @@
+{
+ "comment": "Shared by tests/test_state_contract.py (bin/sinko parse_state) and tests/state-contract.test.js (web parseState): both must normalise every input to exactly this.",
+ "cases": [
+  {
+   "name": "empty string",
+   "input": "",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "not json",
+   "input": "{oops",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "json but not an object",
+   "input": "[1,2,3]",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "legacy state: only timer and schedule (2.x)",
+   "input": "{\"v\": 1, \"timer\": {\"mode\": \"free\", \"until\": 1800000000, \"snapshot\": {\"services\": {\"youtube\": true}, \"offline\": false}}, \"schedule\": {\"enabled\": true, \"start\": \"22:00\", \"end\": \"06:30\", \"days\": [0, 1, 2, 3, 4]}, \"scheduleActive\": true}",
+   "expected": {
+    "v": 1,
+    "timer": {
+     "mode": "free",
+     "until": 1800000000.0,
+     "snapshot": {
+      "services": {
+       "youtube": true
+      },
+      "offline": false
+     }
+    },
+    "schedule": {
+     "enabled": true,
+     "start": "22:00",
+     "end": "06:30",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4
+     ]
+    },
+    "scheduleActive": true,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "a complete valid update block",
+   "input": "{\"update\": {\"auto\": true, \"request\": 1800000001234, \"checkRequest\": \"abc\", \"latest\": \"3.1.0\", \"notes\": \"https://github.com/iret33/sinko/releases/tag/v3.1.0\", \"checked\": 1800000000, \"status\": \"running\", \"from\": \"3.0.0\", \"to\": \"3.1.0\", \"at\": 1800000100, \"error\": null}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": true,
+     "request": 1800000001234,
+     "checkRequest": "abc",
+     "latest": "3.1.0",
+     "notes": "https://github.com/iret33/sinko/releases/tag/v3.1.0",
+     "checked": 1800000000,
+     "status": "running",
+     "from": "3.0.0",
+     "to": "3.1.0",
+     "at": 1800000100,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "an update block full of bad values",
+   "input": "{\"update\": {\"auto\": \"yes\", \"request\": -5, \"checkRequest\": true, \"latest\": \"v3.0.0\", \"notes\": \"http://evil.example/releases\", \"checked\": -1, \"status\": \"hacked\", \"from\": \"3.0\", \"to\": \"3.0.0.1\", \"at\": \"now\", \"error\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "update.error is trimmed to 200 characters and blank errors are dropped",
+   "input": "{\"update\": {\"status\": \"failed\", \"error\": \"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "failed",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "blank error",
+   "input": "{\"update\": {\"status\": \"failed\", \"error\": \"   \"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "failed",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "release notes link: only github.com releases pages",
+   "input": "{\"update\": {\"notes\": \"https://github.com/iret33/sinko/releases\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": "https://github.com/iret33/sinko/releases",
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "release notes link with extra path is refused",
+   "input": "{\"update\": {\"notes\": \"https://github.com/iret33/sinko/releases/tag/v3.1.0/../../x\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "release notes link on another host is refused",
+   "input": "{\"update\": {\"notes\": \"https://github.com.evil.example/iret33/sinko/releases\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "a request marker may be a short string",
+   "input": "{\"update\": {\"request\": \"r-1\", \"checkRequest\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": "r-1",
+     "checkRequest": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "a request marker over 40 characters or equal to 0 is dropped",
+   "input": "{\"update\": {\"request\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\", \"checkRequest\": 0}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "power: a valid reboot request",
+   "input": "{\"power\": {\"request\": 1800000002000, \"action\": \"reboot\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": 1800000002000,
+     "action": "reboot"
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "power: poweroff",
+   "input": "{\"power\": {\"request\": \"p1\", \"action\": \"poweroff\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": "p1",
+     "action": "poweroff"
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "power: unknown action is dropped",
+   "input": "{\"power\": {\"request\": 1800000002000, \"action\": \"format\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "power: an action without a request is dropped",
+   "input": "{\"power\": {\"action\": \"reboot\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "telemetry answered yes",
+   "input": "{\"telemetry\": {\"on\": true}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": true
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "telemetry answered no",
+   "input": "{\"telemetry\": {\"on\": false}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": false
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "telemetry: only a real boolean counts",
+   "input": "{\"telemetry\": {\"on\": \"yes\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "community: valid",
+   "input": "{\"community\": {\"online\": 1234, \"at\": 1800000000}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": {
+     "online": 1234,
+     "at": 1800000000.0
+    },
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "community: a fractional count is floored",
+   "input": "{\"community\": {\"online\": 3.7, \"at\": 1800000000.5}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": {
+     "online": 3,
+     "at": 1800000000.5
+    },
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "community: negative count is refused",
+   "input": "{\"community\": {\"online\": -1, \"at\": 1800000000}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "community: text instead of numbers is refused",
+   "input": "{\"community\": {\"online\": \"12\", \"at\": \"now\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "setup done",
+   "input": "{\"setup\": {\"done\": true}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": true
+    }
+   }
+  },
+  {
+   "name": "setup: only a real true counts",
+   "input": "{\"setup\": {\"done\": \"true\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "unknown top-level keys are dropped",
+   "input": "{\"hello\": \"world\", \"update\": {\"auto\": true}, \"v\": 1}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": true,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "a NaN token makes the whole description garbage, as JSON.parse does",
+   "input": "{\"update\":{\"auto\":true},\"x\":NaN}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "an Infinity token makes the whole description garbage",
+   "input": "{\"timer\":{\"mode\":\"free\",\"until\":Infinity,\"snapshot\":{}}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "timer.snapshot.services as a list does not crash and is dropped",
+   "input": "{\"timer\": {\"mode\": \"block\", \"until\": 1800000000, \"snapshot\": {\"services\": [\"youtube\"], \"offline\": true}}}",
+   "expected": {
+    "v": 1,
+    "timer": {
+     "mode": "block",
+     "until": 1800000000.0,
+     "snapshot": {
+      "services": {},
+      "offline": true
+     }
+    },
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "timer.snapshot.services as text does not crash and is dropped",
+   "input": "{\"timer\": {\"mode\": \"block\", \"until\": 1800000000, \"snapshot\": {\"services\": \"youtube\"}}}",
+   "expected": {
+    "v": 1,
+    "timer": {
+     "mode": "block",
+     "until": 1800000000.0,
+     "snapshot": {
+      "services": {},
+      "offline": false
+     }
+    },
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "timer.snapshot as a list is treated as empty",
+   "input": "{\"timer\": {\"mode\": \"free\", \"until\": 1800000000, \"snapshot\": [\"x\"]}}",
+   "expected": {
+    "v": 1,
+    "timer": {
+     "mode": "free",
+     "until": 1800000000.0,
+     "snapshot": {
+      "services": {},
+      "offline": false
+     }
+    },
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "timer.snapshot.services values use Python bool()",
+   "input": "{\"timer\": {\"mode\": \"free\", \"until\": 1800000000, \"snapshot\": {\"services\": {\"a\": 1, \"b\": 0, \"c\": \"x\", \"d\": [], \"e\": {}, \"f\": [0], \"g\": null, \"h\": true}, \"offline\": \"yes\"}}}",
+   "expected": {
+    "v": 1,
+    "timer": {
+     "mode": "free",
+     "until": 1800000000.0,
+     "snapshot": {
+      "services": {
+       "a": true,
+       "b": false,
+       "c": true,
+       "d": false,
+       "e": false,
+       "f": true,
+       "g": false,
+       "h": true
+      },
+      "offline": true
+     }
+    },
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "timer.until true is not a number",
+   "input": "{\"timer\": {\"mode\": \"free\", \"until\": true, \"snapshot\": {}}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "timer.until as text is not a number",
+   "input": "{\"timer\": {\"mode\": \"free\", \"until\": \"1800000000\", \"snapshot\": {}}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "timer.mode must be free or block",
+   "input": "{\"timer\": {\"mode\": \"party\", \"until\": 1800000000, \"snapshot\": {}}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "schedule.days: whole floats count, booleans, text and fractions do not, and duplicates go",
+   "input": "{\"schedule\": {\"enabled\": true, \"days\": [1.0, 2, 2, 7, -1, true, false, \"3\", 3.5, 6]}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": true,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      1,
+      2,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "schedule times must be two ASCII digits, a colon, two ASCII digits",
+   "input": "{\"schedule\": {\"enabled\": true, \"start\": \" 9:30\", \"end\": \"+9:30\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": true,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "schedule times with Arabic-Indic digits are refused",
+   "input": "{\"schedule\": {\"start\": \"٠٩:٣٠\", \"end\": \"٢١:٠٠\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "schedule times with a trailing newline are refused",
+   "input": "{\"schedule\": {\"start\": \"09:30\\n\", \"end\": \"0930\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "schedule times out of range are refused",
+   "input": "{\"schedule\": {\"start\": \"24:00\", \"end\": \"09:60\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "schedule times that are valid are kept",
+   "input": "{\"schedule\": {\"start\": \"00:00\", \"end\": \"23:59\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "00:00",
+     "end": "23:59",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "scheduleActive and enabled use Python bool(): empty list false, non-empty object true",
+   "input": "{\"schedule\": {\"enabled\": []}, \"scheduleActive\": {\"a\": 1}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": true,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "a version with a trailing newline is refused",
+   "input": "{\"update\": {\"latest\": \"3.1.0\\n\", \"from\": \"3.0.0 \", \"to\": \"3.0.0\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": "3.0.0",
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "a version in Arabic-Indic digits is refused",
+   "input": "{\"update\": {\"latest\": \"٣.١.٠\", \"from\": \"3.0.0\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": "3.0.0",
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "release notes with a trailing newline are refused",
+   "input": "{\"update\": {\"notes\": \"https://github.com/iret33/sinko/releases/tag/v3.1.0\\n\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "update.error that is only a byte order mark is blank",
+   "input": "{\"update\": {\"status\": \"failed\", \"error\": \"﻿\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "failed",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "update.error that is only a no-break space is blank",
+   "input": "{\"update\": {\"status\": \"failed\", \"error\": \"  \"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "failed",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "update.error with a next-line control character is not blank",
+   "input": "{\"update\": {\"status\": \"failed\", \"error\": \"\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "failed",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": "",
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "update.error is cut at 200 characters, not 200 UTF-16 units",
+   "input": "{\"update\": {\"status\": \"failed\", \"error\": \"😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "failed",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "a request marker of 40 astral characters is kept, 41 is dropped",
+   "input": "{\"update\": {\"request\": \"😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\", \"checkRequest\": \"😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "update.rolledBack true",
+   "input": "{\"update\": {\"status\": \"failed\", \"rolledBack\": true}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "failed",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": true
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "update.rolledBack false",
+   "input": "{\"update\": {\"status\": \"failed\", \"rolledBack\": false}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "failed",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": false
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "update.rolledBack must be a real boolean",
+   "input": "{\"update\": {\"status\": \"failed\", \"rolledBack\": \"true\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "failed",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "update.rolledBack 1 is not a boolean",
+   "input": "{\"update\": {\"status\": \"failed\", \"rolledBack\": 1}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "failed",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "timer.until of 400 digits is Infinity to the page: not a number, the timer is dropped, the rest stays",
+   "input": "{\"timer\": {\"mode\": \"free\", \"until\": 1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, \"snapshot\": {\"services\": {\"youtube\": true}, \"offline\": false}}, \"setup\": {\"done\": true}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": true
+    }
+   }
+  },
+  {
+   "name": "timer.until of 5000 digits does not make the whole text garbage (Python's integer limit is not the page's)",
+   "input": "{\"timer\": {\"mode\": \"free\", \"until\": 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, \"snapshot\": {\"services\": {\"youtube\": true}, \"offline\": false}}, \"setup\": {\"done\": true}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": true
+    }
+   }
+  },
+  {
+   "name": "timer.until of minus 400 digits is not a number either",
+   "input": "{\"timer\": {\"mode\": \"free\", \"until\": -1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, \"snapshot\": {\"services\": {\"youtube\": true}, \"offline\": false}}, \"setup\": {\"done\": true}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": true
+    }
+   }
+  },
+  {
+   "name": "timer.until as a number with exponent 999 is Infinity",
+   "input": "{\"timer\": {\"mode\": \"free\", \"until\": 1e999, \"snapshot\": {\"services\": {\"youtube\": true}, \"offline\": false}}, \"setup\": {\"done\": true}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": true
+    }
+   }
+  },
+  {
+   "name": "update.checked of 400 digits is dropped to 0",
+   "input": "{\"update\": {\"status\": \"ok\", \"checked\": 1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, \"at\": 1800000000}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "ok",
+     "from": null,
+     "to": null,
+     "at": 1800000000,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "update.at of 400 digits is dropped to 0",
+   "input": "{\"update\": {\"status\": \"failed\", \"checked\": 1800000000, \"at\": 1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 1800000000,
+     "status": "failed",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "update.at of minus 400 digits is not a count",
+   "input": "{\"update\": {\"status\": \"failed\", \"at\": -1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "failed",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "update.request and update.checkRequest of 400 digits are no markers",
+   "input": "{\"update\": {\"auto\": true, \"request\": 1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, \"checkRequest\": 1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": true,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "power.request of 400 digits is no marker, so there is no power action",
+   "input": "{\"power\": {\"request\": 1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, \"action\": \"reboot\"}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "community.online of 400 digits is not a count",
+   "input": "{\"community\": {\"online\": 1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, \"at\": 1800000000}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "community.at of 400 digits is not a number",
+   "input": "{\"community\": {\"online\": 5, \"at\": 1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "community.at of 5000 digits is not a number",
+   "input": "{\"community\": {\"online\": 5, \"at\": 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "a big integer that a double holds (1e30) is that double, in every place a number is read",
+   "input": "{\"timer\": {\"mode\": \"block\", \"until\": 1000000000000000000000000000000, \"snapshot\": {}}, \"update\": {\"request\": 1000000000000000000000000000000, \"checked\": 1000000000000000000000000000000, \"at\": 1000000000000000000000000000000}, \"community\": {\"online\": 1000000000000000000000000000000, \"at\": 1000000000000000000000000000000}}",
+   "expected": {
+    "v": 1,
+    "timer": {
+     "mode": "block",
+     "until": 1e+30,
+     "snapshot": {
+      "services": {},
+      "offline": false
+     }
+    },
+    "schedule": {
+     "enabled": false,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": 1e+30,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 1e+30,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 1e+30,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": {
+     "online": 1e+30,
+     "at": 1e+30
+    },
+    "setup": {
+     "done": false
+    }
+   }
+  },
+  {
+   "name": "a number that is Infinity on the page is no number even inside a list of bedtime days",
+   "input": "{\"schedule\": {\"enabled\": true, \"days\": [1, 1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, 3]}}",
+   "expected": {
+    "v": 1,
+    "timer": null,
+    "schedule": {
+     "enabled": true,
+     "start": "21:00",
+     "end": "06:00",
+     "days": [
+      1,
+      3
+     ]
+    },
+    "scheduleActive": false,
+    "update": {
+     "auto": false,
+     "request": null,
+     "checkRequest": null,
+     "latest": null,
+     "notes": null,
+     "checked": 0,
+     "status": "idle",
+     "from": null,
+     "to": null,
+     "at": 0,
+     "error": null,
+     "rolledBack": null
+    },
+    "power": {
+     "request": null,
+     "action": null
+    },
+    "telemetry": {
+     "on": null
+    },
+    "community": null,
+    "setup": {
+     "done": false
+    }
+   }
+  }
+ ]
+}

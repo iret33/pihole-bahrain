@@ -1,0 +1,67 @@
+[Unit]
+Description=Sinko scheduler (timers, bedtime, updates)
+Documentation=https://github.com/iret33/sinko
+After=pihole-FTL.service network-online.target
+Wants=pihole-FTL.service network-online.target
+# Bedtime and timers must come back after any crash, however often it happens: never give up restarting.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/sinko/bin/sinko run
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+# Runtime data (update results, the counter's id, rollback copies): created here, root only. The installer also makes it.
+StateDirectory=sinko
+StateDirectoryMode=0700
+# The scheduler's pulse (heartbeat.json: "I finished a pass just now") is kept in memory, in /run/sinko, so that writing it
+# every few seconds costs the memory card nothing. systemd makes the folder before the scheduler starts (root only, as the
+# program itself insists), keeps it while the service is restarted (the installer restarts the scheduler in the middle of
+# every update) and deletes it when the service is stopped, so a pulse never outlives the scheduler that made it.
+RuntimeDirectory=sinko
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=restart
+# What the scheduler does that a sandbox could get in the way of, and why the options below are what they are:
+#   * it talks to Pi-hole's API on localhost and to GitHub (update check)             -> network stays open
+#   * it starts updates with systemd-run (a transient unit sinko-update, outside this sandbox) and asks systemd to
+#     reboot or power off (systemctl)                                                 -> D-Bus/unix sockets stay open
+#   * it rewrites /etc/sinko/config and runs pihole-FTL and pihole, which write /etc/pihole and /var/log/pihole
+#   * when systemd-run is not available the update runs as a detached child of this service, and the update is the
+#     installer: it writes /opt, /usr/local/bin, /etc/systemd/system and /var/www/html and installs Debian packages
+# KillMode=process: restarting this service (the installer does that in the middle of an update) must not kill that
+# fallback child; nothing else of ours is left running when the main process ends.
+KillMode=process
+# Hardening that none of the above needs:
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+# Deliberately NOT set (each would stop something above, and a failure would switch bedtime off without a sound):
+#   ProtectSystem=            the fallback update and `pihole-FTL --config` write under /opt, /etc, /usr/local, /var
+#   ReadWritePaths= ReadOnlyPaths= InaccessiblePaths=   only useful with ProtectSystem=, or would hide what is needed
+#   PrivateDevices= DevicePolicy= DeviceAllow= ProtectClock=   the fallback update installs packages, whose scripts can
+#                             need device nodes (ProtectClock= alone already closes the device policy)
+#   RestrictSUIDSGID=         the same: dpkg creates setuid files for some packages
+#   RestrictNamespaces=       package scripts and tools run by an update may unshare namespaces
+#   CapabilityBoundingSet= AmbientCapabilities=   Pi-hole's files belong to the pihole user (chown, kill, bypassing
+#                             permissions) and the installer needs more still; this service is root on purpose
+#   User= / DynamicUser= / PrivateUsers=   it must be root to write Pi-hole's settings and the system's units
+#   SystemCallFilter=         Python, apt, dpkg and the Pi-hole tools use too many system calls to list; a wrong
+#                             list kills a process with no message
+#   MemoryDenyWriteExecute=   inherited by children; some Python and sqlite builds need writable+executable memory
+#   ProtectProc= / ProcSubset=pid   `sinko doctor` reads /proc/net, /proc/uptime and other users' processes
+#   PrivateNetwork= / IPAddressDeny=   the box is a network service for the whole house
+#   UMask=                    the page files and the settings the installer writes must stay readable by Pi-hole's
+#                             web server (the default 0022 does that)
+
+[Install]
+WantedBy=multi-user.target
