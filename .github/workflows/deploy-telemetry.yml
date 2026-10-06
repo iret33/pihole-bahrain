@@ -65,7 +65,7 @@ jobs:
       # the new code may need a table the old database does not have. --remote matters: without it wrangler would
       # change a throwaway local database and report success.
       - name: Apply the database schema
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -74,7 +74,7 @@ jobs:
           command: d1 execute DB --remote --yes --file=schema.sql
 
       - name: Deploy the Worker
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
