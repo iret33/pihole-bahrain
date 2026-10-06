@@ -3,7 +3,7 @@
 All notable changes to Sinko. Versions follow [Semantic Versioning](https://semver.org); the newest release is at the top.
 Boxes learn about a release from this repository's GitHub releases, whose notes are the section of this file.
 
-## [3.0.0] - Unreleased
+## [3.0.0] - 2026-10-05
 
 Sinko 3.0 is the first public release: the project has a new name, a parent page that looks after the box by itself, and
 everything needed to ship it on a ready-made Orange Pi Zero 3.

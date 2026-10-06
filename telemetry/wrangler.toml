@@ -20,7 +20,7 @@ database_name = "sinko-counter"
 # PLACEHOLDER. Create the database (npx wrangler d1 create sinko-counter), then paste the database_id it prints
 # here. It is an identifier, not a secret, so it is fine to commit. The deploy workflow refuses to run while the
 # placeholder is still here.
-database_id = "REPLACE-WITH-YOUR-DATABASE-ID"
+database_id = "0e69cb54-dd22-475c-8935-f9b0299506ee"
 
 [triggers]
 # Every day at 03:17 UTC: forget boxes that have not been seen for 180 days.
