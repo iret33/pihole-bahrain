@@ -96,8 +96,8 @@ setup" further down are the details of steps 1, 4 and 5 here.
 4. Tag and push: `git tag -a vX.Y.Z -m "Sinko X.Y.Z" && git push origin vX.Y.Z`. The *Release* workflow runs the
    checks again, builds `sinko.tar.gz`, `sinko.tar.gz.sha256` and `install.sh` (in a job that can only read), and a
    second job that can write publishes the release with the GitHub CLI. Without git, on the website: *Releases*, *Draft a
-   new release*, type the new tag `vX.Y.Z`, target `master`, *Publish release*. That creates the tag too, and the workflow
-   then adds the three files and the notes to the release (it has no files for the 15 minutes or so that takes).
+   new release*, type the new tag `vX.Y.Z`, target `master`, *Publish release*. Publishing it starts the workflow too, which
+   adds the three files and the notes to the release (it has no files for the 15 minutes or so that takes).
 5. **Check the release like a family would**: on a spare box (or VM) run
    `curl --proto '=https' --proto-redir '=https' -fsSL https://github.com/iret33/sinko/releases/latest/download/install.sh | sudo bash`; then on a box
    running the previous version open *My box* and press *Update now*; both must end green. Keep the old box until you have.

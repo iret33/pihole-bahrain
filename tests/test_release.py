@@ -204,6 +204,14 @@ class ReleaseWorkflow(unittest.TestCase):
         self.assertNotIn("tools/", publish)
         self.assertNotIn("contents: write", self.text[:self.text.index("\n  publish:")])
 
+    def test_a_release_published_on_the_website_starts_it_once(self):
+        # Pushing the tag is one way; publishing a release on the website (which creates the tag) is the other.
+        self.assertRegex(self.text, r"(?m)^  push:\n    tags: \[\"v\[0-9\]\+")
+        self.assertRegex(self.text, r"(?m)^  release:\n    types: \[published\]$")
+        self.assertRegex(self.text, r"(?m)^concurrency:\n  group: release-\$\{\{ github\.ref_name \}\}\n  cancel-in-progress: true$")
+        checks = self.text[self.text.index("\n  checks:"):self.text.index("\n  build:")]
+        self.assertIn("startsWith(github.event.release.tag_name, 'v')", checks)
+
     def publish_script(self):
         """The shell of the Publish step, as the runner gets it (the block under its `run: |`)."""
         block = self.text[self.text.index("- name: Publish"):]

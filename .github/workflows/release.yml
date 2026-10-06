@@ -1,7 +1,8 @@
 name: Release
-# Push a tag like v3.0.0 (the same number as in the VERSION file) to publish a release. Making the release on the website
-# instead (Releases, Draft a new release, a new tag vX.Y.Z on master, Publish) creates the tag as well and so starts this
-# workflow too, which then adds the files and the notes to that release.
+# Push a tag like v3.0.0 (the same number as in the VERSION file) to publish a release. Or make the release on the website
+# (Releases, Draft a new release, a new tag vX.Y.Z on master, Publish): publishing it starts this workflow too ("release:
+# published"), which then adds the files and the notes to that release. A release that this workflow makes itself does
+# not start it again (GitHub starts no workflow for what the workflow's own token does).
 # Boxes download these assets; every download is counted by GitHub (the project's download count).
 #
 # Two jobs, so that the one that can write to the repository runs the least code: "build" has read-only access, runs
@@ -11,12 +12,22 @@ name: Release
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  release:
+    types: [published]
 
 permissions:
   contents: read
 
+# A release made on the website can start two runs at once (the new tag, and the release being published): the later one
+# replaces the earlier, so the files are uploaded once.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   checks:
+    # A release published on the website for a tag that is not a version (vX.Y.Z) is not ours to fill in.
+    if: github.event_name == 'push' || startsWith(github.event.release.tag_name, 'v')
     uses: ./.github/workflows/ci.yml
 
   build:
