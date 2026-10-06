@@ -3,7 +3,7 @@
 All notable changes to Sinko. Versions follow [Semantic Versioning](https://semver.org); the newest release is at the top.
 Boxes learn about a release from this repository's GitHub releases, whose notes are the section of this file.
 
-## [3.0.0] - 2026-10-05
+## [3.0.0] - 2026-10-06
 
 Sinko 3.0 is the first public release: the project has a new name, a parent page that looks after the box by itself, and
 everything needed to ship it on a ready-made Orange Pi Zero 3.
@@ -42,7 +42,8 @@ everything needed to ship it on a ready-made Orange Pi Zero 3.
   `<hostname>.local` (Avahi).
 - An **optional, anonymous "boxes online" counter**, off until the parent says yes (see `docs/privacy.md`), a download
   count from GitHub Releases, and a project website. Switching the counter off **deletes the box's record** at the counter
-  (the box asks it to forget its code; no shell is needed).
+  (the box asks it to forget its code; no shell is needed). The project's counter service is not running yet, so a 3.0.0
+  box never asks the question and never sends anything; a later release switches it on.
 - `tools/seal.sh` and `tools/firstboot.sh` to prepare and personalise the ready-made image (`docs/product-image.md`).
   A ready-made box has **no login**: help comes from the page, the router, the power cable or re-flashing (see the new
   "Ready-made box" section of `docs/troubleshooting.md`). Pi-hole on it is updated by re-flashing a newer image.

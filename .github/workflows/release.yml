@@ -1,5 +1,7 @@
 name: Release
-# Push a tag like v3.0.0 (the same number as in the VERSION file) to publish a release.
+# Push a tag like v3.0.0 (the same number as in the VERSION file) to publish a release. Making the release on the website
+# instead (Releases, Draft a new release, a new tag vX.Y.Z on master, Publish) creates the tag as well and so starts this
+# workflow too, which then adds the files and the notes to that release.
 # Boxes download these assets; every download is counted by GitHub (the project's download count).
 #
 # Two jobs, so that the one that can write to the repository runs the least code: "build" has read-only access, runs
@@ -61,8 +63,15 @@ jobs:
           path: dist
       - name: Publish
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            dist/sinko.tar.gz dist/sinko.tar.gz.sha256 dist/install.sh \
-            --verify-tag \
-            --title "Sinko $GITHUB_REF_NAME" \
-            --notes-file dist/release-notes.md
+          gh --version | head -n 1
+          files=(dist/sinko.tar.gz dist/sinko.tar.gz.sha256 dist/install.sh)
+          if gh release view "$GITHUB_REF_NAME" --json tagName >/dev/null 2>&1; then
+            # The release was made on the website, which created the tag that started this run: give it the files
+            # and the notes instead of failing on "release already exists".
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+            gh release edit "$GITHUB_REF_NAME" --title "Sinko $GITHUB_REF_NAME" --notes-file dist/release-notes.md \
+              --draft=false --prerelease=false --latest
+          else
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" --verify-tag --latest \
+              --title "Sinko $GITHUB_REF_NAME" --notes-file dist/release-notes.md
+          fi

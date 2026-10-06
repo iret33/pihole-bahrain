@@ -204,6 +204,55 @@ class ReleaseWorkflow(unittest.TestCase):
         self.assertNotIn("tools/", publish)
         self.assertNotIn("contents: write", self.text[:self.text.index("\n  publish:")])
 
+    def publish_script(self):
+        """The shell of the Publish step, as the runner gets it (the block under its `run: |`)."""
+        block = self.text[self.text.index("- name: Publish"):]
+        lines = block.split("\n")[2:]
+        body = []
+        for line in lines:
+            if line.strip() and not line.startswith(" " * 10):
+                break
+            body.append(line[10:])
+        return "\n".join(body)
+
+    def run_publish(self, release_exists):
+        """Run the Publish step against a stand-in `gh` that only writes down how it was called."""
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "bin"))
+            os.makedirs(os.path.join(tmp, "dist"))
+            for name in ("sinko.tar.gz", "sinko.tar.gz.sha256", "install.sh", "release-notes.md"):
+                open(os.path.join(tmp, "dist", name), "w").close()
+            calls = os.path.join(tmp, "calls")
+            with open(os.path.join(tmp, "bin", "gh"), "w") as fh:
+                fh.write('#!/bin/sh\necho "$*" >> "%s"\n'
+                         'if [ "$1 $2" = "release view" ]; then exit %d; fi\nexit 0\n' % (calls, 0 if release_exists else 1))
+            os.chmod(os.path.join(tmp, "bin", "gh"), 0o755)
+            env = dict(os.environ, GITHUB_REF_NAME="v3.0.0", PATH=os.path.join(tmp, "bin") + os.pathsep + os.environ["PATH"])
+            done = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", self.publish_script()],
+                                  cwd=tmp, env=env, capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            with open(calls) as fh:
+                return [line for line in fh.read().splitlines() if not line.startswith("--version")]
+
+    def test_a_tag_pushed_with_git_creates_the_release_with_the_three_files(self):
+        calls = self.run_publish(release_exists=False)
+        self.assertTrue(calls[0].startswith("release view v3.0.0"), calls)
+        self.assertEqual(len(calls), 2, calls)
+        self.assertTrue(calls[1].startswith("release create v3.0.0 dist/sinko.tar.gz dist/sinko.tar.gz.sha256 dist/install.sh"))
+        for flag in ("--verify-tag", "--latest", "--notes-file dist/release-notes.md"):
+            self.assertIn(flag, calls[1])
+
+    def test_a_release_made_on_the_website_gets_the_files_and_notes_instead_of_failing(self):
+        # Making the release on the website creates the tag, which starts the workflow: the release already exists.
+        calls = self.run_publish(release_exists=True)
+        self.assertEqual(len(calls), 3, calls)
+        self.assertTrue(calls[1].startswith("release upload v3.0.0 dist/sinko.tar.gz dist/sinko.tar.gz.sha256 dist/install.sh"))
+        self.assertIn("--clobber", calls[1])
+        self.assertTrue(calls[2].startswith("release edit v3.0.0"), calls)
+        for flag in ("--notes-file dist/release-notes.md", "--draft=false", "--prerelease=false", "--latest"):
+            self.assertIn(flag, calls[2])
+        self.assertFalse(any(c.startswith("release create") for c in calls), calls)
+
 
 if __name__ == "__main__":
     unittest.main()
