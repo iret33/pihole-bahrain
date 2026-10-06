@@ -45,7 +45,7 @@ jobs:
 
       - name: Pages settings
         id: pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       # site/ + docs/img as img/ + web/fonts as fonts/ + web/icon.svg, and the site's address in the link previews.
       - name: Assemble the site
