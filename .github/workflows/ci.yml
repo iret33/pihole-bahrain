@@ -21,7 +21,7 @@ jobs:
       matrix:
         python: ["3.9", "3.11", "3.13"]     # Ubuntu 22.04 / Debian 12 / Debian 13 and Armbian
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
@@ -35,7 +35,7 @@ jobs:
     name: Shell lint and installer end to end
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
@@ -51,7 +51,7 @@ jobs:
     name: Page logic, counter service and site tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -69,7 +69,7 @@ jobs:
     name: Browser tests (English and Arabic)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
@@ -92,7 +92,7 @@ jobs:
     name: Release archive builds
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: bash tools/build-release.sh dist
       - uses: actions/upload-artifact@v4
         with:
