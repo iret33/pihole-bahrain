@@ -39,6 +39,9 @@ class Box(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         os.environ.pop("SINKO_TELEMETRY_URL", None)
+        builtin = mock.patch.object(pb, "TELEMETRY_URL", "")  # the release's built-in counter address must not leak into a test
+        builtin.start()
+        self.addCleanup(builtin.stop)
         for patch in (mock.patch.object(pb, "default_route_ipv4", lambda: "192.168.1.50"),
                       mock.patch.object(pb, "unit_active", lambda name: name == "avahi-daemon")):
             patch.start()

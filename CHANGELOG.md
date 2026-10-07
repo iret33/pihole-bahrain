@@ -3,6 +3,18 @@
 All notable changes to Sinko. Versions follow [Semantic Versioning](https://semver.org); the newest release is at the top.
 Boxes learn about a release from this repository's GitHub releases, whose notes are the section of this file.
 
+## [3.0.1] - 2026-10-07
+
+### Added
+- **The anonymous "boxes online" counter is running** (`https://sinko-counter.sabdulla.workers.dev`). A box on this version asks the
+  parent once, in *My box* and in the first-run checklist, whether it may be counted; until the parent says yes it sends
+  nothing, and switching it off deletes the box's record at the counter. What is sent and when is unchanged from
+  [`docs/privacy.md`](docs/privacy.md). The README badge and the project website show the count.
+
+### Changed
+- Every action in the project's GitHub workflows is pinned to a commit, and `lists/` has its own line in `CODEOWNERS`,
+  so a change to the block lists that every box downloads is reviewed like code.
+
 ## [3.0.0] - 2026-10-06
 
 Sinko 3.0 is the first public release: the project has a new name, a parent page that looks after the box by itself, and

@@ -22,8 +22,9 @@ Parental controls that live on a small box in your home, in Arabic and English.<
   <img alt="Languages: Arabic and English" src="https://img.shields.io/badge/%D8%A7%D9%84%D8%B9%D8%B1%D8%A8%D9%8A%D8%A9-English-1E2547">
   <a href="CONTRIBUTING.md"><img alt="Contributions welcome" src="https://img.shields.io/badge/contributions-welcome-0F766E"></a>
 </p>
-<!-- Add this badge once the counter service is deployed (telemetry/README.md), with your own address:
-<a href="docs/privacy.md"><img alt="Boxes online" src="https://img.shields.io/endpoint?url=https://YOUR-COUNTER/badge/online.json"></a> -->
+<p align="center">
+  <a href="docs/privacy.md"><img alt="Boxes online" src="https://img.shields.io/endpoint?url=https://sinko-counter.sabdulla.workers.dev/badge/online.json"></a>
+</p>
 
 <p align="center">
   <img src="docs/img/desktop-en.png" alt="The Sinko parent page on a computer" width="720">

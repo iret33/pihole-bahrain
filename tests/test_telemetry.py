@@ -24,6 +24,7 @@ loader = importlib.machinery.SourceFileLoader("sinko_cli", os.path.join(ROOT, "b
 spec = importlib.util.spec_from_loader("sinko_cli", loader)
 pb = importlib.util.module_from_spec(spec)
 loader.exec_module(pb)
+RELEASE_TELEMETRY_URL = pb.TELEMETRY_URL          # what this release ships; the tests below run with it blanked
 
 
 class Plain(unittest.TestCase):
@@ -36,6 +37,9 @@ class Plain(unittest.TestCase):
         self.addCleanup(env.stop)
         for key in ("SINKO_TELEMETRY_URL", "SINKO_DT_MODEL"):
             os.environ.pop(key, None)
+        builtin = mock.patch.object(pb, "TELEMETRY_URL", "")  # the release's built-in counter address must not leak into a test
+        builtin.start()
+        self.addCleanup(builtin.stop)
 
     def model(self, text):
         path = os.path.join(self.tmp, "model")
@@ -45,8 +49,15 @@ class Plain(unittest.TestCase):
 
 
 class DefaultsTests(Plain):
-    def test_the_default_endpoint_is_empty_so_nothing_can_be_sent_by_accident(self):
-        self.assertEqual(pb.TELEMETRY_URL, "")
+    def test_the_built_in_endpoint_is_empty_or_an_https_address_the_program_accepts_as_it_is(self):
+        builtin = RELEASE_TELEMETRY_URL
+        if builtin:
+            self.assertTrue(builtin.startswith("https://"), builtin)
+            with mock.patch.object(pb, "TELEMETRY_URL", builtin):
+                self.assertEqual(pb.telemetry_url({}), builtin, "the release's counter address would be refused")
+
+    def test_with_no_address_anywhere_nothing_can_be_sent_by_accident(self):
+        self.assertEqual(pb.TELEMETRY_URL, "")                      # blanked by setUp
         self.assertEqual(pb.telemetry_url({}), "")
 
 
@@ -351,6 +362,9 @@ class CounterFixture(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         os.environ.pop("SINKO_TELEMETRY_URL", None)
+        builtin = mock.patch.object(pb, "TELEMETRY_URL", "")  # the release's built-in counter address must not leak into a test
+        builtin.start()
+        self.addCleanup(builtin.stop)
 
     def state_file(self, name):
         return os.path.join(self.tmp, "state", name)
@@ -708,6 +722,9 @@ class CommandTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         os.environ.pop("SINKO_TELEMETRY_URL", None)
+        builtin = mock.patch.object(pb, "TELEMETRY_URL", "")  # the release's built-in counter address must not leak into a test
+        builtin.start()
+        self.addCleanup(builtin.stop)
         for patch in (mock.patch.object(pb, "CLI_PW_FILE", os.path.join(self.tmp, "pw")),
                       mock.patch.object(pb, "read_config", lambda *a: dict(self.conf)),
                       mock.patch.object(pb, "load_catalog", lambda *a: self.catalog)):

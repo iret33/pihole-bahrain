@@ -10,7 +10,7 @@ window.SINKO_CONFIG = Object.freeze({
      "https://sinko-counter.example.workers.dev". The site then shows how many boxes are online and the download total
      that the counter reports. Empty: the site shows only the download count, taken from GitHub. If the counter or
      GitHub cannot be reached, the numbers are simply not shown. */
-  statsUrl: "",
+  statsUrl: "https://sinko-counter.sabdulla.workers.dev",
 
   /* Where to buy a ready-made box (a shop page), https. Empty: the "Get a ready-made box" button is hidden and the
      card says that the box is not on sale yet. */

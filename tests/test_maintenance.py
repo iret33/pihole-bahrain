@@ -89,6 +89,9 @@ class Fixture(unittest.TestCase):
         for key in ("SINKO_RELEASE_BASE", "SINKO_RELEASE_API", "SINKO_REF", "SINKO_REPO", "SINKO_REPO_SLUG",
                     "SINKO_TELEMETRY_URL"):
             os.environ.pop(key, None)
+        builtin = mock.patch.object(pb, "TELEMETRY_URL", "")  # the release's built-in counter address must not leak into a test
+        builtin.start()
+        self.addCleanup(builtin.stop)
         self.reached = []
         for name in ("run_power", "start_update_runner", "apply_new_address", "default_route_ipv4", "check_for_update",
                      "send_ping", "telemetry_body", "send_forget", "run_self_heal", "recover_check"):
@@ -299,7 +302,7 @@ class UpdateRequestTests(Fixture):
         actions = self.pass_()
         self.assertIn("update requested by the page", actions)
         u = self.state()["update"]
-        self.assertEqual((u["status"], u["from"], u["to"], u["request"], u["error"]), ("running", "3.0.0", "3.1.0", None, None))
+        self.assertEqual((u["status"], u["from"], u["to"], u["request"], u["error"]), ("running", pb.VERSION, "3.1.0", None, None))
         self.assertEqual(u["at"], self.now.timestamp())
         self.assertEqual(pb.load_handled(), {"update": marker})
         self.assertEqual(before["status"], "idle")
@@ -437,7 +440,7 @@ class AutoUpdateTests(Fixture):
         actions = self.pass_()
         self.assertIn("automatic update to 3.1.0", actions)
         u = self.state()["update"]
-        self.assertEqual((u["status"], u["from"], u["to"]), ("running", "3.0.0", "3.1.0"))
+        self.assertEqual((u["status"], u["from"], u["to"]), ("running", pb.VERSION, "3.1.0"))
         self.assertEqual(self.runner_calls, ["running"])
         self.assertEqual(pb.load_handled(), {}, "no request, so no marker")
 
@@ -686,7 +689,7 @@ class RolledBackTests(Fixture):
         self.settle()
         u = self.state()["update"]
         self.assertEqual((u["status"], u["rolledBack"]), ("failed", True))
-        self.assertEqual(u["error"], "The update did not finish. This box still works with version 3.0.0.")
+        self.assertEqual(u["error"], "The update did not finish. This box still works with version %s." % pb.VERSION)
         self.assertEqual(u["latest"], "3.1.0", "the release stays on offer")
 
     def test_a_box_that_fails_its_check_is_said_to_have_nothing_to_go_back_to(self):
