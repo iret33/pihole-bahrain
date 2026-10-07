@@ -75,7 +75,7 @@ import urllib.parse
 import urllib.request
 import zlib
 
-VERSION = "3.0.1"
+VERSION = "3.0.2"
 
 APP_DIR = os.environ.get("SINKO_APP_DIR", "/opt/sinko")
 LISTS_DIR = os.path.join(APP_DIR, "lists")
@@ -5056,6 +5056,29 @@ def note_rollback(undone: str, restored: str) -> None:
         log.warning("could not record the rollback in the shared state: %s", err)
 
 
+def note_update(result: dict) -> None:
+    """After an update by hand that worked, tell the page. The scheduler copies a result into the shared state only for an
+    update the page started (the state says "running"), so without this the page would go on showing what it showed before:
+    after a rollback by hand, "the update did not finish" for a week while the newer version runs fine."""
+    def mark(state):
+        update = state["update"]
+        if update["status"] == "running":
+            return                                      # a run the page started owns the card, and its own result lands there
+        update.update(status="ok", to=result["to"], at=result["at"], error=None, rolledBack=None)
+        update["from"] = result["from"]
+        if update["latest"] and result["to"] and not is_newer(update["latest"], result["to"]):
+            update["latest"] = update["notes"] = None   # that release is installed now
+    try:
+        api = Api()
+        api.login()
+        try:
+            patch_state(api, mark)
+        finally:
+            api.logout()
+    except TRANSPORT_ERRORS as err:
+        log.warning("could not record the update in the shared state: %s", err)
+
+
 def cmd_update(args) -> int:
     conf = read_config(CONFIG_FILE)               # (the name is looked up now: the file that keep_pin and settle_pin write)
     updater = Updater(conf)
@@ -5109,6 +5132,8 @@ def cmd_update(args) -> int:
     if result["status"] == "ok":
         if args.ref:
             settle_pin(args.ref)
+        if not args.from_panel:
+            note_update(result)                         # the scheduler records an update the page started; this one, nobody else
         return 0
     print("sinko: the update failed. %s" % result["error"], file=sys.stderr)
     if args.ref:

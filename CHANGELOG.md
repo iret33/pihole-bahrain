@@ -3,6 +3,15 @@
 All notable changes to Sinko. Versions follow [Semantic Versioning](https://semver.org); the newest release is at the top.
 Boxes learn about a release from this repository's GitHub releases, whose notes are the section of this file.
 
+## [3.0.2] - 2026-10-07
+
+### Fixed
+- **My box no longer says an update failed when it did not.** After a rollback by hand (`sudo sinko rollback`) and then an
+  update by hand (`sudo sinko update`) that worked, the page kept saying "the update did not finish, the previous version is
+  back" for a week, although the newer version was running. An update by hand now tells the page that it worked, as an update
+  from the page always did; and the page no longer shows "the previous version is back" when the version that failed is the
+  one running.
+
 ## [3.0.1] - 2026-10-07
 
 ### Added

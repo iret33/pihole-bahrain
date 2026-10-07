@@ -222,6 +222,17 @@ test('the box\'s own wall clock from box.json\'s offset, and nothing when it is 
   assert.equal(B.boxWallTime(info, NaN, 'en-GB'), '');
 });
 
+test('update card: "the previous version is back" is not shown once the version that failed is the one running', () => {
+  // A rollback by hand to 3.0.0, then `sudo sinko update` back to 3.0.1: the note of the rollback is out of date.
+  const stale = { status: 'failed', from: '3.0.0', to: '3.0.1', at: NOW - 600, error: 'Went back to 3.0.0 by hand.', rolledBack: true };
+  assert.equal(view(stale, '3.0.1').phase, 'current');
+  assert.equal(view(stale, '3.0.0').phase, 'failed', 'on the version it went back to, the failure is still the story');
+  assert.equal(view({ ...stale, rolledBack: false }, '3.0.1').phase, 'failed', 'a box that says it is not back is never hidden');
+  assert.equal(view({ ...stale, rolledBack: null }, '3.0.1').phase, 'failed', 'nor one that does not know');
+  assert.equal(view({ ...stale, from: '3.0.1' }, '3.0.1').phase, 'failed', 'a reinstall of the same version that failed stays visible');
+  assert.equal(view(stale, '').phase, 'failed', 'when the installed version is not known, nothing is hidden');
+});
+
 test('the reason of a failed update is shown only as plain English details, and never when it reads like a command', () => {
   assert.equal(B.reasonDetails('The installer stopped with an error (exit status 1). The previous version (3.0.0) was put back.'),
     'The installer stopped with an error (exit status 1). The previous version (3.0.0) was put back.');

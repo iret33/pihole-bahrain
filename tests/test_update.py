@@ -1434,6 +1434,28 @@ class CommandTests(Box):
         self.assertEqual(self.installs(), [])
         self.assertIsNone(pb.read_update_result())
 
+    def test_an_update_by_hand_that_worked_is_told_to_the_page_and_one_from_the_panel_is_not(self):
+        self.publish("3.1.0")
+        self.site.add_release(CURRENT)
+        with mock.patch.object(pb, "note_update") as note:
+            code, _, _ = self.run_cli("update", "--yes")
+        self.assertEqual(code, 0)
+        note.assert_called_once()
+        self.assertEqual((note.call_args[0][0]["status"], note.call_args[0][0]["to"]), ("ok", "3.1.0"))
+        self.publish("3.2.0")
+        with mock.patch.object(pb, "note_update") as note:
+            code, _, _ = self.run_cli("update", "--yes", "--from-panel")
+        self.assertEqual(code, 0)
+        note.assert_not_called()                        # the scheduler copies the result of a run the page started
+
+    def test_a_failed_update_by_hand_is_not_told_as_one_that_worked(self):
+        self.publish("3.1.0", install_ok=False)
+        self.site.add_release(CURRENT)
+        with mock.patch.object(pb, "note_update") as note:
+            code, _, _ = self.run_cli("update", "--yes")
+        self.assertEqual(code, 1)
+        note.assert_not_called()
+
     def test_check_when_offline_fails_with_a_message(self):
         self.site.set_api({}, status=403)
         code, out, err = self.run_cli("update", "--check")
@@ -1984,6 +2006,55 @@ class RollbackNoteTests(unittest.TestCase):
         self.assertTrue(pb.patch_state(self.api, lambda s: s["setup"].update(done=True)))
         self.assertEqual(self.store.writes, writes + 1)
         self.assertTrue(self.state()["setup"]["done"])
+
+
+class UpdateNoteTests(unittest.TestCase):
+    """After an update by hand that worked, the page must say so and not an older rollback by hand: on a real box a
+    rollback to 3.0.0 and then `sudo sinko update` to 3.0.1 left the page saying "the update did not finish" for a week."""
+
+    setUp = RollbackNoteTests.setUp
+    state = RollbackNoteTests.state
+
+    def ok(self, frm="3.0.0", to="3.1.0"):
+        return {"status": "ok", "from": frm, "to": to, "error": None, "rolledBack": None, "at": time.time(), "transient": False}
+
+    def put_update(self, **fields):
+        state = self.state()
+        state["update"].update(fields)
+        pb.Controller(self.api, pb.load_catalog(LISTS)).write_state(state)
+
+    def test_an_update_by_hand_replaces_an_older_rollback_note(self):
+        pb.note_rollback("3.1.0", "3.0.0")
+        result = self.ok()
+        pb.note_update(result)
+        u = self.state()["update"]
+        self.assertEqual((u["status"], u["from"], u["to"], u["error"], u["rolledBack"]), ("ok", "3.0.0", "3.1.0", None, None))
+        self.assertEqual(u["at"], result["at"])
+
+    def test_a_run_the_page_started_is_left_to_the_scheduler(self):
+        self.put_update(status="running", to="3.2.0", at=time.time())
+        pb.note_update(self.ok())
+        u = self.state()["update"]
+        self.assertEqual((u["status"], u["to"]), ("running", "3.2.0"))
+
+    def test_the_installed_release_is_no_longer_on_offer_and_a_newer_one_still_is(self):
+        self.put_update(latest="3.1.0", notes="https://github.com/iret33/sinko/releases/tag/v3.1.0")
+        pb.note_update(self.ok())
+        self.assertEqual((self.state()["update"]["latest"], self.state()["update"]["notes"]), (None, None))
+        self.put_update(latest="3.2.0", notes="https://github.com/iret33/sinko/releases/tag/v3.2.0")
+        pb.note_update(self.ok())
+        self.assertEqual(self.state()["update"]["latest"], "3.2.0")
+
+    def test_the_other_parts_of_the_state_are_kept(self):
+        self.put_update(auto=True)
+        pb.note_update(self.ok())
+        self.assertTrue(self.state()["update"]["auto"])
+
+    def test_pihole_being_down_is_not_an_error(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        with self.assertLogs("sinko", level="WARNING"):
+            pb.note_update(self.ok())
 
 
 class SelfcheckTests(unittest.TestCase):

@@ -332,7 +332,9 @@
     }
     if (u.request !== null) return { phase: 'starting', to: u.latest };
     // A failure counts for the version on offer (or when nobody knows which version it was): not for an older one that has been superseded.
-    if (u.status === 'failed' && age < FAILED_SHOWN_SEC && (!u.latest || !u.to || u.latest === u.to)) {
+    // "The previous version is back" while the version that failed is the one running is out of date: it was installed since, by hand.
+    var contradicted = u.rolledBack === true && !!ctx.current && u.to === ctx.current && u.from !== u.to;
+    if (u.status === 'failed' && age < FAILED_SHOWN_SEC && (!u.latest || !u.to || u.latest === u.to) && !contradicted) {
       return { phase: 'failed', error: u.error, rolledBack: u.rolledBack, to: u.to, from: u.from, latest: newer ? u.latest : null, notes: u.notes };
     }
     if (u.status === 'ok' && age < OK_SHOWN_SEC) return { phase: 'ok', to: u.to };
