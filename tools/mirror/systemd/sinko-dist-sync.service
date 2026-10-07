@@ -1,0 +1,18 @@
+[Unit]
+Description=Copy Sinko's releases, block lists and website from GitHub to updates.ioai.bh and sinko.ioai.bh
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=sinko-dist
+Group=sinko-dist
+ExecStart=/usr/bin/python3 /opt/sinko-dist/sinko-dist-sync.py
+# Only the folders it fills, its own state, and the token (read-only) are reachable.
+ProtectSystem=strict
+ReadWritePaths=/var/www/updates.ioai.bh /var/www/sinko-site /var/lib/sinko-dist
+Environment=SINKO_DIST_SITE=/var/www/sinko-site/live
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectHome=true
+TimeoutStartSec=15min
