@@ -125,7 +125,7 @@ with sync_playwright() as p:
     expect("Apps blocked for children: 2" in page.inner_text("#liveSub"), "and how many apps are blocked: %r" % page.inner_text("#liveSub"))
     names = page.locator(".node-dev .node-name").all_inner_texts()
     expect(names == ["Sara's iPad", "Ali's phone", "Everyone else"], "two children and the rest of the home are drawn: %s" % names)
-    expect(page.locator("path.wire-base").count() == 6, "six wires exist (3 device slots, rest of home, box to internet, the direct line)")
+    expect(page.locator("path.wire-base").count() == 11, "eleven wires exist (a question and an answer for 3 device slots and the rest of home, one each way to the internet, the black hole)")
     states = page.locator(".node-dev .node-state-text").all_inner_texts()
     expect(states[0] == "Online now" and states[1] == "Quiet", "Sara's iPad is online and Ali's phone idle: %s" % states)
 
@@ -152,7 +152,7 @@ with sync_playwright() as p:
         time.sleep(0.2)
     expect(len(seen) > 0, "packets travel along the wires (saw %d different labels)" % len(seen))
     expect("is-blocked" in kinds and "is-allowed" in kinds, "both blocked and allowed requests are drawn (%s)" % sorted(kinds))
-    expect("is-direct" in kinds, "after a yes, a dot runs along the dotted line that goes around the box")
+    expect("is-sinking" in kinds, "a stopped request falls into the black hole beside the box")
     expect(not any(DOMAINLIKE.search(s) for s in seen), "no packet ever shows a domain name: %s" % sorted(seen)[:8])
     expect(peak <= 8, "never more than 8 packets at once (peak %d)" % peak)
     shot(page, "live-phone.png", full=False)
@@ -198,8 +198,8 @@ with sync_playwright() as p:
     wait_until(lambda: page.inner_text("#boxSub").startswith("No"), 4, 0.1)
     voice["text"] = page.inner_text("#boxSub")
     expect(pk is not None, "a blocked YouTube request from Sara's iPad is drawn as a stopped packet (%s)" % (pk and pk["text"]))
-    expect(pk is not None and "✕" in page.evaluate("() => getComputedStyle(document.querySelector('.pk.is-blocked .pk-label'), '::before').content"),
-           "stopped packets carry a cross, not only a colour")
+    expect(pk is not None and "✕" in page.evaluate("() => getComputedStyle(document.querySelector('.pk.is-blocked'), '::after').content"),
+           "stopped packets carry a cross, not only a colour (and a ghost's shape)")
     expect("No" in voice["text"] and "YouTube" in voice["text"] and "Sara's iPad" in voice["text"], "the family box says no, naming the app and the device: %r" % voice["text"])
     time.sleep(1.5)
     page.click("#liveRecentTitle")                       # the list is closed until opened (open by default only with reduced motion)
@@ -476,7 +476,7 @@ with sync_playwright() as p:
     page.wait_for_selector(".tile")
     page.locator("#live:not([hidden])").wait_for()
     time.sleep(1.5)
-    expect(page.locator("g.wire").count() == 6 and page.locator(".pk").count() == 8, "after signing out and in there is one set of wires and packets (%d wires, %d packets)" % (page.locator("g.wire").count(), page.locator(".pk").count()))
+    expect(page.locator("g.wire").count() == 11 and page.locator(".pk").count() == 8, "after signing out and in there is one set of wires and packets (%d wires, %d packets)" % (page.locator("g.wire").count(), page.locator(".pk").count()))
     expect(len(errors) == errors_before, "and no errors from the old stage's timers")
     ctx.close()
 

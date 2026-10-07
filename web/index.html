@@ -153,14 +153,17 @@
       </div>
 
       <div class="stage" id="stage">
-        <i class="rail-end rail-a" data-node="rail-a" aria-hidden="true"></i><i class="rail-end rail-b" data-node="rail-b" aria-hidden="true"></i>
         <svg class="live-wires" aria-hidden="true"></svg>
         <div class="live-packets" aria-hidden="true"></div>
         <div class="stage-devices" id="stageDevices"></div>
-        <button type="button" class="node node-box" id="nodeBox" data-node="box" data-act="node" data-which="box">
-          <span class="node-box-icon"><svg aria-hidden="true"><use href="#i-shield"/></svg></span>
-          <span class="node-box-text"><span class="node-box-name" id="boxName"></span><span class="node-box-sub" id="boxSub"></span></span>
-        </button>
+        <!-- One row: the family box, and beside it the black hole that refused requests fall into (drawing only). -->
+        <div class="stage-mid">
+          <button type="button" class="node node-box" id="nodeBox" data-node="box" data-act="node" data-which="box">
+            <span class="node-box-icon"><svg aria-hidden="true"><use href="#i-shield"/></svg></span>
+            <span class="node-box-text"><span class="node-box-name" id="boxName"></span><span class="node-box-sub" id="boxSub"></span></span>
+          </button>
+          <span class="node node-hole" data-node="hole" aria-hidden="true"><i class="hole-core"></i></span>
+        </div>
         <div class="stage-inner" id="stageInner" hidden></div>
         <button type="button" class="node node-net" id="nodeNet" data-node="net" data-act="node" data-which="net">
           <svg aria-hidden="true"><use href="#i-globe"/></svg><span id="netName"></span>

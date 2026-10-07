@@ -1,7 +1,8 @@
 /* pb-live.js: the live picture on the parent page.
  *
  * Stage: the generic drawing engine. It measures the diagram's nodes (elements with data-node="id"), draws the wires between
- * them as SVG curves, and sends packets along those wires. Packets are a small fixed pool of elements that are reused, one
+ * them as SVG lines (smooth curves, or right angles for wires whose def says shape: 'elbow'), and sends packets along
+ * those wires. Packets are a small fixed pool of elements that are reused, one
  * requestAnimationFrame loop runs only while something moves, and with prefers-reduced-motion nothing moves at all: the
  * callbacks still run, so the numbers and states stay right.
  *
@@ -31,7 +32,11 @@
 
   // ====================================================================== Stage
   /**
-   * new Stage(host, { wires: [{ id, from, to }], poolSize: 8, onLayout: fn })
+   * new Stage(host, { wires: [{ id, from, to, shape, route, chamfer, pads }], poolSize: 8, onLayout: fn })
+   *   shape: 'elbow' for right angles between from and to;
+   *   route(S): a printed-circuit trace instead, through the points it returns (or null to hide the wire). S = { box(id),
+   *     w, h, rtl }. Corners are cut at 45 degrees by `chamfer` px (6 by default);
+   *   pads: copper pads at both ends, and an arrow into the end: every trace feeds the pin it points at.
    * host: position:relative element containing the nodes, an <svg class="live-wires"> and a <div class="live-packets">.
    */
   function Stage(host, options) {
@@ -49,6 +54,7 @@
     this.reduced = reducedMotion();
     this.timers = [];
     var self = this, i;
+    for (i = 0; i < this.defs.length; i++) if (this.defs[i].pads) { this._buildDefs(); break; }
     for (i = 0; i < this.defs.length; i++) this._buildWire(this.defs[i]);
     for (i = 0; i < (options.poolSize || 8); i++) this.pool.push(this._buildPacket());
     this._onResize = function () { self.layout(); };
@@ -59,20 +65,38 @@
     if (this._mq && this._mq.addEventListener) this._mq.addEventListener('change', this._onMq);
   }
 
+  /** The arrow drawn where a trace ends: it points into the input it feeds (once per stage). */
+  Stage.prototype._buildDefs = function () {
+    var defs = svg('defs'), marker = svg('marker', { id: 'pcb-pin', viewBox: '0 0 8 8', refX: '13', refY: '4', markerWidth: '8',
+      markerHeight: '8', markerUnits: 'userSpaceOnUse', orient: 'auto' });
+    marker.appendChild(svg('path', { 'class': 'pin-arrow', d: 'M0 0L8 4L0 8z' }));
+    defs.appendChild(marker);
+    this.svg.appendChild(defs);
+  };
+
   Stage.prototype._buildWire = function (def) {
     var g = svg('g', { 'class': 'wire', 'data-wire': def.id });
     var base = svg('path', { 'class': 'wire-base', fill: 'none' });
     var flow = svg('path', { 'class': 'wire-flow', fill: 'none' });
     g.appendChild(base); g.appendChild(flow);
+    var ends = null;
+    if (def.pads) {
+      base.setAttribute('marker-end', 'url(#pcb-pin)');
+      ends = [svg('circle', { 'class': 'pad', r: '4.5' }), svg('circle', { 'class': 'drill', r: '1.6' }),
+              svg('circle', { 'class': 'pad', r: '4.5' }), svg('circle', { 'class': 'drill', r: '1.6' })];
+      ends.forEach(function (n) { g.appendChild(n); });
+    }
     this.svg.appendChild(g);
-    this.wires[def.id] = { def: def, g: g, base: base, flow: flow, geom: null };
+    this.wires[def.id] = { def: def, g: g, base: base, flow: flow, ends: ends, geom: null };
   };
 
   Stage.prototype._buildPacket = function () {
     var pk = div('pk');
     pk.hidden = true;
-    var badge = div('pk-badge'), label = div('pk-label');
-    pk.appendChild(badge); pk.appendChild(label);
+    // The picture shows only the sprite; the words stay in the element for the text list's tests and are hidden by CSS.
+    var sprite = document.createElement('span'), badge = div('pk-badge'), label = div('pk-label');
+    sprite.className = 'pk-sprite';
+    pk.appendChild(sprite); pk.appendChild(badge); pk.appendChild(label);
     this.layer.appendChild(pk);
     return { el: pk, badge: badge, label: label, busy: false };
   };
@@ -92,17 +116,43 @@
     return { x: b.cx, y: dy > 0 ? b.y + b.h : b.y };
   }
 
+  /**
+   * The two ends of a right-angled wire and the axis it starts along: from the bottom of a block into the top of the one below
+   * (so a row of devices meets on one bus into one input), or from side to side when the blocks are level.
+   */
+  function elbowPorts(a, b) {
+    if (b.y >= a.y + a.h - 1) return { a: { x: a.cx, y: a.y + a.h }, b: { x: b.cx, y: b.y }, axis: 'v' };
+    if (a.y >= b.y + b.h - 1) return { a: { x: a.cx, y: a.y }, b: { x: b.cx, y: b.y + b.h }, axis: 'v' };
+    if (b.cx >= a.cx) return { a: { x: a.x + a.w, y: a.cy }, b: { x: b.x, y: b.cy }, axis: 'h' };
+    return { a: { x: a.x, y: a.cy }, b: { x: b.x + b.w, y: b.cy }, axis: 'h' };
+  }
+
   /** (Re)draw every wire from the current positions of its two nodes. Call after layout changes. */
   Stage.prototype.layout = function () {
-    var h = this.host.getBoundingClientRect(), id, w, a, b, pa, pb;
+    var self = this, h = this.host.getBoundingClientRect(), id, w, a, b, pa, pb, pts, first, last;
     this.svg.setAttribute('viewBox', '0 0 ' + Math.max(1, Math.round(h.width)) + ' ' + Math.max(1, Math.round(h.height)));
+    var S = { box: function (nid) { return self.box(nid); }, w: h.width, h: h.height,
+              rtl: (root.getComputedStyle ? root.getComputedStyle(this.host).direction : '') === 'rtl' };
     for (id in this.wires) {
       w = this.wires[id];
-      a = this.box(w.def.from); b = this.box(w.def.to);
-      if (!a || !b) { w.g.setAttribute('display', 'none'); w.geom = null; continue; }
-      pa = port(a, { x: b.cx, y: b.cy }); pb = port(b, { x: a.cx, y: a.cy });
-      w.geom = C.wire(pa, pb);
+      if (w.def.route) {
+        pts = w.def.route(S);
+        if (!pts || pts.length < 2) { w.g.setAttribute('display', 'none'); w.geom = null; continue; }
+        w.geom = C.trace(pts, w.def.chamfer === undefined ? 6 : w.def.chamfer);
+      } else {
+        a = this.box(w.def.from); b = this.box(w.def.to);
+        if (!a || !b) { w.g.setAttribute('display', 'none'); w.geom = null; continue; }
+        if (w.def.shape === 'elbow') { pa = elbowPorts(a, b); w.geom = C.elbow(pa.a, pa.b, pa.axis); }
+        else { pa = port(a, { x: b.cx, y: b.cy }); pb = port(b, { x: a.cx, y: a.cy }); w.geom = C.wire(pa, pb); }
+      }
       w.base.setAttribute('d', w.geom.d); w.flow.setAttribute('d', w.geom.d);
+      if (w.ends) {
+        first = C.pointAt(w.geom, 0); last = C.pointAt(w.geom, 1);
+        w.ends[0].setAttribute('cx', first.x); w.ends[0].setAttribute('cy', first.y);
+        w.ends[1].setAttribute('cx', first.x); w.ends[1].setAttribute('cy', first.y);
+        w.ends[2].setAttribute('cx', last.x); w.ends[2].setAttribute('cy', last.y);
+        w.ends[3].setAttribute('cx', last.x); w.ends[3].setAttribute('cy', last.y);
+      }
       w.g.removeAttribute('display');
     }
     this.onLayout(this);
@@ -134,7 +184,8 @@
 
   /**
    * Send a packet.
-   *   spec = { label, color, tone, route: [ { wire, back, ms } | { hold: ms } ], onStep(i), onDone() }
+   *   spec = { label, color, tone, route: [ { wire, back, ms } | { hold: ms } | { sink: ms } ], onStep(i), onDone() }
+   * A sink leg spins the packet down to nothing where it stands (the black hole).
    * The route is a list of legs; onStep(i) runs when leg i has finished (that is where the family box reacts, a block
    * happens, ...). `tone` is a CSS class on the packet ('is-allowed', 'is-blocked', 'is-memory', 'is-example') and can be
    * changed from onStep through the packet argument: packet.tone('is-blocked').
@@ -158,6 +209,8 @@
     pk.el.className = 'pk' + (spec.tone ? ' ' + spec.tone : '');
     pk.el.hidden = false;
     pk.el.style.opacity = '0';
+    pk.el.style.transform = '';                     // a reused packet must not keep the last one's spin
+    pk.el.removeAttribute('data-dir');
     var p = { pk: pk, spec: spec, i: 0, t0: null, w: pk.el.offsetWidth, h: pk.el.offsetHeight, fade: 0 };
     api.tone = function (cls) { pk.el.className = 'pk ' + cls; };
     api.label = function (text) { pk.label.textContent = text; };
@@ -176,6 +229,13 @@
     return false;
   };
 
+  /** Which way the sprite looks: the main direction of the last move (r, l, u, d). Ignores moves of under half a pixel. */
+  function facing(p, dx, dy) {
+    if (Math.abs(dx) + Math.abs(dy) < 0.5) return;
+    var dir = Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? 'r' : 'l') : (dy > 0 ? 'd' : 'u');
+    if (dir !== p.dir) { p.dir = dir; p.pk.el.setAttribute('data-dir', dir); }
+  }
+
   Stage.prototype._frame = function (now) {
     var self = this, i, p, leg, w, e, pt, keep = [];
     this.frameId = 0;
@@ -190,16 +250,18 @@
         else keep.push(p);
         continue;
       }
-      e = Math.min(1, (now - p.t0) / Math.max(1, leg.hold !== undefined ? leg.hold : leg.ms));
+      e = Math.min(1, (now - p.t0) / Math.max(1, leg.hold !== undefined ? leg.hold : leg.sink !== undefined ? leg.sink : leg.ms));
       if (leg.wire) {
         w = this.wires[leg.wire];
         if (w && w.geom) {
           pt = C.pointAt(w.geom, leg.back ? 1 - C.easeInOut(e) : C.easeInOut(e));
+          if (p.x !== undefined) facing(p, pt.x - p.x, pt.y - p.y);
           p.x = pt.x; p.y = pt.y;
         }
       }
       if (p.x !== undefined) {
-        p.pk.el.style.transform = 'translate(' + Math.round(p.x - p.w / 2) + 'px,' + Math.round(p.y - p.h / 2) + 'px)';
+        p.pk.el.style.transform = 'translate(' + Math.round(p.x - p.w / 2) + 'px,' + Math.round(p.y - p.h / 2) + 'px)' +
+          (leg.sink !== undefined ? ' rotate(' + Math.round(e * 540) + 'deg) scale(' + (1 - 0.9 * e).toFixed(3) + ')' : '');
         if (!p.shown) { p.pk.el.style.opacity = '1'; p.shown = true; }       // appears where it starts, not at 0,0
       }
       if (e >= 1) {

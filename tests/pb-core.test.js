@@ -124,6 +124,43 @@ test('pacer never exceeds the rate no matter how much traffic arrives', () => {
   assert.ok(p.queue.length <= 10);
 });
 
+test('wires: right angles, 8-bit style, and a row of devices meets on one bus', () => {
+  const w = C.elbow({ x: 20, y: 0 }, { x: 100, y: 100 });
+  assert.equal(w.d, 'M20 0L20 50L100 50L100 100', 'down to the halfway line, across, down');
+  assert.equal(w.total, 180);
+  assert.deepEqual(C.pointAt(w, 0), { x: 20, y: 0 });
+  assert.deepEqual(C.pointAt(w, 1), { x: 100, y: 100 });
+  assert.deepEqual(C.pointAt(w, 50 / 180), { x: 20, y: 50 }, 'the first corner');
+  assert.deepEqual(C.pointAt(w, 90 / 180), { x: 60, y: 50 }, 'halfway along the bus');
+  assert.deepEqual(C.pointAt(w, 7), { x: 100, y: 100 }, 'clamped');
+  const a = C.elbow({ x: 10, y: 0 }, { x: 100, y: 100 }), b = C.elbow({ x: 190, y: 0 }, { x: 100, y: 100 });
+  assert.equal(a.pts[1].y, b.pts[1].y, 'two devices in one row cross on the same line');
+  assert.deepEqual(a.pts[3], b.pts[3], 'and enter the box at the same point');
+  const h = C.elbow({ x: 0, y: 10 }, { x: 60, y: 10 });
+  assert.equal(h.d, 'M0 10L30 10L30 10L60 10', 'a level wire is straight');
+  assert.deepEqual(C.pointAt(h, 0.5), { x: 30, y: 10 });
+  const v = C.elbow({ x: 400, y: 0 }, { x: 100, y: 90 }, 'v');
+  assert.equal(v.d, 'M400 0L400 45L100 45L100 90', 'told to start downwards, it does, even when the wire is wider than tall');
+  const z = C.elbow({ x: 5, y: 5 }, { x: 5, y: 5 });
+  assert.deepEqual(C.pointAt(z, 0.5), { x: 5, y: 5 }, 'a wire of no length stays put');
+});
+
+test('traces: printed-circuit routing with 45-degree corners, at an even speed', () => {
+  const t = C.trace([{ x: 0, y: 0 }, { x: 0, y: 40 }, { x: 60, y: 40 }], 10);
+  assert.equal(t.d, 'M0 0L0 30L10 40L60 40', 'the corner is cut at 45 degrees');
+  assert.ok(Math.abs(t.total - (30 + Math.SQRT2 * 10 + 50)) < 1e-9, 'true length, diagonal included');
+  assert.deepEqual(C.pointAt(t, 0), { x: 0, y: 0 });
+  assert.deepEqual(C.pointAt(t, 1), { x: 60, y: 40 });
+  const onDiag = C.pointAt(t, (30 + Math.SQRT2 * 5) / t.total);
+  assert.ok(Math.abs(onDiag.x - 5) < 1e-9 && Math.abs(onDiag.y - 35) < 1e-9, 'halfway along the diagonal');
+  const short = C.trace([{ x: 0, y: 0 }, { x: 0, y: 6 }, { x: 40, y: 6 }], 10);
+  assert.equal(short.d, 'M0 0L0 3L3 6L40 6', 'a short run is never cut by more than half');
+  const straight = C.trace([{ x: 5, y: 5 }, { x: 5, y: 50 }], 8);
+  assert.equal(straight.d, 'M5 5L5 50');
+  const loop = C.trace([{ x: 100, y: 50 }, { x: 10, y: 50 }, { x: 10, y: 5 }, { x: 70, y: 5 }, { x: 70, y: 20 }], 6);
+  assert.equal(loop.pts.length, 8, 'three corners, each cut in two points');
+});
+
 test('wires: S-curves with exact ends, and points along them', () => {
   const w = C.wire({ x: 0, y: 0 }, { x: 100, y: 40 });
   assert.equal(w.d, 'M0 0C50 0 50 40 100 40');
