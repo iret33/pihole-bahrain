@@ -32,7 +32,11 @@
 
   // ====================================================================== Stage
   /**
-   * new Stage(host, { wires: [{ id, from, to, shape }], poolSize: 8, onLayout: fn })   shape: 'elbow' for right angles
+   * new Stage(host, { wires: [{ id, from, to, shape, route, chamfer, pads }], poolSize: 8, onLayout: fn })
+   *   shape: 'elbow' for right angles between from and to;
+   *   route(S): a printed-circuit trace instead, through the points it returns (or null to hide the wire). S = { box(id),
+   *     w, h, rtl }. Corners are cut at 45 degrees by `chamfer` px (6 by default);
+   *   pads: copper pads at both ends, and an arrow into the end: every trace feeds the pin it points at.
    * host: position:relative element containing the nodes, an <svg class="live-wires"> and a <div class="live-packets">.
    */
   function Stage(host, options) {
@@ -50,6 +54,7 @@
     this.reduced = reducedMotion();
     this.timers = [];
     var self = this, i;
+    for (i = 0; i < this.defs.length; i++) if (this.defs[i].pads) { this._buildDefs(); break; }
     for (i = 0; i < this.defs.length; i++) this._buildWire(this.defs[i]);
     for (i = 0; i < (options.poolSize || 8); i++) this.pool.push(this._buildPacket());
     this._onResize = function () { self.layout(); };
@@ -60,13 +65,29 @@
     if (this._mq && this._mq.addEventListener) this._mq.addEventListener('change', this._onMq);
   }
 
+  /** The arrow drawn where a trace ends: it points into the input it feeds (once per stage). */
+  Stage.prototype._buildDefs = function () {
+    var defs = svg('defs'), marker = svg('marker', { id: 'pcb-pin', viewBox: '0 0 8 8', refX: '13', refY: '4', markerWidth: '8',
+      markerHeight: '8', markerUnits: 'userSpaceOnUse', orient: 'auto' });
+    marker.appendChild(svg('path', { 'class': 'pin-arrow', d: 'M0 0L8 4L0 8z' }));
+    defs.appendChild(marker);
+    this.svg.appendChild(defs);
+  };
+
   Stage.prototype._buildWire = function (def) {
     var g = svg('g', { 'class': 'wire', 'data-wire': def.id });
     var base = svg('path', { 'class': 'wire-base', fill: 'none' });
     var flow = svg('path', { 'class': 'wire-flow', fill: 'none' });
     g.appendChild(base); g.appendChild(flow);
+    var ends = null;
+    if (def.pads) {
+      base.setAttribute('marker-end', 'url(#pcb-pin)');
+      ends = [svg('circle', { 'class': 'pad', r: '4.5' }), svg('circle', { 'class': 'drill', r: '1.6' }),
+              svg('circle', { 'class': 'pad', r: '4.5' }), svg('circle', { 'class': 'drill', r: '1.6' })];
+      ends.forEach(function (n) { g.appendChild(n); });
+    }
     this.svg.appendChild(g);
-    this.wires[def.id] = { def: def, g: g, base: base, flow: flow, geom: null };
+    this.wires[def.id] = { def: def, g: g, base: base, flow: flow, ends: ends, geom: null };
   };
 
   Stage.prototype._buildPacket = function () {
@@ -108,15 +129,30 @@
 
   /** (Re)draw every wire from the current positions of its two nodes. Call after layout changes. */
   Stage.prototype.layout = function () {
-    var h = this.host.getBoundingClientRect(), id, w, a, b, pa, pb;
+    var self = this, h = this.host.getBoundingClientRect(), id, w, a, b, pa, pb, pts, first, last;
     this.svg.setAttribute('viewBox', '0 0 ' + Math.max(1, Math.round(h.width)) + ' ' + Math.max(1, Math.round(h.height)));
+    var S = { box: function (nid) { return self.box(nid); }, w: h.width, h: h.height,
+              rtl: (root.getComputedStyle ? root.getComputedStyle(this.host).direction : '') === 'rtl' };
     for (id in this.wires) {
       w = this.wires[id];
-      a = this.box(w.def.from); b = this.box(w.def.to);
-      if (!a || !b) { w.g.setAttribute('display', 'none'); w.geom = null; continue; }
-      if (w.def.shape === 'elbow') { pa = elbowPorts(a, b); w.geom = C.elbow(pa.a, pa.b, pa.axis); }
-      else { pa = port(a, { x: b.cx, y: b.cy }); pb = port(b, { x: a.cx, y: a.cy }); w.geom = C.wire(pa, pb); }
+      if (w.def.route) {
+        pts = w.def.route(S);
+        if (!pts || pts.length < 2) { w.g.setAttribute('display', 'none'); w.geom = null; continue; }
+        w.geom = C.trace(pts, w.def.chamfer === undefined ? 6 : w.def.chamfer);
+      } else {
+        a = this.box(w.def.from); b = this.box(w.def.to);
+        if (!a || !b) { w.g.setAttribute('display', 'none'); w.geom = null; continue; }
+        if (w.def.shape === 'elbow') { pa = elbowPorts(a, b); w.geom = C.elbow(pa.a, pa.b, pa.axis); }
+        else { pa = port(a, { x: b.cx, y: b.cy }); pb = port(b, { x: a.cx, y: a.cy }); w.geom = C.wire(pa, pb); }
+      }
       w.base.setAttribute('d', w.geom.d); w.flow.setAttribute('d', w.geom.d);
+      if (w.ends) {
+        first = C.pointAt(w.geom, 0); last = C.pointAt(w.geom, 1);
+        w.ends[0].setAttribute('cx', first.x); w.ends[0].setAttribute('cy', first.y);
+        w.ends[1].setAttribute('cx', first.x); w.ends[1].setAttribute('cy', first.y);
+        w.ends[2].setAttribute('cx', last.x); w.ends[2].setAttribute('cy', last.y);
+        w.ends[3].setAttribute('cx', last.x); w.ends[3].setAttribute('cy', last.y);
+      }
       w.g.removeAttribute('display');
     }
     this.onLayout(this);

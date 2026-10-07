@@ -476,7 +476,7 @@ with sync_playwright() as p:
     page.wait_for_selector(".tile")
     page.locator("#live:not([hidden])").wait_for()
     time.sleep(1.5)
-    expect(page.locator("g.wire").count() == 6 and page.locator(".pk").count() == 8, "after signing out and in there is one set of wires and packets (%d wires, %d packets)" % (page.locator("g.wire").count(), page.locator(".pk").count()))
+    expect(page.locator("g.wire").count() == 11 and page.locator(".pk").count() == 8, "after signing out and in there is one set of wires and packets (%d wires, %d packets)" % (page.locator("g.wire").count(), page.locator(".pk").count()))
     expect(len(errors) == errors_before, "and no errors from the old stage's timers")
     ctx.close()
 

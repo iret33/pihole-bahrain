@@ -274,120 +274,144 @@ body.is-busy .app button{cursor:progress}
 @keyframes live-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.45;transform:scale(.8)}}
 
 /* stage: devices at the top, the family box in the middle, the internet at the bottom, wires between them */
-.stage{position:relative;margin:14px 10px 0;padding:18px 16px 16px;border-radius:22px;display:grid;gap:56px;justify-items:center;
-  background:radial-gradient(var(--stage-dot) 1px,transparent 1.3px) 0 0/16px 16px,var(--stage)}
+/* stage: a printed circuit board. Devices along the top, the family box in the middle with the black hole beside it, the
+   internet at the bottom; copper traces between them, each ending in an arrow at the input pin it feeds. */
+.stage{--pcb:#1B4A3E;--pcb-line:#2C6A58;--copper:#C08A45;--copper-dim:#8E6233;--copper-hot:#F5B83D;--pad:#D9AC64;--drill:#0B1D18;
+  --silk:#EEF6F2;--silk-dim:#9FC2B7;--chip:#10251F;--chip-edge:#3A7564;--leg:#B9C6C1;
+  --sig-ask:#F5B83D;--sig-yes:#3DDC97;--sig-mem:#7FB0FF;--sig-no:#FF5D52;
+  position:relative;margin:14px 10px 0;padding:30px 28px 22px;border-radius:14px;display:grid;gap:56px;justify-items:center;
+  border:2px solid var(--pcb-line);
+  background:radial-gradient(rgba(255,255,255,.07) 1px,transparent 1.4px) 0 0/14px 14px,var(--pcb)}
+@media (prefers-color-scheme:dark){.stage{--pcb:#123A30;--pcb-line:#22574A;--chip:#0A1B17;--chip-edge:#2E6151}}
+/* fiducials: the round alignment marks every board carries in two corners */
+.stage::before,.stage::after{content:"";position:absolute;width:9px;height:9px;border-radius:50%;background:var(--copper);
+  box-shadow:0 0 0 3px var(--pcb),0 0 0 4px var(--copper-dim);z-index:0;pointer-events:none}
+.stage::before{top:9px;inset-inline-end:10px}
+.stage::after{bottom:9px;inset-inline-start:10px}
 .stage>.node,.stage-devices{position:relative;z-index:2}
-/* 8-bit look: notched pixel borders (box-shadow, so focus outlines still show) and pixel masks drawn from small grids
-   (web/px-*.svg: files, not data: addresses, because the page's security policy allows images from the box only) */
-.stage{--px-border:0 -3px 0 0 var(--pxc),0 3px 0 0 var(--pxc),-3px 0 0 0 var(--pxc),3px 0 0 0 var(--pxc);--pac:#F2C230;--hole:#0B0A18;--hole-arm:#4A3A9A;--hole-core:#000;
-  --px-pac-open:url(px-pac-open.svg);--px-pac-shut:url(px-pac-shut.svg);--px-ghost-a:url(px-ghost-a.svg);--px-ghost-b:url(px-ghost-b.svg);--px-circle:url(px-circle.svg)}
 .live-wires{position:absolute;inset:0;width:100%;height:100%;z-index:1;pointer-events:none;overflow:visible}
 .live-packets{position:absolute;inset:0;z-index:4;pointer-events:none;overflow:hidden;border-radius:inherit}
-.stage-devices{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;width:100%}
+.stage-devices{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:18px;width:100%;counter-reset:chip}
 .stage-devices[data-count="1"]{grid-template-columns:minmax(0,12rem);justify-content:center}
 .stage-devices[data-count="2"]{grid-template-columns:repeat(2,minmax(0,1fr))}
 .stage-devices[data-count="3"]{grid-template-columns:repeat(3,minmax(0,1fr))}
 
 .node{font:inherit;color:inherit;cursor:pointer;text-align:center;-webkit-tap-highlight-color:transparent}
-.node-dev{display:flex;flex-direction:column;align-items:center;gap:3px;min-width:0;min-height:96px;padding:10px 6px 9px;border:0;border-radius:0;
-  background:var(--surface);--pxc:var(--line);box-shadow:var(--px-border);transition:transform .12s steps(2)}
-.node-dev:active{transform:translateY(2px)}
-.node-ico{display:grid;place-items:center;width:36px;height:36px;border-radius:0;background:var(--lagoon-soft);color:var(--lagoon-ink);margin-bottom:2px}
-.node-ico svg{width:21px;height:21px}
+/* a device is a chip: dark package, silver legs on both sides, a reference (U1, U2...) in silkscreen */
+.node-dev{position:relative;display:flex;flex-direction:column;align-items:center;gap:3px;min-width:0;min-height:96px;padding:14px 6px 9px;
+  background:var(--chip);border:2px solid var(--chip-edge);border-radius:4px;color:var(--silk);counter-increment:chip;transition:border-color .2s,transform .12s}
+.node-dev::before,.node-dev::after{content:"";position:absolute;top:16px;bottom:16px;width:5px;pointer-events:none;
+  background:repeating-linear-gradient(to bottom,var(--leg) 0 3px,transparent 3px 8px)}
+.node-dev::before{inset-inline-start:-8px}
+.node-dev::after{inset-inline-end:-8px}
+.node-dev:active{transform:translateY(1px)}
+.node-ico{display:grid;place-items:center;width:34px;height:34px;border-radius:3px;background:rgba(255,255,255,.08);color:var(--silk);margin-bottom:2px}
+.node-ico svg{width:20px;height:20px}
+.node-dev .node-ico::after{content:"U" counter(chip);position:absolute;top:4px;inset-inline-start:6px;font:700 8px/1 ui-monospace,Menlo,monospace;
+  letter-spacing:.04em;color:var(--silk-dim)}
 .node-more{font-weight:700;font-size:.8rem;direction:ltr}
 .node-name{max-width:100%;font-size:.8125rem;font-weight:600;line-height:1.25;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow-wrap:break-word;word-break:break-word}
-.node-state{display:flex;align-items:flex-start;justify-content:center;gap:5px;max-width:100%;font-size:.6875rem;line-height:1.25;font-weight:600;color:var(--ink-2)}
-.node-state .sdot{flex:none;width:7px;height:7px;border-radius:0;margin-top:.3em;background:var(--ink-2);opacity:.5}
+.node-state{display:flex;align-items:flex-start;justify-content:center;gap:5px;max-width:100%;font-size:.6875rem;line-height:1.25;font-weight:600;color:var(--silk-dim)}
+.node-state .sdot{flex:none;width:7px;height:7px;border-radius:50%;margin-top:.3em;background:var(--silk-dim);opacity:.6}
 .node-state-text{min-width:0;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow-wrap:break-word}
 @media (max-width:420px){.stage-devices[data-count="4"] .node-dev{padding-inline:3px}.stage-devices[data-count="4"] .node-state{font-size:.65625rem}}
 [lang="ar"] .node-state,[lang="ar"] .node-name{line-height:1.45}
-.st-active{--pxc:var(--lagoon)}
-.st-active .sdot{background:var(--lagoon);opacity:1;animation:live-blink 1.2s steps(1) infinite}
-.st-active .node-state{color:var(--lagoon-ink)}
-.st-paused,.st-offline{--pxc:var(--night-2)}
-.st-paused .node-ico,.st-offline .node-ico{background:var(--night);color:#fff}
-.st-overridden,.st-unreachable{box-shadow:none;border:3px dashed var(--warn)}
-.st-overridden .node-ico,.st-unreachable .node-ico{background:var(--dune);color:var(--dune-ink)}
-.st-overridden .sdot,.st-unreachable .sdot{background:var(--warn);opacity:1}
-.st-overridden .node-state,.st-unreachable .node-state{color:var(--dune-ink)}
-.node-rest,.node-add{background:transparent;box-shadow:none;border:3px dashed var(--line)}
-.node-rest .node-ico{background:var(--pearl);color:var(--ink-2)}
-.node-add{border-color:var(--lagoon)}
-.node-add .node-ico{background:var(--lagoon);color:#fff}
-.node-add .node-state{color:var(--lagoon-ink)}
+.st-active{border-color:var(--sig-yes)}
+.st-active .sdot{background:var(--sig-yes);opacity:1;animation:live-pulse 2s ease-in-out infinite}
+.st-active .node-state{color:var(--sig-yes)}
+.st-paused,.st-offline{border-color:var(--sig-mem)}
+.st-paused .node-ico,.st-offline .node-ico{background:var(--night-2);color:#fff}
+.st-overridden,.st-unreachable{border-color:var(--sig-ask);border-style:dashed}
+.st-overridden .sdot,.st-unreachable .sdot{background:var(--sig-ask);opacity:1}
+.st-overridden .node-state,.st-unreachable .node-state{color:var(--sig-ask)}
+/* "Everyone else" and "Add a device" are empty footprints: a dashed silkscreen outline, no package */
+.node-rest,.node-add{background:transparent;border:2px dashed var(--silk-dim)}
+.node-rest::before,.node-rest::after,.node-add::before,.node-add::after{display:none}
+.node-add{border-color:var(--sig-yes)}
+.node-add .node-ico{background:var(--sig-yes);color:var(--chip)}
+.node-add .node-state{color:var(--sig-yes)}
 .node-add .sdot{display:none}
-.node-dev.is-example{box-shadow:none;border:3px dashed var(--warn)}
-.is-focus{outline:3px solid var(--lagoon);outline-offset:5px}
+.node-dev.is-answered{border-color:var(--sig-yes);animation:chip-blink .6s steps(2)}
+.node-dev.is-example{border-style:dashed;border-color:var(--warn)}
+.is-focus{outline:3px solid var(--copper-hot);outline-offset:5px}
 .is-focus:focus-visible{outline-color:var(--focus)}
-@keyframes live-blink{50%{opacity:.25}}
+@keyframes chip-blink{50%{border-color:var(--chip-edge)}}
 
-/* the family box and, beside it, the black hole: one row, one way in (from above), one way out (below), one to the hole */
+/* the family box (IC1) and, beside it, the black hole: one row */
 .stage-mid{position:relative;z-index:2;display:flex;align-items:center;justify-content:center;gap:30px;width:100%;max-width:24rem}
-.node-box{display:flex;align-items:center;gap:12px;flex:1 1 auto;min-width:0;max-width:19rem;padding:13px 16px;border:0;border-radius:0;color:#fff;text-align:start;
-  background:var(--hero-on);--pxc:var(--hero-end);box-shadow:var(--px-border);transition:transform .12s steps(2)}
-.node-box:active{transform:translateY(2px)}
-.node-box-icon{flex:none;display:grid;place-items:center;width:44px;height:44px;border-radius:0;background:rgba(255,255,255,.18)}
+.node-box{position:relative;display:flex;align-items:center;gap:12px;flex:1 1 auto;min-width:0;max-width:19rem;padding:16px 16px 13px;
+  border:2px solid var(--copper);border-radius:4px;color:var(--silk);text-align:start;background:var(--chip);transition:border-color .25s,transform .12s}
+.node-box::before{content:"IC1";position:absolute;top:4px;inset-inline-start:7px;font:700 8px/1 ui-monospace,Menlo,monospace;letter-spacing:.04em;color:var(--silk-dim)}
+.node-box::after{content:"";position:absolute;top:7px;inset-inline-end:8px;width:8px;height:8px;border-radius:2px;background:var(--sig-yes);opacity:.55}
+.node-box:active{transform:translateY(1px)}
+.node-box-icon{flex:none;display:grid;place-items:center;width:44px;height:44px;border-radius:3px;background:rgba(255,255,255,.08)}
 .node-box-icon svg{width:26px;height:26px}
 .node-box-text{display:grid;gap:1px;min-width:0}
 .node-box-name{font-size:1rem;font-weight:700;line-height:1.25}
-.node-box-sub{font-size:.8125rem;line-height:1.35;opacity:.92;min-height:1.35em;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.node-box-sub{font-size:.8125rem;line-height:1.35;color:var(--silk-dim);min-height:1.35em;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 [lang="ar"] .node-box-sub{line-height:1.5}
-.node-box[data-tone="no"]{background:#B23A27;--pxc:#7E2416}
-.node-box[data-tone="no"] .node-box-sub{opacity:1}
-.node-box.is-checking{animation:box-ping .6s steps(3)}
-.node-box.is-refusing{animation:box-shake .48s steps(6)}
-@keyframes box-ping{0%{transform:translateY(0)}35%{transform:translateY(-3px)}100%{transform:translateY(0)}}
+.node-box[data-tone="yes"]::after{opacity:1}
+.node-box[data-tone="no"]{border-color:var(--sig-no)}
+.node-box[data-tone="no"]::after{background:var(--sig-no);opacity:1}
+.node-box[data-tone="no"] .node-box-sub{color:#FFC2BC}
+.node-box.is-checking{animation:box-ping .65s ease-out}
+.node-box.is-refusing{animation:box-shake .5s ease-out}
+@keyframes box-ping{0%{transform:scale(1)}35%{transform:scale(1.02)}100%{transform:scale(1)}}
 @keyframes box-shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-4px)}40%{transform:translateX(4px)}60%{transform:translateX(-3px)}80%{transform:translateX(2px)}}
 
-.node-hole{position:relative;flex:none;display:grid;place-items:center;width:48px;height:48px;cursor:default}
-.node-hole::before{content:"";position:absolute;inset:0;
-  background:conic-gradient(var(--hole-arm) 0 8%,var(--hole) 8% 25%,var(--hole-arm) 25% 33%,var(--hole) 33% 50%,var(--hole-arm) 50% 58%,var(--hole) 58% 75%,var(--hole-arm) 75% 83%,var(--hole) 83%);
-  -webkit-mask:var(--px-circle) 0 0/100% 100% no-repeat;mask:var(--px-circle) 0 0/100% 100% no-repeat;animation:hole-spin 1.8s steps(12) infinite}
-.hole-core{position:relative;width:20px;height:20px;background:var(--hole-core);-webkit-mask:var(--px-circle) 0 0/100% 100% no-repeat;mask:var(--px-circle) 0 0/100% 100% no-repeat}
-.node-hole.is-eating{animation:hole-gulp .7s steps(4)}
-@keyframes hole-spin{to{transform:rotate(-360deg)}}
-@keyframes hole-gulp{0%,100%{transform:scale(1)}50%{transform:scale(1.2)}}
+/* the black hole: a big drain via. Copper ring, thermal-relief spokes turning slowly, a dark core that swallows a no */
+.node-hole{position:relative;flex:none;display:grid;place-items:center;width:48px;height:48px;border-radius:50%;cursor:default;
+  background:radial-gradient(circle,#000 0 36%,#1E1408 37% 56%,var(--copper-dim) 57% 66%,transparent 67%)}
+.node-hole::before{content:"";position:absolute;inset:-7px;border-radius:50%;border:2px dashed var(--copper);animation:hole-spin 9s linear infinite}
+.node-hole::after{content:"";position:absolute;inset:0;border-radius:50%;
+  background:repeating-conic-gradient(var(--copper) 0 7deg,transparent 7deg 90deg);
+  -webkit-mask:radial-gradient(circle,transparent 0 56%,#000 57% 70%,transparent 71%);mask:radial-gradient(circle,transparent 0 56%,#000 57% 70%,transparent 71%);
+  animation:hole-spin 3s linear infinite reverse}
+.hole-core{position:relative;width:14px;height:14px;border-radius:50%;background:conic-gradient(#3B2B7A,#000 40%,#3B2B7A 60%,#000);animation:hole-spin 1.4s linear infinite}
+.node-hole.is-eating{animation:hole-gulp .7s ease-out}
+@keyframes hole-spin{to{transform:rotate(360deg)}}
+@keyframes hole-gulp{0%,100%{transform:scale(1)}40%{transform:scale(1.18)}}
 
-.node-net{display:inline-flex;align-items:center;justify-content:center;gap:9px;width:100%;max-width:21rem;min-height:52px;padding:10px 18px;border:0;border-radius:0;
-  background:var(--night);--pxc:var(--night-2);box-shadow:var(--px-border);color:#fff;font-weight:700;font-size:.95rem;transition:background-color .3s steps(2)}
+/* the internet: a connector (J1) */
+.node-net{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:9px;width:100%;max-width:21rem;min-height:52px;padding:10px 18px;
+  border:2px solid #6C7AA6;border-radius:4px;background:#0E1A33;color:var(--silk);font-weight:700;font-size:.95rem;transition:border-color .3s}
+.node-net::before{content:"J1";position:absolute;top:4px;inset-inline-start:7px;font:700 8px/1 ui-monospace,Menlo,monospace;letter-spacing:.04em;color:#A9B4D6}
 .node-net svg{width:22px;height:22px}
-.node-net.is-reached{background:var(--night-2);--pxc:var(--lagoon)}
-.node-example{background:transparent;box-shadow:none;border:3px dashed var(--warn)}
+.node-net.is-reached{border-color:var(--sig-ask)}
+.node-example{background:transparent;border:2px dashed var(--warn)}
 .node-example .node-ico{background:var(--dune);color:var(--dune-ink)}
 .node-example .sdot{background:var(--warn);opacity:1}
-.node-example .node-state{color:var(--dune-ink)}
+.node-example .node-state{color:var(--warn)}
 
-/* wires: right angles, thin and solid (they meet on one bus without doubling up); square pellets run along a busy one */
-.wire-base{stroke:var(--wire);stroke-width:3;stroke-linecap:square;stroke-linejoin:miter;fill:none;shape-rendering:crispEdges}
-.wire-flow{stroke:var(--lagoon);stroke-width:5;stroke-linecap:butt;stroke-dasharray:5 15;fill:none;opacity:0;shape-rendering:crispEdges;transition:opacity .4s steps(2)}
-.wire.is-active .wire-flow{opacity:.9;animation:wire-flow .8s steps(4) infinite}
-.wire.is-ok .wire-base{stroke:var(--lagoon);opacity:.55}
-.wire.is-quiet .wire-base{opacity:.55}
-.wire.is-rest .wire-base{opacity:.8}
-.wire.is-off .wire-base{stroke:var(--night-2);opacity:.8}
-.wire.is-warn .wire-base{stroke:var(--warn);stroke-dasharray:6 6}
-.wire.is-warn .wire-flow,.wire.is-off .wire-flow{stroke:var(--warn)}
-.wire.is-hole .wire-base{stroke:var(--coral);opacity:.4}
-.wire.is-hole .wire-flow{stroke:var(--coral)}
-@keyframes wire-flow{to{stroke-dashoffset:-20}}
+/* traces: copper with 45-degree corners; a pad (with its drill hole) at each end and an arrow into the input it feeds */
+.wire-base{stroke:var(--copper-dim);stroke-width:3;stroke-linecap:round;stroke-linejoin:round;fill:none}
+.wire-flow{stroke:var(--copper-hot);stroke-width:3;stroke-linecap:round;stroke-dasharray:2 11;fill:none;opacity:0;transition:opacity .4s}
+.wire.is-active .wire-base{stroke:var(--copper)}
+.wire.is-active .wire-flow{opacity:1;animation:wire-flow .9s linear infinite}
+.wire.is-ok .wire-base{stroke:var(--copper)}
+.wire.is-quiet .wire-base,.wire.is-rest .wire-base{opacity:.75}
+.wire.is-off .wire-base{stroke:#5E6CA8}
+.wire.is-warn .wire-base{stroke:var(--sig-ask);stroke-dasharray:6 5}
+.wire.is-warn .wire-flow,.wire.is-off .wire-flow{stroke:var(--sig-ask)}
+.wire.is-answer .wire-flow{stroke:var(--sig-yes)}
+.wire.is-hole .wire-base{stroke:#A4533A}
+.wire.is-hole .wire-flow{stroke:var(--sig-no)}
+.pad{fill:var(--pad)}
+.drill{fill:var(--drill)}
+.pin-arrow{fill:var(--silk)}
+@keyframes wire-flow{to{stroke-dashoffset:-26}}
 
-/* packets: an 8-bit sprite on the wire. The words (app, "Looking up...") stay in the element, for the text list and for
-   tests, but the picture shows only the sprite: a Pac-Man on its way, a ghost with a cross for a no, a blue one when the
-   box answered from memory. Pixels are 2 px, from 11 x 11 grids. */
-.pk{position:absolute;left:0;top:0;width:22px;height:22px;will-change:transform}
+/* signals: small square LEDs on the copper. The words (app, "Looking up...") stay in the element for the text list and the
+   tests; the picture shows only the light: amber on its way, green with the answer, blue when the box answered from memory,
+   and a red round one with a cross for a no (shape and mark, not only colour), which falls into the black hole. */
+.pk{position:absolute;left:0;top:0;width:12px;height:12px;will-change:transform}
 .pk-badge,.pk-label{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
-.pk-sprite{display:block;width:22px;height:22px;background:var(--pac);
-  -webkit-mask:var(--px-pac-open) 0 0/100% 100% no-repeat;mask:var(--px-pac-open) 0 0/100% 100% no-repeat;animation:pac-chomp .28s steps(1) infinite}
-.pk[data-dir="l"] .pk-sprite{transform:scaleX(-1)}
-.pk[data-dir="u"] .pk-sprite{transform:rotate(-90deg)}
-.pk[data-dir="d"] .pk-sprite{transform:rotate(90deg)}
-.pk.is-memory:not(.is-asking) .pk-sprite{background:var(--mem)}
-.pk.is-blocked:not(.is-asking) .pk-sprite{background:var(--coral);-webkit-mask-image:var(--px-ghost-a);mask-image:var(--px-ghost-a);animation:ghost-wave .3s steps(1) infinite}
-.pk.is-blocked:not(.is-asking)[data-dir] .pk-sprite{transform:none}
-.pk.is-blocked:not(.is-asking)::after{content:"\2715";position:absolute;top:-11px;inset-inline-end:-7px;font:800 12px/1 ui-monospace,Menlo,monospace;color:var(--coral-ink)}
-.pk.is-example .pk-sprite{opacity:.85}
-@keyframes pac-chomp{50%{-webkit-mask-image:var(--px-pac-shut);mask-image:var(--px-pac-shut)}}
-@keyframes ghost-wave{50%{-webkit-mask-image:var(--px-ghost-b);mask-image:var(--px-ghost-b)}}
+.pk-sprite{display:block;width:12px;height:12px;border-radius:2px;background:var(--sig-ask);box-shadow:0 0 0 2px rgba(255,255,255,.85)}
+.pk.is-answer .pk-sprite{background:var(--sig-yes)}
+.pk.is-memory:not(.is-asking) .pk-sprite{background:var(--sig-mem)}
+.pk.is-blocked:not(.is-asking) .pk-sprite{background:var(--sig-no);border-radius:50%}
+.pk.is-blocked:not(.is-asking)::after{content:"\2715";position:absolute;inset:0;display:grid;place-items:center;font:900 8px/1 ui-monospace,Menlo,monospace;color:#fff}
+.pk.is-example .pk-sprite{box-shadow:0 0 0 2px var(--warn)}
 
 /* under the picture */
 .live-caption{margin:12px 18px 0;color:var(--ink-2);font-size:.9rem;line-height:1.5;min-height:3em}

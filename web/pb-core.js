@@ -202,6 +202,34 @@
     }
     return { pts: pts, lens: lens, total: total, d: d };
   }
+  /**
+   * A printed-circuit trace through `pts` (a list of {x, y}): straight runs, each corner cut at 45 degrees by up to
+   * `chamfer` px (never more than half of either run, so short runs stay sharp). Lengths are true distances, so a signal moves
+   * at an even speed along the diagonals too. Same shape as elbow(): { pts, lens, total, d }.
+   */
+  function trace(pts, chamfer) {
+    var out = [pts[0]], i, a, b, c, l1, l2, k, lens = [], total = 0, l;
+    for (i = 1; i < pts.length - 1; i++) {
+      a = pts[i - 1]; b = pts[i]; c = pts[i + 1];
+      l1 = Math.sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y));
+      l2 = Math.sqrt((c.x - b.x) * (c.x - b.x) + (c.y - b.y) * (c.y - b.y));
+      k = Math.min(chamfer || 0, l1 / 2, l2 / 2);
+      if (k > 0.5 && l1 && l2) {
+        out.push({ x: b.x - (b.x - a.x) / l1 * k, y: b.y - (b.y - a.y) / l1 * k });
+        out.push({ x: b.x + (c.x - b.x) / l2 * k, y: b.y + (c.y - b.y) / l2 * k });
+      } else {
+        out.push(b);
+      }
+    }
+    out.push(pts[pts.length - 1]);
+    var r = function (n) { return Math.round(n * 10) / 10; }, d = 'M' + r(out[0].x) + ' ' + r(out[0].y);
+    for (i = 1; i < out.length; i++) {
+      l = Math.sqrt((out[i].x - out[i - 1].x) * (out[i].x - out[i - 1].x) + (out[i].y - out[i - 1].y) * (out[i].y - out[i - 1].y));
+      lens.push(l); total += l;
+      d += 'L' + r(out[i].x) + ' ' + r(out[i].y);
+    }
+    return { pts: out, lens: lens, total: total, d: d };
+  }
   /** The point at fraction t (0..1) along a wire() curve or an elbow() line. */
   function pointAt(w, t) {
     t = clamp01(t);
@@ -484,7 +512,7 @@
     parseState: parseState, defaultState: defaultState, editState: editState,
     classify: classify, isHiddenDomain: isHiddenDomain, isHiddenClient: isHiddenClient, baseDomain: baseDomain, appFor: appFor,
     formatCount: formatCount, percent: percent, topByApp: topByApp, hourly: hourly, deviceState: deviceState, Feed: Feed, priority: priority, Pacer: Pacer, Poller: Poller,
-    lerp: lerp, easeInOut: easeInOut, clamp01: clamp01, wire: wire, elbow: elbow, pointAt: pointAt,
+    lerp: lerp, easeInOut: easeInOut, clamp01: clamp01, wire: wire, elbow: elbow, trace: trace, pointAt: pointAt,
   };
   root.PBCore = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
