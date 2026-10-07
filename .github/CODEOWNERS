@@ -1,1 +1,5 @@
 * @iret33
+
+# Every box downloads lists/ from master each night, with no checksum and no rollback, so a change here is reviewed
+# like code. Add a second owner on both lines when there is one (docs/maintainers/releasing.md, "One-time setup").
+/lists/ @iret33
