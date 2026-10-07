@@ -174,3 +174,30 @@ html[dir="rtl"] .more::after{content:"←"}
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}
 }
+
+/* ---------- setup guide (step by step, for a ready-made box) ---------- */
+.setup-pic{margin-block:4px 24px;padding:14px 16px;border-radius:var(--radius);background:var(--surface);border:1px solid var(--line)}
+.setup-pic svg{display:block;width:100%;max-width:560px;height:auto;margin-inline:auto}
+.setup-pic figcaption{margin-block-start:8px;text-align:center}
+.setup-pic .dev{fill:var(--brand-soft);stroke:var(--brand-ink);stroke-width:2.5}
+.setup-pic .box{fill:var(--brand)}
+.setup-pic .box-led,.setup-pic .led{fill:var(--brand-ink)}
+.setup-pic .box-led{fill:var(--on-btn)}
+.setup-pic .ant{fill:none;stroke:var(--brand-ink);stroke-width:4;stroke-linecap:round}
+.setup-pic .port{fill:var(--surface);stroke:var(--brand-ink);stroke-width:2}
+.setup-pic .lan{fill:var(--sand)}
+.setup-pic .cable{fill:none;stroke-width:5;stroke-linecap:round}
+.setup-pic .lan-cable{stroke:var(--brand)}
+.setup-pic .usb-cable{stroke:var(--sand-ink);stroke-dasharray:1 9}
+.setup-pic text{fill:var(--ink);font:600 18px var(--font);text-anchor:middle}
+.setup-pic .cap{fill:var(--ink-2);font-weight:500;font-size:16px}
+.guide{display:grid;gap:14px}
+.guide-step{display:grid;grid-template-columns:auto 1fr;gap:14px;align-items:start}
+.guide-step .step-no{margin-block-end:0}
+.guide-step h3{font-size:1.1rem;line-height:1.4;padding-block-start:6px}
+.guide-sub{margin-block-start:10px;padding-inline-start:1.3em;list-style:disc;color:var(--ink-2)}
+.guide-sub li{margin-block-start:6px}
+.card .guide-tip{margin-block-start:12px;padding:10px 14px;border-radius:12px;background:var(--brand-soft);color:var(--ink);font-size:.95rem}
+.guide-keep{margin-block-start:20px;border-color:var(--brand)}
+.guide-keep ul{margin-block-start:8px;padding-inline-start:1.3em;list-style:disc;color:var(--ink-2)}
+.guide-keep li{margin-block-start:8px}
