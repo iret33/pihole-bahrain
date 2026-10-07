@@ -125,7 +125,7 @@ with sync_playwright() as p:
     expect("Apps blocked for children: 2" in page.inner_text("#liveSub"), "and how many apps are blocked: %r" % page.inner_text("#liveSub"))
     names = page.locator(".node-dev .node-name").all_inner_texts()
     expect(names == ["Sara's iPad", "Ali's phone", "Everyone else"], "two children and the rest of the home are drawn: %s" % names)
-    expect(page.locator("path.wire-base").count() == 6, "six wires exist (3 device slots, rest of home, box to internet, the direct line)")
+    expect(page.locator("path.wire-base").count() == 11, "eleven wires exist (a question and an answer for 3 device slots and the rest of home, one each way to the internet, the black hole)")
     states = page.locator(".node-dev .node-state-text").all_inner_texts()
     expect(states[0] == "Online now" and states[1] == "Quiet", "Sara's iPad is online and Ali's phone idle: %s" % states)
 
