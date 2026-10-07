@@ -3,6 +3,21 @@
 All notable changes to Sinko. Versions follow [Semantic Versioning](https://semver.org); the newest release is at the top.
 Boxes learn about a release from this repository's GitHub releases, whose notes are the section of this file.
 
+## [3.0.3] - 2026-10-07
+
+### Changed
+- **The live picture is now a circuit board.** Each device is a chip, the family box sits in the middle and the internet
+  is a connector at the bottom. The wires now show what really happens: a device asks the box, and the answer always comes
+  back from the box along the edge of the board, never straight from the internet. When the box needs to look an address
+  up, it asks the internet on one wire and gets the reply on another. A blocked app falls into a black hole and goes
+  nowhere. Small lights travel the wires: amber for a question, green for an answer, blue for an answer the box already
+  knew, and red with ✕ for a no. The picture mirrors for Arabic and fits a phone screen.
+
+### Added
+- The project website has a step-by-step setup guide for parents: plugging in the box, powering it from the router's USB
+  port, finding it, pointing the router to it and adding the children's devices.
+- `tools/mirror/` sets up a copy of the releases on `updates.ioai.bh`. Boxes on this version still update from GitHub.
+
 ## [3.0.2] - 2026-10-07
 
 ### Fixed
