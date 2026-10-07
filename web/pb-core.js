@@ -184,9 +184,38 @@
     return { p0: a, p1: c1, p2: c2, p3: b,
       d: 'M' + r(a.x) + ' ' + r(a.y) + 'C' + r(c1.x) + ' ' + r(c1.y) + ' ' + r(c2.x) + ' ' + r(c2.y) + ' ' + r(b.x) + ' ' + r(b.y) };
   }
-  /** The point at fraction t (0..1) along a wire() curve. */
+  /**
+   * A right-angled wire from a to b, the 8-bit way: along `axis` ('v' or 'h'; the longer one when not given) to the halfway
+   * line, across, then on to b. Wires
+   * from a row of devices to one box meet on the same halfway line, so they read as one bus into one input.
+   */
+  function elbow(a, b, axis) {
+    var vertical = axis ? axis === 'v' : Math.abs(b.y - a.y) >= Math.abs(b.x - a.x), mid, pts = [a], lens = [], total = 0, i, l;
+    if (vertical) { mid = lerp(a.y, b.y, 0.5); pts.push({ x: a.x, y: mid }, { x: b.x, y: mid }); }
+    else { mid = lerp(a.x, b.x, 0.5); pts.push({ x: mid, y: a.y }, { x: mid, y: b.y }); }
+    pts.push(b);
+    var r = function (n) { return Math.round(n * 10) / 10; }, d = 'M' + r(a.x) + ' ' + r(a.y);
+    for (i = 1; i < pts.length; i++) {
+      l = Math.abs(pts[i].x - pts[i - 1].x) + Math.abs(pts[i].y - pts[i - 1].y);
+      lens.push(l); total += l;
+      d += 'L' + r(pts[i].x) + ' ' + r(pts[i].y);
+    }
+    return { pts: pts, lens: lens, total: total, d: d };
+  }
+  /** The point at fraction t (0..1) along a wire() curve or an elbow() line. */
   function pointAt(w, t) {
     t = clamp01(t);
+    if (w.pts) {
+      var want = t * w.total, i, f;
+      for (i = 0; i < w.lens.length; i++) {
+        if (want <= w.lens[i] || i === w.lens.length - 1) {
+          f = w.lens[i] ? Math.min(1, want / w.lens[i]) : 1;
+          return { x: lerp(w.pts[i].x, w.pts[i + 1].x, f), y: lerp(w.pts[i].y, w.pts[i + 1].y, f) };
+        }
+        want -= w.lens[i];
+      }
+      return { x: w.pts[w.pts.length - 1].x, y: w.pts[w.pts.length - 1].y };
+    }
     var u = 1 - t, a = u * u * u, b = 3 * u * u * t, c = 3 * u * t * t, d = t * t * t;
     return { x: a * w.p0.x + b * w.p1.x + c * w.p2.x + d * w.p3.x, y: a * w.p0.y + b * w.p1.y + c * w.p2.y + d * w.p3.y };
   }
@@ -455,7 +484,7 @@
     parseState: parseState, defaultState: defaultState, editState: editState,
     classify: classify, isHiddenDomain: isHiddenDomain, isHiddenClient: isHiddenClient, baseDomain: baseDomain, appFor: appFor,
     formatCount: formatCount, percent: percent, topByApp: topByApp, hourly: hourly, deviceState: deviceState, Feed: Feed, priority: priority, Pacer: Pacer, Poller: Poller,
-    lerp: lerp, easeInOut: easeInOut, clamp01: clamp01, wire: wire, pointAt: pointAt,
+    lerp: lerp, easeInOut: easeInOut, clamp01: clamp01, wire: wire, elbow: elbow, pointAt: pointAt,
   };
   root.PBCore = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

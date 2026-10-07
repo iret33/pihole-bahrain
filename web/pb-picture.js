@@ -1,7 +1,8 @@
 /* pb-picture.js: the live picture on the parent page.
  *
- * Shows the home's internet requests as little packets travelling along wires: each device asks the family box first,
- * the box says yes or no, and an allowed request goes on to the internet. The numbers (checked / stopped / share) come from
+ * Shows the home's internet requests as little 8-bit sprites travelling along right-angled wires: each device asks the
+ * family box first, the box says yes or no, an allowed request goes on to the internet, and a refused one falls into the
+ * black hole beside the box. Every block has one way in and one way out, so the picture stays calm. The numbers (checked / stopped / share) come from
  * Pi-hole's own statistics. Everything is read-only: this file never changes a rule.
  *
  * Data (all through the page's own signed-in `call`): /api/stats/summary every 15 s, /api/queries every 3.5 s (a few rows,
@@ -44,7 +45,7 @@
   var wireUntil = {};          // wire id -> ms until which it looks busy
   var voice = { until: 0, last: 0, timer: 0 };
   var pumpTimer = 0, recentTimer = 0, ariaTimer = 0, recentTick = 0, wireTimer = 0, captionTimer = 0, repaintTimer = 0;
-  var captionHeld = false, wired = false, lastDirect = 0, sayFlip = false;
+  var captionHeld = false, wired = false, sayFlip = false;
   var tour = { on: false, i: 0, timer: 0 };
   var minute = [];             // [{ at, blocked }] events of the last minute, for the screen-reader summary
   var lastAria = '';
@@ -213,8 +214,9 @@
   }
 
   function wireDefs() {
-    var defs = [{ id: 'w-rest', from: 'rest', to: 'box' }, { id: 'w-out', from: 'box', to: 'net' }, { id: 'w-direct', from: 'rail-a', to: 'rail-b' }], i;
-    for (i = 0; i < SLOT_MAX; i++) defs.push({ id: 'w-dev-' + i, from: 'dev-' + i, to: 'box' });
+    var defs = [{ id: 'w-rest', from: 'rest', to: 'box', shape: 'elbow' }, { id: 'w-out', from: 'box', to: 'net', shape: 'elbow' },
+      { id: 'w-hole', from: 'box', to: 'hole', shape: 'elbow' }], i;
+    for (i = 0; i < SLOT_MAX; i++) defs.push({ id: 'w-dev-' + i, from: 'dev-' + i, to: 'box', shape: 'elbow' });
     return defs;
   }
   function wireOf(slotId) { return slotId === 'rest' ? 'w-rest' : 'w-' + slotId; }
@@ -233,7 +235,7 @@
       stage.wireState(id, cls);
     });
     stage.wireState('w-out', wireUntil['w-out'] > n ? 'is-active' : '');
-    stage.wireState('w-direct', 'is-direct');
+    stage.wireState('w-hole', 'is-hole' + (wireUntil['w-hole'] > n ? ' is-active' : ''));
     var soonest = 0, k;
     for (k in wireUntil) if (wireUntil[k] > n && (!soonest || wireUntil[k] < soonest)) soonest = wireUntil[k];
     root.clearTimeout(wireTimer);
@@ -444,7 +446,8 @@
     busy(w, 5000);
     if (ev.kind === 'blocked') {
       tone = 'is-blocked';
-      route = [{ wire: w, ms: 650 }, { hold: 180 }, { wire: w, back: true, ms: 560 }];
+      busy('w-hole', 5000);
+      route = [{ wire: w, ms: 650 }, { hold: 180 }, { wire: 'w-hole', ms: 420 }, { sink: 650 }];
     } else if (ev.kind === 'memory') {
       tone = 'is-memory';
       route = [{ wire: w, ms: 650 }, { hold: 160 }, { wire: w, back: true, ms: 520 }];
@@ -455,26 +458,20 @@
     }
     paintWires();
     stage.send({
-      label: lab.text, badge: lab.badge, color: lab.color, tone: tone, route: route,
+      // It travels as a question; the box decides what it becomes (a ghost for a no) when it gets there.
+      label: lab.text, badge: lab.badge, color: lab.color, tone: 'is-asking ' + tone, route: route,
       onStep: function (i, api) {
         if (i === 0) {                                   // arrived at the box
+          api.tone(tone);
           stage.pulse('box', ev.kind === 'blocked' ? 'is-refusing' : 'is-checking', 650);
           say(t(ev.kind === 'blocked' ? 'lvSayNo' : 'lvSayYes', { a: spoken }), ev.kind === 'blocked' ? 'no' : 'yes');
         }
+        if (ev.kind === 'blocked' && i === 2) { api.tone(tone + ' is-sinking'); stage.pulse('hole', 'is-eating', 700); }
         if (ev.kind === 'allowed' && i === 1) api.label(t('lvLookup'));            // the box looks the address up outside: only that goes on
         if (ev.kind === 'allowed' && i === 2) stage.pulse('net', 'is-reached', 600);
         if (ev.kind === 'allowed' && i === 4) api.label(lab.text);
-      },
-      onDone: ev.kind === 'allowed' ? directLine : undefined
+      }
     });
-  }
-
-  /** After a yes the device goes online by itself: a dot runs along the dotted line, around the box (at most one every 2.5 s). */
-  function directLine() {
-    var n = now();
-    if (!active() || tour.on || n - lastDirect < 2500) return;
-    lastDirect = n;
-    stage.send({ tone: 'is-direct', route: [{ wire: 'w-direct', ms: 1000 }] });
   }
 
   function setCollapsed(v, remember) {
@@ -582,17 +579,19 @@
     var w = 'w-dev-0', route, tone, label = t('lvExampleApp');
     if (!stage.wires[w] || !stage.wires[w].geom) w = 'w-rest';
     busy(w, 5000);
-    if (kind === 'blocked') { tone = 'is-blocked is-example'; route = [{ wire: w, ms: 800 }, { hold: 220 }, { wire: w, back: true, ms: 700 }]; }
+    if (kind === 'blocked') { tone = 'is-blocked is-example'; busy('w-hole', 5000);
+      route = [{ wire: w, ms: 800 }, { hold: 220 }, { wire: 'w-hole', ms: 500 }, { sink: 800 }]; }
     else if (kind === 'allowed') { tone = 'is-allowed is-example'; busy('w-out', 5000);
       route = [{ wire: w, ms: 750 }, { hold: 200 }, { wire: 'w-out', ms: 800 }, { hold: 200 }, { wire: 'w-out', back: true, ms: 800 }, { wire: w, back: true, ms: 650 }]; }
     else { tone = 'is-example'; route = [{ wire: w, ms: 800 }, { hold: 400 }, { wire: w, back: true, ms: 700 }]; }
     paintWires();
-    stage.send({ label: label, tone: tone, route: route, onStep: function (i, api) {
-      if (i === 0) { stage.pulse('box', kind === 'blocked' ? 'is-refusing' : 'is-checking', 700); say(t(kind === 'blocked' ? 'lvSayNoEx' : 'lvSayYesEx'), kind === 'blocked' ? 'no' : 'yes', true); }
+    stage.send({ label: label, tone: 'is-asking ' + tone, route: route, onStep: function (i, api) {
+      if (i === 0) { api.tone(tone); stage.pulse('box', kind === 'blocked' ? 'is-refusing' : 'is-checking', 700); say(t(kind === 'blocked' ? 'lvSayNoEx' : 'lvSayYesEx'), kind === 'blocked' ? 'no' : 'yes', true); }
+      if (kind === 'blocked' && i === 2) { api.tone(tone + ' is-sinking'); stage.pulse('hole', 'is-eating', 800); }
       if (kind === 'allowed' && i === 1) api.label(t('lvLookup'));
       if (kind === 'allowed' && i === 2) stage.pulse('net', 'is-reached', 600);
       if (kind === 'allowed' && i === 4) api.label(label);
-    }, onDone: kind === 'allowed' ? function () { if (tour.on && active()) stage.send({ tone: 'is-direct', route: [{ wire: 'w-direct', ms: 1100 }] }); } : undefined });
+    } });
   }
   function tourTexts() {                                      // also called when the language changes mid-tour
     setText(el.tourStep, t(TOUR[tour.i]));
@@ -610,7 +609,7 @@
     stage.clear();
     tourTexts();
     var kinds = [null, 'plain', 'allowed', 'blocked', null];
-    var foci = [['dev-0', 'rest'], ['dev-0', 'box'], ['dev-0', 'box', 'net'], ['dev-0', 'box'], ['box']];
+    var foci = [['dev-0', 'rest'], ['dev-0', 'box'], ['dev-0', 'box', 'net'], ['dev-0', 'box', 'hole'], ['box']];
     focusNodes(foci[tour.i]);
     var run = function () { if (kinds[tour.i] && tour.on && active()) example(kinds[tour.i]); };
     run();

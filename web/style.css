@@ -277,6 +277,10 @@ body.is-busy .app button{cursor:progress}
 .stage{position:relative;margin:14px 10px 0;padding:18px 16px 16px;border-radius:22px;display:grid;gap:56px;justify-items:center;
   background:radial-gradient(var(--stage-dot) 1px,transparent 1.3px) 0 0/16px 16px,var(--stage)}
 .stage>.node,.stage-devices{position:relative;z-index:2}
+/* 8-bit look: notched pixel borders (box-shadow, so focus outlines still show) and pixel masks drawn from small grids
+   (web/px-*.svg: files, not data: addresses, because the page's security policy allows images from the box only) */
+.stage{--px-border:0 -3px 0 0 var(--pxc),0 3px 0 0 var(--pxc),-3px 0 0 0 var(--pxc),3px 0 0 0 var(--pxc);--pac:#F2C230;--hole:#0B0A18;--hole-arm:#4A3A9A;--hole-core:#000;
+  --px-pac-open:url(px-pac-open.svg);--px-pac-shut:url(px-pac-shut.svg);--px-ghost-a:url(px-ghost-a.svg);--px-ghost-b:url(px-ghost-b.svg);--px-circle:url(px-circle.svg)}
 .live-wires{position:absolute;inset:0;width:100%;height:100%;z-index:1;pointer-events:none;overflow:visible}
 .live-packets{position:absolute;inset:0;z-index:4;pointer-events:none;overflow:hidden;border-radius:inherit}
 .stage-devices{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;width:100%}
@@ -285,100 +289,105 @@ body.is-busy .app button{cursor:progress}
 .stage-devices[data-count="3"]{grid-template-columns:repeat(3,minmax(0,1fr))}
 
 .node{font:inherit;color:inherit;cursor:pointer;text-align:center;-webkit-tap-highlight-color:transparent}
-.node-dev{display:flex;flex-direction:column;align-items:center;gap:3px;min-width:0;min-height:96px;padding:10px 6px 9px;border-radius:18px;
-  background:var(--surface);border:1.5px solid var(--line);box-shadow:0 2px 8px rgba(18,44,41,.07);transition:border-color .2s,box-shadow .2s,transform .12s}
-.node-dev:active{transform:scale(.97)}
-.node-ico{display:grid;place-items:center;width:36px;height:36px;border-radius:12px;background:var(--lagoon-soft);color:var(--lagoon-ink);margin-bottom:2px}
+.node-dev{display:flex;flex-direction:column;align-items:center;gap:3px;min-width:0;min-height:96px;padding:10px 6px 9px;border:0;border-radius:0;
+  background:var(--surface);--pxc:var(--line);box-shadow:var(--px-border);transition:transform .12s steps(2)}
+.node-dev:active{transform:translateY(2px)}
+.node-ico{display:grid;place-items:center;width:36px;height:36px;border-radius:0;background:var(--lagoon-soft);color:var(--lagoon-ink);margin-bottom:2px}
 .node-ico svg{width:21px;height:21px}
 .node-more{font-weight:700;font-size:.8rem;direction:ltr}
 .node-name{max-width:100%;font-size:.8125rem;font-weight:600;line-height:1.25;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow-wrap:break-word;word-break:break-word}
 .node-state{display:flex;align-items:flex-start;justify-content:center;gap:5px;max-width:100%;font-size:.6875rem;line-height:1.25;font-weight:600;color:var(--ink-2)}
-.node-state .sdot{flex:none;width:7px;height:7px;border-radius:50%;margin-top:.3em;background:var(--ink-2);opacity:.5}
+.node-state .sdot{flex:none;width:7px;height:7px;border-radius:0;margin-top:.3em;background:var(--ink-2);opacity:.5}
 .node-state-text{min-width:0;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow-wrap:break-word}
 @media (max-width:420px){.stage-devices[data-count="4"] .node-dev{padding-inline:3px}.stage-devices[data-count="4"] .node-state{font-size:.65625rem}}
 [lang="ar"] .node-state,[lang="ar"] .node-name{line-height:1.45}
-.st-active{border-color:var(--lagoon)}
-.st-active .sdot{background:var(--lagoon);opacity:1;animation:live-pulse 2s ease-in-out infinite}
+.st-active{--pxc:var(--lagoon)}
+.st-active .sdot{background:var(--lagoon);opacity:1;animation:live-blink 1.2s steps(1) infinite}
 .st-active .node-state{color:var(--lagoon-ink)}
-.st-paused,.st-offline{border-color:var(--night-2)}
+.st-paused,.st-offline{--pxc:var(--night-2)}
 .st-paused .node-ico,.st-offline .node-ico{background:var(--night);color:#fff}
-.st-overridden,.st-unreachable{border-color:var(--warn);border-style:dashed}
+.st-overridden,.st-unreachable{box-shadow:none;border:3px dashed var(--warn)}
 .st-overridden .node-ico,.st-unreachable .node-ico{background:var(--dune);color:var(--dune-ink)}
 .st-overridden .sdot,.st-unreachable .sdot{background:var(--warn);opacity:1}
 .st-overridden .node-state,.st-unreachable .node-state{color:var(--dune-ink)}
-.node-rest,.node-add{border-style:dashed;background:transparent;box-shadow:none}
+.node-rest,.node-add{background:transparent;box-shadow:none;border:3px dashed var(--line)}
 .node-rest .node-ico{background:var(--pearl);color:var(--ink-2)}
 .node-add{border-color:var(--lagoon)}
 .node-add .node-ico{background:var(--lagoon);color:#fff}
 .node-add .node-state{color:var(--lagoon-ink)}
 .node-add .sdot{display:none}
-.node-dev.is-example{border-style:dashed;border-color:var(--warn)}
-.is-focus{outline:3px solid var(--lagoon);outline-offset:3px}
+.node-dev.is-example{box-shadow:none;border:3px dashed var(--warn)}
+.is-focus{outline:3px solid var(--lagoon);outline-offset:5px}
 .is-focus:focus-visible{outline-color:var(--focus)}
+@keyframes live-blink{50%{opacity:.25}}
 
-.node-box{display:flex;align-items:center;gap:12px;width:100%;max-width:21rem;padding:13px 16px;border:0;border-radius:22px;color:#fff;text-align:start;
-  background:linear-gradient(145deg,var(--hero-on),var(--hero-end));box-shadow:0 8px 22px rgba(11,90,84,.28);transition:box-shadow .25s,transform .12s}
-.node-box:active{transform:scale(.99)}
-.node-box-icon{flex:none;display:grid;place-items:center;width:44px;height:44px;border-radius:14px;background:rgba(255,255,255,.18)}
+/* the family box and, beside it, the black hole: one row, one way in (from above), one way out (below), one to the hole */
+.stage-mid{position:relative;z-index:2;display:flex;align-items:center;justify-content:center;gap:30px;width:100%;max-width:24rem}
+.node-box{display:flex;align-items:center;gap:12px;flex:1 1 auto;min-width:0;max-width:19rem;padding:13px 16px;border:0;border-radius:0;color:#fff;text-align:start;
+  background:var(--hero-on);--pxc:var(--hero-end);box-shadow:var(--px-border);transition:transform .12s steps(2)}
+.node-box:active{transform:translateY(2px)}
+.node-box-icon{flex:none;display:grid;place-items:center;width:44px;height:44px;border-radius:0;background:rgba(255,255,255,.18)}
 .node-box-icon svg{width:26px;height:26px}
 .node-box-text{display:grid;gap:1px;min-width:0}
 .node-box-name{font-size:1rem;font-weight:700;line-height:1.25}
 .node-box-sub{font-size:.8125rem;line-height:1.35;opacity:.92;min-height:1.35em;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 [lang="ar"] .node-box-sub{line-height:1.5}
-.node-box[data-tone="no"]{background:linear-gradient(145deg,#C0432F,#9E2E1C);box-shadow:0 8px 22px rgba(199,67,47,.38)}
+.node-box[data-tone="no"]{background:#B23A27;--pxc:#7E2416}
 .node-box[data-tone="no"] .node-box-sub{opacity:1}
-.node-box[data-tone="yes"]{box-shadow:0 8px 26px rgba(15,118,110,.45)}
-.node-box.is-checking{animation:box-ping .65s ease-out}
-.node-box.is-refusing{animation:box-shake .5s ease-out}
-@keyframes box-ping{0%{transform:scale(1)}35%{transform:scale(1.03)}100%{transform:scale(1)}}
+.node-box.is-checking{animation:box-ping .6s steps(3)}
+.node-box.is-refusing{animation:box-shake .48s steps(6)}
+@keyframes box-ping{0%{transform:translateY(0)}35%{transform:translateY(-3px)}100%{transform:translateY(0)}}
 @keyframes box-shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-4px)}40%{transform:translateX(4px)}60%{transform:translateX(-3px)}80%{transform:translateX(2px)}}
 
-.node-net{display:inline-flex;align-items:center;justify-content:center;gap:9px;width:100%;max-width:21rem;min-height:52px;padding:10px 18px;border-radius:999px;
-  background:var(--night);color:#fff;border:0;font-weight:700;font-size:.95rem;box-shadow:0 6px 18px rgba(30,37,71,.25);transition:box-shadow .3s,background-color .3s}
-.node-net svg{width:22px;height:22px}
-.node-net.is-reached{background:var(--night-2);box-shadow:0 0 0 6px rgba(43,165,151,.28)}
+.node-hole{position:relative;flex:none;display:grid;place-items:center;width:48px;height:48px;cursor:default}
+.node-hole::before{content:"";position:absolute;inset:0;
+  background:conic-gradient(var(--hole-arm) 0 8%,var(--hole) 8% 25%,var(--hole-arm) 25% 33%,var(--hole) 33% 50%,var(--hole-arm) 50% 58%,var(--hole) 58% 75%,var(--hole-arm) 75% 83%,var(--hole) 83%);
+  -webkit-mask:var(--px-circle) 0 0/100% 100% no-repeat;mask:var(--px-circle) 0 0/100% 100% no-repeat;animation:hole-spin 1.8s steps(12) infinite}
+.hole-core{position:relative;width:20px;height:20px;background:var(--hole-core);-webkit-mask:var(--px-circle) 0 0/100% 100% no-repeat;mask:var(--px-circle) 0 0/100% 100% no-repeat}
+.node-hole.is-eating{animation:hole-gulp .7s steps(4)}
+@keyframes hole-spin{to{transform:rotate(-360deg)}}
+@keyframes hole-gulp{0%,100%{transform:scale(1)}50%{transform:scale(1.2)}}
 
-/* the dotted "direct line": after a yes the device goes online by itself, not through the box */
-.rail-end{position:absolute;inset-inline-start:6px;width:2px;height:2px;z-index:1;pointer-events:none}
-.rail-a{top:70px}
-.rail-b{bottom:42px}
-.wire.is-direct .wire-base{stroke:var(--ink-2);stroke-width:2;stroke-dasharray:1 7;opacity:.5}
-.wire.is-direct .wire-flow{display:none}
-.pk.is-direct{padding:0;width:11px;height:11px;max-width:11px;border-width:0;background:var(--ink-2);box-shadow:0 0 0 4px rgba(77,98,95,.25)}
-.pk.is-direct .pk-badge,.pk.is-direct .pk-label{display:none}
-.node-example{border-style:dashed;border-color:var(--warn);background:transparent;box-shadow:none}
+.node-net{display:inline-flex;align-items:center;justify-content:center;gap:9px;width:100%;max-width:21rem;min-height:52px;padding:10px 18px;border:0;border-radius:0;
+  background:var(--night);--pxc:var(--night-2);box-shadow:var(--px-border);color:#fff;font-weight:700;font-size:.95rem;transition:background-color .3s steps(2)}
+.node-net svg{width:22px;height:22px}
+.node-net.is-reached{background:var(--night-2);--pxc:var(--lagoon)}
+.node-example{background:transparent;box-shadow:none;border:3px dashed var(--warn)}
 .node-example .node-ico{background:var(--dune);color:var(--dune-ink)}
 .node-example .sdot{background:var(--warn);opacity:1}
 .node-example .node-state{color:var(--dune-ink)}
 
-/* wires */
-.wire-base{stroke:var(--wire);stroke-width:3;stroke-linecap:round;fill:none}
-.wire-flow{stroke:var(--lagoon);stroke-width:3.5;stroke-linecap:round;stroke-dasharray:1 13;fill:none;opacity:0;transition:opacity .4s}
-.wire.is-active .wire-flow{opacity:.9;animation:wire-flow 1s linear infinite}
+/* wires: right angles, thin and solid (they meet on one bus without doubling up); square pellets run along a busy one */
+.wire-base{stroke:var(--wire);stroke-width:3;stroke-linecap:square;stroke-linejoin:miter;fill:none;shape-rendering:crispEdges}
+.wire-flow{stroke:var(--lagoon);stroke-width:5;stroke-linecap:butt;stroke-dasharray:5 15;fill:none;opacity:0;shape-rendering:crispEdges;transition:opacity .4s steps(2)}
+.wire.is-active .wire-flow{opacity:.9;animation:wire-flow .8s steps(4) infinite}
 .wire.is-ok .wire-base{stroke:var(--lagoon);opacity:.55}
-.wire.is-quiet .wire-base{stroke-dasharray:1 8}
-.wire.is-rest .wire-base{stroke-width:2.2;opacity:.8}
-.wire.is-off .wire-base{stroke:var(--night-2);stroke-dasharray:3 7;opacity:.8}
-.wire.is-warn .wire-base{stroke:var(--warn);stroke-dasharray:3 8}
+.wire.is-quiet .wire-base{opacity:.55}
+.wire.is-rest .wire-base{opacity:.8}
+.wire.is-off .wire-base{stroke:var(--night-2);opacity:.8}
+.wire.is-warn .wire-base{stroke:var(--warn);stroke-dasharray:6 6}
 .wire.is-warn .wire-flow,.wire.is-off .wire-flow{stroke:var(--warn)}
-@keyframes wire-flow{to{stroke-dashoffset:-28}}
+.wire.is-hole .wire-base{stroke:var(--coral);opacity:.4}
+.wire.is-hole .wire-flow{stroke:var(--coral)}
+@keyframes wire-flow{to{stroke-dashoffset:-20}}
 
-/* packets */
-.pk{position:absolute;left:0;top:0;display:flex;align-items:center;gap:5px;max-width:9.5rem;padding:3px 10px 3px 4px;border-radius:999px;
-  background:var(--surface);color:var(--ink);border:1.5px solid var(--lagoon);box-shadow:0 4px 12px rgba(18,44,41,.22);font-size:.75rem;font-weight:700;
-  line-height:1.2;white-space:nowrap;will-change:transform;--brand:var(--lagoon)}
-[dir="rtl"] .pk{padding:3px 4px 3px 10px}
-.pk-badge{flex:none;display:grid;place-items:center;min-width:19px;height:19px;border-radius:999px;background:var(--brand);color:#fff;font-size:.6875rem;
-  font-weight:700;direction:ltr;letter-spacing:.02em}
-.pk-badge[hidden]{display:none}
-.pk-label{overflow:hidden;text-overflow:ellipsis;min-width:0}
-.pk-label::before{content:"\2713\00a0";color:var(--lagoon)}
-.pk.is-blocked{border-color:var(--coral);background:var(--coral-soft);color:var(--coral-ink)}
-.pk.is-blocked .pk-label::before{content:"\2715\00a0";color:var(--coral)}
-.pk.is-memory{border-color:var(--mem)}
-.pk.is-memory .pk-label::before{content:"\21BA\00a0";color:var(--mem)}
-.pk.is-example{border-style:dashed;border-color:var(--warn)}
-.pk.is-example .pk-label::before{color:var(--warn)}
+/* packets: an 8-bit sprite on the wire. The words (app, "Looking up...") stay in the element, for the text list and for
+   tests, but the picture shows only the sprite: a Pac-Man on its way, a ghost with a cross for a no, a blue one when the
+   box answered from memory. Pixels are 2 px, from 11 x 11 grids. */
+.pk{position:absolute;left:0;top:0;width:22px;height:22px;will-change:transform}
+.pk-badge,.pk-label{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
+.pk-sprite{display:block;width:22px;height:22px;background:var(--pac);
+  -webkit-mask:var(--px-pac-open) 0 0/100% 100% no-repeat;mask:var(--px-pac-open) 0 0/100% 100% no-repeat;animation:pac-chomp .28s steps(1) infinite}
+.pk[data-dir="l"] .pk-sprite{transform:scaleX(-1)}
+.pk[data-dir="u"] .pk-sprite{transform:rotate(-90deg)}
+.pk[data-dir="d"] .pk-sprite{transform:rotate(90deg)}
+.pk.is-memory:not(.is-asking) .pk-sprite{background:var(--mem)}
+.pk.is-blocked:not(.is-asking) .pk-sprite{background:var(--coral);-webkit-mask-image:var(--px-ghost-a);mask-image:var(--px-ghost-a);animation:ghost-wave .3s steps(1) infinite}
+.pk.is-blocked:not(.is-asking)[data-dir] .pk-sprite{transform:none}
+.pk.is-blocked:not(.is-asking)::after{content:"\2715";position:absolute;top:-11px;inset-inline-end:-7px;font:800 12px/1 ui-monospace,Menlo,monospace;color:var(--coral-ink)}
+.pk.is-example .pk-sprite{opacity:.85}
+@keyframes pac-chomp{50%{-webkit-mask-image:var(--px-pac-shut);mask-image:var(--px-pac-shut)}}
+@keyframes ghost-wave{50%{-webkit-mask-image:var(--px-ghost-b);mask-image:var(--px-ghost-b)}}
 
 /* under the picture */
 .live-caption{margin:12px 18px 0;color:var(--ink-2);font-size:.9rem;line-height:1.5;min-height:3em}

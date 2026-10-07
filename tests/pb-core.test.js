@@ -124,6 +124,27 @@ test('pacer never exceeds the rate no matter how much traffic arrives', () => {
   assert.ok(p.queue.length <= 10);
 });
 
+test('wires: right angles, 8-bit style, and a row of devices meets on one bus', () => {
+  const w = C.elbow({ x: 20, y: 0 }, { x: 100, y: 100 });
+  assert.equal(w.d, 'M20 0L20 50L100 50L100 100', 'down to the halfway line, across, down');
+  assert.equal(w.total, 180);
+  assert.deepEqual(C.pointAt(w, 0), { x: 20, y: 0 });
+  assert.deepEqual(C.pointAt(w, 1), { x: 100, y: 100 });
+  assert.deepEqual(C.pointAt(w, 50 / 180), { x: 20, y: 50 }, 'the first corner');
+  assert.deepEqual(C.pointAt(w, 90 / 180), { x: 60, y: 50 }, 'halfway along the bus');
+  assert.deepEqual(C.pointAt(w, 7), { x: 100, y: 100 }, 'clamped');
+  const a = C.elbow({ x: 10, y: 0 }, { x: 100, y: 100 }), b = C.elbow({ x: 190, y: 0 }, { x: 100, y: 100 });
+  assert.equal(a.pts[1].y, b.pts[1].y, 'two devices in one row cross on the same line');
+  assert.deepEqual(a.pts[3], b.pts[3], 'and enter the box at the same point');
+  const h = C.elbow({ x: 0, y: 10 }, { x: 60, y: 10 });
+  assert.equal(h.d, 'M0 10L30 10L30 10L60 10', 'a level wire is straight');
+  assert.deepEqual(C.pointAt(h, 0.5), { x: 30, y: 10 });
+  const v = C.elbow({ x: 400, y: 0 }, { x: 100, y: 90 }, 'v');
+  assert.equal(v.d, 'M400 0L400 45L100 45L100 90', 'told to start downwards, it does, even when the wire is wider than tall');
+  const z = C.elbow({ x: 5, y: 5 }, { x: 5, y: 5 });
+  assert.deepEqual(C.pointAt(z, 0.5), { x: 5, y: 5 }, 'a wire of no length stays put');
+});
+
 test('wires: S-curves with exact ends, and points along them', () => {
   const w = C.wire({ x: 0, y: 0 }, { x: 100, y: 40 });
   assert.equal(w.d, 'M0 0C50 0 50 40 100 40');
