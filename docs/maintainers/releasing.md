@@ -14,7 +14,7 @@ setup" further down are the details of steps 1, 4 and 5 here.
 | *My box → About*: Privacy and Licence (`blob/master/docs/privacy.md`, `blob/master/LICENSE`), the website's privacy link | `web/links.json`, `site/app.js` | 2 |
 | README badge **CI** (`actions/workflows/ci.yml/badge.svg`) | README | 3 (it stays empty until one CI run exists on `master`) |
 | README link **Website** (`https://iret33.github.io/sinko/`) and the website's own address; the website's "Full instructions on GitHub" link (README, `#install`) | README, `site/` | 4 (Pages) |
-| The **boxes online** badge and the counter numbers on the website | commented out in the README; `statsUrl` in `site/config.js` | 5 (counter deployed) |
+| The **boxes online** badge and the counter numbers on the website | README (under the other badges); `statsUrl` in `site/config.js` | 5 (counter deployed) |
 | README badges **Total downloads** (`img.shields.io/github/downloads/iret33/sinko/total`), **Downloads of the latest release** (`.../downloads/iret33/sinko/latest/total`) and **Latest release** (`img.shields.io/github/v/release/iret33/sinko`) | README | 7 (the first release with its files; before it they show an error, "no releases" or zero) |
 | README badges **Stars** and **Last commit** (`img.shields.io/github/stars/iret33/sinko`, `.../last-commit/iret33/sinko`) | README | 1 (rename) |
 | The install one-liner (`releases/latest/download/install.sh`), and every box's update check and download (`api.github.com/repos/iret33/sinko/releases/latest`, `releases/latest/download/sinko.tar.gz`) | README, `docs/install.md`, the website, `install.sh`, `bin/sinko` | 7 |

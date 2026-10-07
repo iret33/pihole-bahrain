@@ -57,6 +57,9 @@ class Env(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         os.environ.pop("SINKO_TELEMETRY_URL", None)
+        builtin = mock.patch.object(pb, "TELEMETRY_URL", "")  # the release's built-in counter address must not leak into a test
+        builtin.start()
+        self.addCleanup(builtin.stop)
 
     def report(self, state, probe=None):
         lines = []

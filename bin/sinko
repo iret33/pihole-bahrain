@@ -75,14 +75,14 @@ import urllib.parse
 import urllib.request
 import zlib
 
-VERSION = "3.0.0"
+VERSION = "3.0.1"
 
 APP_DIR = os.environ.get("SINKO_APP_DIR", "/opt/sinko")
 LISTS_DIR = os.path.join(APP_DIR, "lists")
 CONFIG_FILE = os.environ.get("SINKO_CONFIG_FILE", "/etc/sinko/config")
 DEFAULT_LISTS_BASE = "https://raw.githubusercontent.com/iret33/sinko/master/lists"
 DEFAULT_STATE_DIR = "/var/lib/sinko"
-TELEMETRY_URL = ""          # the anonymous counter's address; empty = not configured, and then nothing is ever sent
+TELEMETRY_URL = "https://sinko-counter.sabdulla.workers.dev"          # the anonymous counter's address; empty = not configured, and then nothing is ever sent
 CLI_PW_FILE = os.environ.get("SINKO_CLI_PW_FILE", "/etc/pihole/cli_pw")
 
 G_KIDS = "pb-kids"          # marker: membership == "this is a kid device"

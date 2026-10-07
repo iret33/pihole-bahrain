@@ -127,6 +127,8 @@ class Box:
         self.stack.enter_context(mock.patch.dict(os.environ, env))
         for key in ("SINKO_RELEASE_BASE", "SINKO_RELEASE_API", "SINKO_REF", "SINKO_REPO", "SINKO_REPO_SLUG") + (() if counter else ("SINKO_TELEMETRY_URL",)):
             os.environ.pop(key, None)
+        if not counter:  # the release's built-in counter address must not leak into a test
+            self.stack.enter_context(mock.patch.object(pb, "TELEMETRY_URL", ""))
         self.stack.enter_context(mock.patch.object(pb, "CLI_PW_FILE", pw_file))
         self.stack.enter_context(mock.patch.object(pb, "load_catalog", lambda *a, **k: CATALOG))
         # Whatever would touch this machine, or a network that is not the fakes above, fails the test if it is ever reached.
