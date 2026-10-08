@@ -1,9 +1,11 @@
 ! Title: sinko / tiktok
 ! Format: Adblock-style, one ||domain^ per line
 ||amemv.com^
+||api-h2.tiktokv.com.ttdns2.com^
 ||bdurl.com^
 ||bytecdn.cn^
 ||bytedance.map.fastly.net^
+||bytefcdn-oversea.com^
 ||byteimg.com^
 ||byteoversea.com^
 ||douyin.com^
@@ -21,14 +23,20 @@
 ||pstatp.com^
 ||snssdk.com^
 ||tik-tokapi.com^
+||tiktok-row.net^
 ||tiktok.com^
+||tiktok.tps.dv.tech^
 ||tiktokcdn-eu.com^
 ||tiktokcdn-in.com^
 ||tiktokcdn-us.com^
 ||tiktokcdn.com^
 ||tiktokd.net^
 ||tiktokd.org^
+||tiktokglobalshopv.com^
+||tiktokpangle.us^
+||tiktokrow-cdn.com^
 ||tiktokv.com^
+||tiktokv.eu^
 ||tiktokv.us^
 ||tiktokw.us^
 ||toutiao.com^

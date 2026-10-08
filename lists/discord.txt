@@ -9,6 +9,7 @@
 ||discord.com^
 ||discord.dev^
 ||discord.gg^
+||discord.media^
 ||discord.new^
 ||discordactivities.com^
 ||discordapp.com^
@@ -16,7 +17,6 @@
 ||discordapp.net^
 ||discordcdn.com^
 ||discordmerch.com^
-||discordpartygames.com^
 ||discordsays.com^
 ||discordstatus.com^
 ||hammerandchisel.ssl.zendesk.com^

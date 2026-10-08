@@ -6,4 +6,5 @@
 ||fb.com^
 ||fb.me^
 ||fb.watch^
+||fbsbx.com^
 ||messenger.com^

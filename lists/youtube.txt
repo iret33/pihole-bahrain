@@ -34,7 +34,10 @@
 ||youtube.se^
 ||youtube.sg^
 ||youtube.tv^
+||youtubeembeddedplayer.googleapis.com^
 ||youtubei.googleapis.com^
 ||youtubekids.com^
 ||yt3.ggpht.com^
+||yt4.ggpht.com^
 ||ytimg.com^
+||ytimg.l.google.com^

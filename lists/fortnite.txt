@@ -1,5 +1,7 @@
 ! Title: sinko / fortnite
 ! Format: Adblock-style, one ||domain^ per line
+||cdn1.unrealengine.com^
+||cdn2.unrealengine.com^
 ||epicgames.com^
 ||epicgames.dev^
 ||fortnite.com^

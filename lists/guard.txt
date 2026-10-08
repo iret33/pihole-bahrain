@@ -1,5 +1,7 @@
 ! Title: sinko / guard
 ! Format: Adblock-style, one ||domain^ per line
+! Pi-hole answers these three with NXDOMAIN on purpose, and does not block them: Firefox and iCloud read that
+! answer as "turn off my own DNS bypass". They are kept here as documentation and do no harm.
 ||cloudflare-dns.com^
 ||dns-family.adguard.com^
 ||dns.adguard-dns.com^

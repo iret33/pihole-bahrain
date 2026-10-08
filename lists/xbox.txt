@@ -1,13 +1,11 @@
 ! Title: sinko / xbox
 ! Format: Adblock-style, one ||domain^ per line
 ||gamepass.com^
-||xbox-global.ifs.windows.com^
 ||xbox-guide-public.rec.mp.microsoft.com^
 ||xbox.com^
 ||xbox.ipv6.microsoft.com^
 ||xboxab.com^
 ||xboxab.net^
 ||xboxlive.co^
-||xboxlive.com.c.footprint.net^
 ||xboxlive.com^
 ||xboxservices.com^

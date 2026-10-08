@@ -1,6 +1,7 @@
 ! Title: sinko / chatgpt
 ! Format: Adblock-style, one ||domain^ per line
 ||chatgpt.com^
+||ios.chat.openai.com.cdn.cloudflare.net^
 ||oaistatic.com^
 ||oaiusercontent.com^
 ||openai.com^

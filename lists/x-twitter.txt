@@ -1,13 +1,19 @@
 ! Title: sinko / x-twitter
 ! Format: Adblock-style, one ||domain^ per line
 ||ads-twitter.com^
+||api-stream.twitter.com.cdn.cloudflare.net^
 ||cms-twdigitalassets.com^
+||dualstack.twimg.twitter.map.fastly.net^
+||dualstack.video.twitter.map.fastly.net^
+||dynamic.x.com.cdn.cloudflare.net^
 ||periscope.tv^
+||probe.twitter.com.cdn.cloudflare.net^
 ||pscp.tv^
 ||t.co^
 ||tellapart.com^
 ||tweetdeck.com^
 ||twimg.com^
+||twimg.twitter.map.fastly.net^
 ||twitpic.com^
 ||twitter.biz^
 ||twitter.co^
