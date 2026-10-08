@@ -2,6 +2,8 @@
 ! Format: Adblock-style, one ||domain^ per line
 ||gpubgm.com^
 ||igamecj.com^
+||napubgm.broker.amsoveasea.com^
 ||proximabeta.com^
 ||pubg.com^
+||pubgm.yzfchat.com^
 ||pubgmobile.com^
