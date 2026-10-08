@@ -38,7 +38,7 @@ class VersionTests(unittest.TestCase):
             text = fh.read().strip()
         self.assertEqual(text, pb.VERSION)
         self.assertRegex(text, pb.SEMVER_RE.pattern)
-        self.assertEqual(pb.VERSION, "3.0.3")
+        self.assertEqual(pb.VERSION, "3.0.4")
 
 
 class LegacyConfigTests(unittest.TestCase):
