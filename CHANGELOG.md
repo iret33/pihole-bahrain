@@ -3,6 +3,21 @@
 All notable changes to Sinko. Versions follow [Semantic Versioning](https://semver.org); the newest release is at the top.
 Boxes learn about a release from this repository's GitHub releases, whose notes are the section of this file.
 
+## [3.0.4] - 2026-10-08
+
+### Fixed
+- **Blocked apps are blocked on more of what they use.** Instagram, YouTube, X, TikTok, Facebook, ChatGPT, Fortnite,
+  PUBG and Discord now have the hosts their apps were seen to use that the lists missed (for example Instagram and
+  YouTube video and sign-in servers). Every list was checked against a real Pi-hole with each service blocked on its own
+  device: every listed host and every subdomain of it is blocked, and no service blocks another.
+- Nine names that no longer resolve on public DNS were removed from the PlayStation, Xbox and Discord lists.
+
+### Known limits
+- A block stops new lookups. An app that already has a connection open keeps working until that connection drops.
+- A device has to be added on the box before a block applies to it.
+- Instagram images come from a host under the shared `fbcdn.net` domain. It is not blocked as a whole, because that would
+  also block Facebook and Messenger images.
+
 ## [3.0.3] - 2026-10-07
 
 ### Changed

@@ -75,7 +75,7 @@ import urllib.parse
 import urllib.request
 import zlib
 
-VERSION = "3.0.3"
+VERSION = "3.0.4"
 
 APP_DIR = os.environ.get("SINKO_APP_DIR", "/opt/sinko")
 LISTS_DIR = os.path.join(APP_DIR, "lists")
