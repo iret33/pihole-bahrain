@@ -3,7 +3,14 @@
 ||cdninstagram.com^
 ||api.facebook.com^
 ||c10r.facebook.com^
+||edge-mqtt.facebook.com^
+||edge-mqtt-fallback.facebook.com^
 ||gateway.facebook.com^
+||graph.facebook.com^
+||graph-fallback.facebook.com^
+||instagram.fbah1-1.fna.fbcdn.net^
+||instagram.fbah6-1.fna.fbcdn.net^
+||instagram.fbah9-1.fna.fbcdn.net^
 ||ig.me^
 ||igcdn.com^
 ||igsonar.com^
