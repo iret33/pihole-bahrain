@@ -124,8 +124,8 @@ window.SINKO_STRINGS = {
     shotPanelArAlt: 'The Sinko home page in Arabic, laid out right to left',
     shotLive: 'The live picture',
     shotLiveAlt: 'The live picture: each device on top, the family box in the middle and the internet below',
-    shotBox: 'My box: updates, health and settings',
-    shotBoxAlt: 'The My box sheet: update, health of the box, network, backup and the anonymous counter',
+    shotBox: 'My box: updates, health and addresses',
+    shotBoxAlt: 'The My box sheet: updates, how the box is doing, and the addresses that open the page',
 
     faqTitle: 'Questions',
     q1: 'Does it work on mobile data or with a VPN?',
@@ -266,8 +266,8 @@ window.SINKO_STRINGS = {
     shotPanelArAlt: 'الصفحة الرئيسية لسينكو بالعربية، مرتّبة من اليمين إلى اليسار',
     shotLive: 'الصورة الحيّة',
     shotLiveAlt: 'الصورة الحيّة: كل جهاز في الأعلى، وصندوق العائلة في الوسط، والإنترنت في الأسفل',
-    shotBox: 'صندوقي: التحديثات وحالة الصندوق والإعدادات',
-    shotBoxAlt: 'صفحة صندوقي: التحديث وحالة الصندوق والشبكة والنسخ الاحتياطي والعدّاد المجهول',
+    shotBox: 'صندوقي: التحديثات وحالة الصندوق والعناوين',
+    shotBoxAlt: 'صفحة صندوقي: التحديثات وحالة الصندوق والعناوين التي تفتح الصفحة',
 
     faqTitle: 'أسئلة شائعة',
     q1: 'هل يعمل مع بيانات الجوال أو VPN؟',

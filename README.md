@@ -27,21 +27,25 @@ Parental controls that live on a small box in your home, in Arabic and English.<
 </p>
 
 <p align="center">
-  <img src="docs/img/desktop-en.png" alt="The Sinko parent page on a computer" width="720">
+  <img src="docs/img/desktop-en.png" alt="The main page on a computer. Left: Children are online, 3 of 19 apps blocked, a Turn internet off button, a note that a newer Sinko is ready, and the live picture drawn as a circuit board, with Sara's iPad, Ali's phone and everyone else above the family box, a black hole beside it and the internet below. Right: the quick modes Homework, Free time and Offline break, and the apps and sites, with TikTok, YouTube and Roblox blocked" width="720"><br>
+  <sub>The main page on a computer: what is happening now and the live picture on the left, quick modes and the apps on the right</sub>
 </p>
 
 <p align="center">
-  <img src="docs/img/panel-en.png" alt="Phone: Children are online, Turn internet off, Homework, Free time, Bedtime" height="460">
+  <img src="docs/img/panel-en.png" alt="Phone: the main page in English. Children are online, 3 of 19 apps blocked, a Turn internet off button, a note that a newer Sinko is ready, and the top of the live picture" height="460">
   &nbsp;
-  <img src="docs/img/live-en.png" alt="Phone: the live picture of what the box allows and stops" height="460">
+  <img src="docs/img/live-en.png" alt="Phone: the live picture card. A circuit board with Sara's iPad, Ali's phone and everyone else at the top, the family box in the middle with a black hole beside it, and the internet at the bottom; under it, how many checks the box made and stopped for the whole home in the last 24 hours" height="460">
   &nbsp;
-  <img src="docs/img/panel-ar.png" alt="The same page in Arabic, right to left" height="460">
+  <img src="docs/img/panel-ar.png" alt="Phone: the same main page in Arabic, laid out right to left" height="460"><br>
+  <sub>On a phone: the main page, the live picture with the last 24 hours, and the main page in Arabic</sub>
 </p>
 
 <details align="center"><summary><b>My box</b>: updates, health and addresses (tap to see)</summary>
-<p align="center"><img src="docs/img/box-en.png" alt="My box, with updates, health and addresses" width="300">
-&nbsp;<img src="docs/img/box-ar.png" alt="My box in Arabic" width="300"></p>
+<p align="center"><img src="docs/img/box-en.png" alt="My box on a phone: a newer Sinko ready to install, how the box is doing (filtering on, running for 3 days, its temperature, memory and clock) and the addresses that open the page" width="300">
+&nbsp;<img src="docs/img/box-ar.png" alt="The same My box sheet in Arabic, laid out right to left" width="300"></p>
 </details>
+
+<p align="center"><sub>The pictures come from a demo box (<a href="tools/make-screenshots.py"><code>tools/make-screenshots.py</code></a>): the names, the numbers and the update on offer are examples.</sub></p>
 
 Sinko is a simple page for parents, on top of [Pi-hole](https://pi-hole.net) v6. Every phone, tablet and console at home
 asks a small box in your house "where is this app?" first, and the box says yes or no. From your phone you can:
