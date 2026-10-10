@@ -27,14 +27,14 @@ Parental controls that live on a small box in your home, in Arabic and English.<
 </p>
 
 <p align="center">
-  <img src="docs/img/desktop-en.png" alt="The main page on a computer. Left: Children are online, 3 of 19 apps blocked, a Turn internet off button, a note that a newer Sinko is ready, and the live picture of Sara's iPad, Ali's phone and everyone else asking the family box. Right: the quick modes Homework, Free time and Offline break, and the apps and sites, with TikTok, YouTube and Roblox blocked" width="720"><br>
+  <img src="docs/img/desktop-en.png" alt="The main page on a computer. Left: Children are online, 3 of 19 apps blocked, a Turn internet off button, a note that a newer Sinko is ready, and the live picture drawn as a circuit board, with Sara's iPad, Ali's phone and everyone else above the family box, a black hole beside it and the internet below. Right: the quick modes Homework, Free time and Offline break, and the apps and sites, with TikTok, YouTube and Roblox blocked" width="720"><br>
   <sub>The main page on a computer: what is happening now and the live picture on the left, quick modes and the apps on the right</sub>
 </p>
 
 <p align="center">
-  <img src="docs/img/panel-en.png" alt="Phone: the main page in English. Children are online, 3 of 19 apps blocked, a Turn internet off button, a note that a newer Sinko is ready, and the live picture with the family box saying no to TikTok on Sara's iPad" height="460">
+  <img src="docs/img/panel-en.png" alt="Phone: the main page in English. Children are online, 3 of 19 apps blocked, a Turn internet off button, a note that a newer Sinko is ready, and the top of the live picture" height="460">
   &nbsp;
-  <img src="docs/img/live-en.png" alt="Phone: the live picture card. Sara's iPad, Ali's phone and everyone else above the family box and the internet; under it the whole home in the last 24 hours: 2,609 checked, 315 stopped, 12% stopped" height="460">
+  <img src="docs/img/live-en.png" alt="Phone: the live picture card. A circuit board with Sara's iPad, Ali's phone and everyone else at the top, the family box in the middle with a black hole beside it, and the internet at the bottom; under it, how many checks the box made and stopped for the whole home in the last 24 hours" height="460">
   &nbsp;
   <img src="docs/img/panel-ar.png" alt="Phone: the same main page in Arabic, laid out right to left" height="460"><br>
   <sub>On a phone: the main page, the live picture with the last 24 hours, and the main page in Arabic</sub>
